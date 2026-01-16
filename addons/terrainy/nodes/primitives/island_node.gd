@@ -1,0 +1,64 @@
+@tool
+class_name IslandNode
+extends PrimitiveNode
+
+const PrimitiveNode = preload("res://addons/terrainy/nodes/primitives/primitive_node.gd")
+
+## An island terrain feature with beaches and elevation
+
+@export var beach_width: float = 0.2:
+	set(value):
+		beach_width = clamp(value, 0.0, 0.5)
+		parameters_changed.emit()
+
+@export var beach_height: float = 1.0:
+	set(value):
+		beach_height = value
+		parameters_changed.emit()
+
+@export var noise: FastNoiseLite:
+	set(value):
+		noise = value
+		if noise and not noise.changed.is_connected(_on_noise_changed):
+			noise.changed.connect(_on_noise_changed)
+		parameters_changed.emit()
+
+@export var noise_strength: float = 0.3:
+	set(value):
+		noise_strength = value
+		parameters_changed.emit()
+
+func _ready() -> void:
+	if not noise:
+		noise = FastNoiseLite.new()
+		noise.seed = randi()
+		noise.frequency = 0.05
+		noise.fractal_octaves = 3
+
+func _on_noise_changed() -> void:
+	parameters_changed.emit()
+
+func get_height_at(world_pos: Vector3) -> float:
+	var local_pos = to_local(world_pos)
+	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
+	
+	if distance_2d >= influence_radius:
+		return 0.0
+	
+	var normalized_distance = distance_2d / influence_radius
+	var result_height = 0.0
+	
+	# Beach zone
+	if normalized_distance < beach_width:
+		result_height = beach_height
+	else:
+		# Rising inland
+		var inland_t = (normalized_distance - beach_width) / (1.0 - beach_width)
+		result_height = beach_height + (height - beach_height) * pow(1.0 - inland_t, 1.5)
+	
+	# Add noise variation
+	if noise:
+		var noise_value = noise.get_noise_2d(world_pos.x, world_pos.z)
+		result_height += result_height * noise_value * noise_strength
+	
+	return max(0.0, result_height)

@@ -1,0 +1,28 @@
+[gd_scene load_steps=5 format=3 uid="uid://b7x280tq4b4un"]
+
+[ext_resource type="Script" uid="uid://bvnbjheswdsy0" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_0bhed"]
+[ext_resource type="Script" uid="uid://dru71ftjlqkij" path="res://addons/terrainy/nodes/landscapes/mountain_range_node.gd" id="2_0bhed"]
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_m0rpm"]
+seed = 1712791584
+frequency = 0.008
+fractal_octaves = 2
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_c6xj6"]
+seed = -1086065466
+frequency = 0.05
+fractal_octaves = 4
+
+[node name="Node3D" type="Node3D"]
+
+[node name="TerrainComposer" type="Node3D" parent="."]
+script = ExtResource("1_0bhed")
+terrain_size = Vector2(1024, 1024)
+metadata/_custom_type_script = "uid://bvnbjheswdsy0"
+
+[node name="MountainRangeNode" type="Node3D" parent="TerrainComposer"]
+script = ExtResource("2_0bhed")
+peak_noise = SubResource("FastNoiseLite_m0rpm")
+detail_noise = SubResource("FastNoiseLite_c6xj6")
+influence_radius = 76.720924
+metadata/_custom_type_script = "uid://dru71ftjlqkij"
