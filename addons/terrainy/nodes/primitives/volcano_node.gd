@@ -23,6 +23,10 @@ const PrimitiveNode = preload("res://addons/terrainy/nodes/primitives/primitive_
 
 func get_height_at(world_pos: Vector3) -> float:
 	var local_pos = to_local(world_pos)
+	return get_height_at_safe(world_pos, local_pos)
+
+## Thread-safe version using pre-computed local position
+func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
 	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
 	
 	var radius = influence_size.x

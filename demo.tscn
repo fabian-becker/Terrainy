@@ -1,4 +1,4 @@
-[gd_scene load_steps=20 format=3 uid="uid://b7x280tq4b4un"]
+[gd_scene load_steps=21 format=3 uid="uid://b7x280tq4b4un"]
 
 [ext_resource type="Script" uid="uid://bvnbjheswdsy0" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_0bhed"]
 [ext_resource type="Texture2D" uid="uid://c30o87vyn3121" path="res://textures/sky_23_2k.png" id="1_jbdfk"]
@@ -12,6 +12,7 @@
 [ext_resource type="Texture2D" uid="uid://clbv4gc1wkj7w" path="res://textures/snow/snow_01_nor_gl_2k.jpg" id="9_36gju"]
 [ext_resource type="Texture2D" uid="uid://cphiu0x3nblrb" path="res://textures/snow/snow_01_rough_2k.jpg" id="10_tql22"]
 [ext_resource type="Script" uid="uid://ck4gtrjpc6yu2" path="res://addons/terrainy/nodes/basic/noise_terrain_node.gd" id="12_36gju"]
+[ext_resource type="Script" uid="uid://dhj8ktxmw3t6s" path="res://addons/terrainy/nodes/primitives/hill_node.gd" id="13_36gju"]
 
 [sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_4gl14"]
 panorama = ExtResource("1_jbdfk")
@@ -93,3 +94,7 @@ smoothing = 1
 smoothing_radius = 8.0
 metadata/_custom_type_script = "uid://ck4gtrjpc6yu2"
 metadata/_gizmo_manipulating = false
+
+[node name="HillNode" type="Node3D" parent="TerrainComposer"]
+script = ExtResource("13_36gju")
+metadata/_custom_type_script = "uid://dhj8ktxmw3t6s"
