@@ -38,6 +38,9 @@ func get_height_at(world_pos: Vector3) -> float:
 ## Get the influence weight at a given world position (0.0 to 1.0)
 ## Based on distance from center and falloff settings
 func get_influence_weight(world_pos: Vector3) -> float:
+	if not is_inside_tree():
+		return 0.0
+	
 	var local_pos = to_local(world_pos)
 	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
 	

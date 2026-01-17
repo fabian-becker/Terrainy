@@ -365,6 +365,9 @@ func _calculate_height_at(world_pos: Vector3) -> float:
 	
 	# Collect all feature contributions
 	for feature in _feature_nodes:
+		if not is_instance_valid(feature) or not feature.is_inside_tree():
+			continue
+		
 		if not feature.visible:
 			continue
 		
