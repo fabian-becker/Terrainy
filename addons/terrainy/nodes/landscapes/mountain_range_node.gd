@@ -45,6 +45,10 @@ func _ready() -> void:
 
 func get_height_at(world_pos: Vector3) -> float:
 	var local_pos = to_local(world_pos)
+	return get_height_at_safe(world_pos, local_pos)
+
+## Thread-safe version using pre-computed local position
+func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
 	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
 	
 	var radius = influence_size.x
@@ -70,7 +74,7 @@ func get_height_at(world_pos: Vector3) -> float:
 		var peak_variation = peak_noise.get_noise_1d(along_ridge)
 		result_height *= 0.7 + peak_variation * 0.3
 	
-	# Add detail
+	# Add detail using world coordinates (FastNoiseLite is thread-safe)
 	if detail_noise:
 		var detail = detail_noise.get_noise_2d(world_pos.x, world_pos.z)
 		result_height += result_height * detail * 0.2

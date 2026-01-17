@@ -7,39 +7,10 @@ const TerrainTextureLayer = preload("res://addons/terrainy/resources/terrain_tex
 const TerrainMeshGenerator = preload("res://addons/terrainy/nodes/terrain_mesh_generator.gd")
 
 ## Main terrain composer that blends all TerrainFeatureNodes and generates final mesh
-##
-## OPTIMIZATION SYSTEM:
-## This terrain system implements a hybrid optimization approach combining:
-## 
-## 1. HEIGHT CACHE (use_height_cache):
-##    - Stores pre-calculated heights for all terrain vertices
-##    - Separates height calculation from mesh generation
-##    - Allows for faster mesh updates when only geometry needs recalculation
-##
-## 2. DIRTY REGION TRACKING (use_partial_updates):
-##    - Tracks which areas of terrain are affected by property changes
-##    - Only recalculates heights for affected regions
-##    - Dramatically speeds up local feature changes (moving hills, craters, etc.)
-##
-## 3. SMART INVALIDATION:
-##    - Different property changes trigger different update paths:
-##      * Global properties (terrain_size, resolution) -> Full rebuild
-##      * Feature changes -> Partial update of influenced area only
-##      * Base height -> Update all heights but keep topology
-##
-## 4. GENERATION CANCELLATION:
-##    - Can cancel ongoing mesh generation when new changes arrive
-##    - Prevents wasted work when user makes rapid successive changes
-##    - Debouncing system batches rapid changes into single update
-##
-## PERFORMANCE CHARACTERISTICS:
-## - Full rebuild: Same as before (all vertices recalculated)
-## - Feature change: Only affected vertices updated (10-90% speedup depending on influence area)
-## - Rapid changes: Automatically canceled and batched (no wasted work)
 
 signal terrain_updated
 signal texture_layers_changed
-signal generation_progress(stage: String, progress: float)  # Progress updates during generation
+signal generation_progress(stage: String, progress: float) 
 
 @export var terrain_size: Vector2 = Vector2(100, 100):
 	set(value):
@@ -76,6 +47,11 @@ signal generation_progress(stage: String, progress: float)  # Progress updates d
 @export var use_threaded_generation: bool = true
 
 @export_group("Optimization")
+@export var use_parallel_height_calculation: bool = true
+@export var max_height_threads: int = 8:
+	set(value):
+		max_height_threads = clamp(value, 1, 16)
+
 @export var use_height_cache: bool = true:
 	set(value):
 		use_height_cache = value
@@ -198,10 +174,12 @@ func _ready() -> void:
 	_request_update()
 
 func _scan_for_features() -> void:
-	# Disconnect old signals before clearing (no need for while loop with lambda approach)
+	# Disconnect old signals before clearing
 	for feature in _feature_nodes:
-		if is_instance_valid(feature) and feature.parameters_changed.is_connected(_on_feature_changed):
-			feature.parameters_changed.disconnect(_on_feature_changed)
+		if is_instance_valid(feature):
+			# Disconnect all connections to avoid duplicate signals
+			while feature.parameters_changed.is_connected(_on_feature_changed):
+				feature.parameters_changed.disconnect(_on_feature_changed)
 	
 	_feature_nodes.clear()
 	_scan_node_recursive(self)
@@ -219,12 +197,13 @@ func _scan_node_recursive(node: Node) -> void:
 func _connect_feature_signals() -> void:
 	for feature in _feature_nodes:
 		if is_instance_valid(feature):
-			# Disconnect any existing connections first
-			if feature.parameters_changed.is_connected(_on_feature_changed):
+			# Disconnect all existing connections from this feature to our handler
+			# We need to disconnect from this composer's method, not from the feature
+			while feature.parameters_changed.is_connected(_on_feature_changed):
 				feature.parameters_changed.disconnect(_on_feature_changed)
 			
-			# Connect fresh (use a lambda to capture the feature)
-			feature.parameters_changed.connect(func(): _on_feature_changed(feature))
+			# Connect once (use a lambda to capture the feature)
+			feature.parameters_changed.connect(func(): _on_feature_changed(feature), CONNECT_DEFERRED)
 			
 			if show_optimization_stats:
 				print("[TerrainComposer] Connected signal for feature: %s" % feature.name)
@@ -404,6 +383,12 @@ func rebuild_terrain() -> void:
 	_update_terrain()
 
 func _update_terrain() -> void:
+	# Prevent concurrent updates
+	if _is_generating:
+		if show_optimization_stats:
+			print("[TerrainComposer] Update blocked - generation already in progress")
+		return
+	
 	# Decide whether to do full rebuild or partial update
 	if not use_partial_updates or _full_rebuild_needed or not _height_cache_valid:
 		_update_terrain_full()
@@ -460,6 +445,11 @@ func _update_terrain_partial_immediate() -> void:
 	_dirty_regions.clear()
 
 func _update_terrain_immediate() -> void:
+	_is_generating = true
+	
+	if show_optimization_stats:
+		print("[TerrainComposer] Immediate update - use_height_cache: %s" % use_height_cache)
+	
 	# Build/update height cache first if enabled
 	if use_height_cache:
 		await _build_height_cache()
@@ -478,6 +468,7 @@ func _update_terrain_immediate() -> void:
 	# Defer collision to next frame to keep responsive
 	call_deferred("_update_collision")
 	terrain_updated.emit()
+	_is_generating = false
 
 func _update_terrain_threaded() -> void:
 	# Don't start a new generation if one is already running
@@ -647,24 +638,46 @@ func _build_height_cache() -> void:
 	if show_optimization_stats:
 		print("[TerrainComposer] Building height cache with %d active features..." % active_features.size())
 	
-	# Calculate all heights in batches
-	var batch_size = 1024
-	var index = 0
-	for z in range(resolution + 1):
-		for x in range(resolution + 1):
-			var local_x = (x * step.x) - half_size.x
-			var local_z = (z * step.y) - half_size.y
-			var world_pos = to_global(Vector3(local_x, 0, local_z))
-			
-			# Optimized height calculation with pre-filtered features
-			_height_cache[index] = _calculate_height_at_fast(world_pos, active_features)
-			index += 1
-			
-			# Yield every batch to keep editor responsive
-			if index % batch_size == 0:
-				if show_optimization_stats:
-					print("  Progress: %d/%d (%.1f%%)" % [index, total_points, (index * 100.0) / total_points])
-				await get_tree().process_frame
+	# Pre-calculate feature influence data for thread-safe processing
+	# Capture ALL transform and node data on main thread
+	var feature_data: Array[Dictionary] = []
+	for feature in active_features:
+		var max_influence = max(feature.influence_size.x, feature.influence_size.y)
+		
+		# Capture transform data (can't call to_local in threads)
+		var inverse_transform = feature.global_transform.affine_inverse()
+		
+		# Capture all feature parameters that might need node access
+		var data = {
+			"feature": feature,  # Keep reference for main-thread calls
+			"position": feature.global_position,
+			"inverse_transform": inverse_transform,  # For thread-safe to_local
+			"max_influence_sq": max_influence * max_influence * 1.5,
+			"influence_size": feature.influence_size,
+			"influence_shape": feature.influence_shape,
+			"edge_falloff": feature.edge_falloff,
+			"strength": feature.strength,
+			"blend_mode": feature.blend_mode,
+			# Capture modifier flags (check if property exists first)
+			"enable_smoothing": feature.enable_smoothing if "enable_smoothing" in feature else false,
+			"enable_min_clamp": feature.enable_min_clamp if "enable_min_clamp" in feature else false,
+			"enable_max_clamp": feature.enable_max_clamp if "enable_max_clamp" in feature else false,
+			"min_height": feature.min_height if "min_height" in feature else 0.0,
+			"max_height": feature.max_height if "max_height" in feature else 100.0
+		}
+		
+		feature_data.append(data)
+	
+	# Choose parallel or sequential height calculation
+	if show_optimization_stats:
+		print("[TerrainComposer] Parallel enabled: %s, Active features: %d" % [use_parallel_height_calculation, active_features.size()])
+	
+	if use_parallel_height_calculation and active_features.size() > 0:
+		await _build_heights_parallel(feature_data, step, half_size, total_points)
+	else:
+		if show_optimization_stats:
+			print("[TerrainComposer] Using sequential (parallel: %s, features: %d)" % [use_parallel_height_calculation, active_features.size()])
+		await _build_heights_sequential(feature_data, step, half_size, total_points)
 	
 	_height_cache_valid = true
 	_is_building_cache = false
@@ -674,6 +687,150 @@ func _build_height_cache() -> void:
 		print("[TerrainComposer] Height cache built (%d points) in %d ms (%.2f ms/1000 points)" % [
 			total_points, elapsed, (elapsed * 1000.0) / total_points
 		])
+
+## Parallel height calculation using WorkerThreadPool
+func _build_heights_parallel(feature_data: Array[Dictionary], step: Vector2, half_size: Vector2, total_points: int) -> void:
+	# Split work into batches that can be processed in parallel
+	var num_threads = min(OS.get_processor_count(), max_height_threads)
+	var batch_size = ceili(float(total_points) / num_threads)
+	
+	if show_optimization_stats:
+		print("[TerrainComposer] Using %d parallel threads (batch size: %d)" % [num_threads, batch_size])
+	
+	# Capture transform data for threads (can't call to_global in threads)
+	var global_transform_captured = global_transform
+	
+	# Create tasks for parallel height calculation
+	var tasks: Array = []
+	for thread_id in range(num_threads):
+		var start_idx = thread_id * batch_size
+		var end_idx = min(start_idx + batch_size, total_points)
+		
+		if start_idx >= total_points:
+			break
+		
+		# Create a worker function that calculates heights for this batch
+		var worker = func():
+			for idx in range(start_idx, end_idx):
+				var z = idx / (resolution + 1)
+				var x = idx % (resolution + 1)
+				
+				var local_x = (x * step.x) - half_size.x
+				var local_z = (z * step.y) - half_size.y
+				var local_pos = Vector3(local_x, 0, local_z)
+				var world_pos = global_transform_captured * local_pos
+				
+				# Calculate height using thread-safe pre-captured data
+				var height = base_height
+				for data in feature_data:
+					# Spatial culling with cached position
+					var dist_sq = world_pos.distance_squared_to(data.position)
+					if dist_sq > data.max_influence_sq:
+						continue
+					
+					# Thread-safe influence weight calculation using pre-captured transform
+					var feature_local_pos = data.inverse_transform * world_pos
+					var feature_local_2d = Vector2(feature_local_pos.x, feature_local_pos.z)
+					
+					var distance: float
+					var max_distance: float
+					
+					# Calculate influence based on shape (thread-safe - no node access)
+					match data.influence_shape:
+						0: # CIRCLE
+							distance = feature_local_2d.length()
+							max_distance = data.influence_size.x
+						1: # RECTANGLE
+							var normalized = Vector2(
+								abs(feature_local_2d.x) / data.influence_size.x,
+								abs(feature_local_2d.y) / data.influence_size.y
+							)
+							distance = max(normalized.x, normalized.y)
+							max_distance = 1.0
+						_:
+							distance = feature_local_2d.length()
+							max_distance = data.influence_size.x
+					
+					# Calculate weight with falloff
+					if distance > max_distance:
+						continue
+					
+					var weight = 1.0
+					var falloff_start = max_distance * (1.0 - data.edge_falloff)
+					if distance > falloff_start and data.edge_falloff > 0.0:
+						var falloff_distance = distance - falloff_start
+						var falloff_range = max_distance - falloff_start
+						weight = 1.0 - smoothstep(0.0, falloff_range, falloff_distance)
+					
+					if weight <= 0.001:
+						continue
+					
+					# Get height using thread-safe method with pre-computed local position
+					var feature = data.feature
+					var h = feature.get_height_at_safe(world_pos, feature_local_pos)
+					
+					# Apply modifiers using cached data (thread-safe)
+					if data.enable_min_clamp:
+						h = max(h, data.min_height)
+					if data.enable_max_clamp:
+						h = min(h, data.max_height)
+					
+					var weighted_h = h * weight * data.strength
+					
+					match data.blend_mode:
+						0: height += weighted_h
+						1: height = max(height, weighted_h)
+						2: height = min(height, weighted_h)
+						3: height *= (1.0 + weighted_h)
+						4: height += weighted_h
+				
+				_height_cache[idx] = height
+		
+		var task_id = WorkerThreadPool.add_task(worker)
+		tasks.append(task_id)
+	
+	# Wait for all tasks to complete with progress updates
+	var completed = 0
+	var last_progress = 0
+	while completed < tasks.size():
+		await get_tree().process_frame
+		var new_completed = 0
+		for task_id in tasks:
+			if WorkerThreadPool.is_task_completed(task_id):
+				new_completed += 1
+		
+		if new_completed > completed:
+			completed = new_completed
+			var progress = int((completed * 100.0) / tasks.size())
+			if show_optimization_stats and progress != last_progress and progress % 25 == 0:
+				print("  Threads completed: %d/%d (%d%%)" % [completed, tasks.size(), progress])
+				last_progress = progress
+	
+	# Ensure all tasks are finished
+	for task_id in tasks:
+		WorkerThreadPool.wait_for_task_completion(task_id)
+
+## Sequential height calculation (fallback)
+func _build_heights_sequential(feature_data: Array[Dictionary], step: Vector2, half_size: Vector2, total_points: int) -> void:
+	var yield_frequency = 16384
+	var index = 0
+	
+	if show_optimization_stats:
+		print("[TerrainComposer] Using sequential calculation (parallel disabled)")
+	
+	for z in range(resolution + 1):
+		for x in range(resolution + 1):
+			var local_x = (x * step.x) - half_size.x
+			var local_z = (z * step.y) - half_size.y
+			var world_pos = to_global(Vector3(local_x, 0, local_z))
+			
+			_height_cache[index] = _calculate_height_at_cached(world_pos, feature_data)
+			index += 1
+			
+			if index % yield_frequency == 0:
+				if show_optimization_stats:
+					print("  Progress: %.1f%%" % ((index * 100.0) / total_points))
+				await get_tree().process_frame
 
 ## Update only the heights in dirty regions
 func _update_dirty_regions_in_cache() -> void:
@@ -994,6 +1151,47 @@ func _calculate_height_at_fast(world_pos: Vector3, active_features: Array) -> fl
 				final_height *= (1.0 + data.height * data.weight)
 			4: # Average
 				final_height += data.height * data.weight
+	
+	return final_height
+
+## Ultra-fast height calculation with pre-cached feature data
+func _calculate_height_at_cached(world_pos: Vector3, feature_data: Array[Dictionary]) -> float:
+	var final_height = base_height
+	
+	# Quick path for no features
+	if feature_data.is_empty():
+		return final_height
+	
+	# Optimized loop with minimal allocations
+	for data in feature_data:
+		# Spatial culling with cached values - no property lookups
+		var dist_sq = world_pos.distance_squared_to(data.position)
+		if dist_sq > data.max_influence_sq:
+			continue
+		
+		var feature = data.feature
+		var weight = feature.get_influence_weight(world_pos)
+		if weight <= 0.001:
+			continue
+		
+		var height = feature.get_height_at(world_pos)
+		if feature.has_method("_apply_modifiers"):
+			height = feature._apply_modifiers(world_pos, height)
+		
+		var weighted_height = height * weight * data.strength
+		
+		# Inline blending for speed (avoid dictionary allocation)
+		match data.blend_mode:
+			0: # Add
+				final_height += weighted_height
+			1: # Max
+				final_height = max(final_height, weighted_height)
+			2: # Min
+				final_height = min(final_height, weighted_height)
+			3: # Multiply
+				final_height *= (1.0 + weighted_height)
+			4: # Average
+				final_height += weighted_height
 	
 	return final_height
 

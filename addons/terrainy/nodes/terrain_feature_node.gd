@@ -113,6 +113,13 @@ var _smoothing_cache: Dictionary = {}
 func get_height_at(world_pos: Vector3) -> float:
 	return 0.0
 
+## Thread-safe version: Generate height from pre-computed local AND world position
+## This avoids calling to_local() which requires main thread
+## Override this in derived classes for thread-safe parallel processing
+func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
+	# Default: just call regular version (derived classes should override)
+	return get_height_at(world_pos)
+
 ## Get the influence weight at a given world position (0.0 to 1.0)
 ## Based on distance from center and falloff settings
 func get_influence_weight(world_pos: Vector3) -> float:
