@@ -52,6 +52,10 @@ The `TerrainComposer` node provides several options:
 
 0.1.0
 
+## License
+
+MIT License - see [LICENSE](LICENSE) for details
+
 ## Author
 
 LuckyTeapot
