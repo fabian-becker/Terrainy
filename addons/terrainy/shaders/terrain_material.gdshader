@@ -32,6 +32,8 @@ uniform vec4 layer_pbr_params[MAX_LAYERS];
 uniform vec4 layer_texture_flags[MAX_LAYERS];
 // [has_ao, use_height_curve, use_slope_curve, unused]
 uniform vec4 layer_extra_flags[MAX_LAYERS];
+// Future-proof: maps layer index → texture array slice (currently just identity)
+uniform int layer_texture_index[MAX_LAYERS];
 
 // World space parameters for blending
 uniform float world_height_offset = 0.0;
@@ -71,8 +73,37 @@ float fbm(vec2 p) {
 	return value;
 }
 
+// Triplanar blend weights based on normal
+vec3 triplanar_weights(vec3 normal) {
+	vec3 blend = abs(normal);
+	// Sharpen the blend with power
+	blend = pow(blend, vec3(4.0));
+	blend /= (blend.x + blend.y + blend.z);
+	return blend;
+}
+
+// Sample texture with triplanar projection
+vec4 sample_triplanar(sampler2DArray tex_array, int layer_idx, vec3 position, vec2 uv_scale, vec2 uv_offset, vec3 blend_weights) {
+	vec2 uv_x = (position.zy / max(uv_scale, vec2(0.001))) + uv_offset;
+	vec2 uv_y = (position.xz / max(uv_scale, vec2(0.001))) + uv_offset;
+	vec2 uv_z = (position.xy / max(uv_scale, vec2(0.001))) + uv_offset;
+	
+	vec4 col_x = texture(tex_array, vec3(uv_x, float(layer_idx)));
+	vec4 col_y = texture(tex_array, vec3(uv_y, float(layer_idx)));
+	vec4 col_z = texture(tex_array, vec3(uv_z, float(layer_idx)));
+	
+	return col_x * blend_weights.x + col_y * blend_weights.y + col_z * blend_weights.z;
+}
+
+// Reoriented Normal Mapping (RNM) blend
+vec3 blend_rnm(vec3 n1, vec3 n2) {
+	n1 = n1 * vec3(2.0, 2.0, 2.0) + vec3(-1.0, -1.0, 0.0);
+	n2 = n2 * vec3(-2.0, -2.0, 2.0) + vec3(1.0, 1.0, -1.0);
+	return normalize(n1 * dot(n1, n2) - n2 * n1.z);
+}
+
 // Calculate blend weight for a layer based on height and slope
-float calculate_layer_weight(int layer_idx, float world_height, float slope_angle, vec2 world_xz) {
+float calculate_layer_weight(int layer_idx, float world_height, float slope_angle, float height_noise) {
 	vec4 hs_params = layer_height_slope_params[layer_idx];
 	vec4 blend_params = layer_blend_params[layer_idx];
 	
@@ -80,14 +111,14 @@ float calculate_layer_weight(int layer_idx, float world_height, float slope_angl
 	float height_max = hs_params.y;
 	float height_falloff = hs_params.z;
 	float slope_min = hs_params.w;
-	float slope_max = blend_params.x;
-	float slope_falloff = blend_params.y;
-	float layer_strength = blend_params.z;
+	// FIX: Correct unpacking order to match terrain_composer.gd packing
+	float layer_strength = blend_params.x;  // was .z
+	float slope_max = blend_params.y;       // was .x
+	float slope_falloff = blend_params.z;   // was .y
 	
 	float weight = 1.0;
 	
-	// Add noise-based height variation to break up horizontal banding
-	float height_noise = fbm(world_xz / blend_noise_scale) * 2.0 - 1.0;
+	// Use precomputed height noise (computed once per fragment)
 	float adjusted_height = world_height + height_noise * blend_noise_strength;
 	
 	// Height influence with smoother falloff
@@ -140,110 +171,110 @@ void fragment() {
 	float slope_angle = acos(clamp(NORMAL.y, 0.0, 1.0)); // In radians
 	vec2 world_xz = vec2(world_pos.x, world_pos.z);
 	
+	// OPTIMIZATION: Compute noise ONCE per fragment for all layers
+	float height_noise = fbm(world_xz / blend_noise_scale) * 2.0 - 1.0;
+	
+	// Triplanar blend weights
+	vec3 tri_blend = triplanar_weights(NORMAL);
+	
 	// Handle case when no layers exist
 	if (layer_count == 0) {
-		ALBEDO = vec3(0.5);
+		ALBEDO = vec3(1.0, 0.0, 1.0);  // Magenta for visibility
 		ROUGHNESS = 0.8;
 		METALLIC = 0.0;
 		AO = 1.0;
 	} else {
-		// Calculate blend weights for all layers
+		// OPTIMIZATION: Single-pass weight calculation and normalization
 		float weights[MAX_LAYERS];
 		float total_weight = 0.0;
 		
 		for (int i = 0; i < layer_count && i < MAX_LAYERS; i++) {
-			weights[i] = calculate_layer_weight(i, world_height, slope_angle, world_xz);
+			// Pass precomputed noise instead of recalculating
+			weights[i] = calculate_layer_weight(i, world_height, slope_angle, height_noise);
 			total_weight += weights[i];
 		}
 		
-		// Normalize weights with minimum threshold to ensure smooth blending
+		// Normalize weights
 		if (total_weight > 0.001) {
 			for (int i = 0; i < layer_count && i < MAX_LAYERS; i++) {
 				weights[i] /= total_weight;
 			}
 		} else {
-			// No layers contribute - use first layer with full weight
+			// No layers contribute - use first layer
 			if (layer_count > 0) {
 				weights[0] = 1.0;
-				total_weight = 1.0;
 			}
 		}
 		
-		// Blend all layers
+		// Blend all layers with triplanar projection
 		vec3 final_albedo = vec3(0.0);
-		vec3 final_normal_map = vec3(0.0, 0.0, 0.0);
+		vec3 final_normal = vec3(0.5, 0.5, 1.0);  // Start with flat normal in [0,1] space
 		float final_roughness = 0.0;
 		float final_metallic = 0.0;
 		float final_ao = 0.0;
 		
 		for (int i = 0; i < layer_count && i < MAX_LAYERS; i++) {
-			if (weights[i] < 0.001) continue;
+			float weight = weights[i];
+			if (weight < 0.001) continue;
 			
 			// Get layer parameters
 			vec4 uv_params = layer_uv_params[i];
-			// Use world-space XZ coordinates for texture mapping to prevent swimming
-			// Scale controls texture density: smaller values = larger tiles
-			vec2 world_uv = vec2(world_pos.x, world_pos.z);
-			vec2 layer_uv = (world_uv / max(uv_params.xy, vec2(0.001, 0.001))) + uv_params.zw;
+			vec2 uv_scale = uv_params.xy;
+			vec2 uv_offset = uv_params.zw;
 			vec4 color_normal = layer_color_normal[i];
 			vec4 pbr_params = layer_pbr_params[i];
 			vec4 tex_flags = layer_texture_flags[i];
 			vec4 extra_flags = layer_extra_flags[i];
 			
-			// Sample albedo
+			int tex_idx = i;  // Future: use layer_texture_index[i]
+			
+			// Sample albedo with triplanar
 			vec3 albedo = color_normal.rgb;
 			if (tex_flags.x > 0.5) { // has_albedo
-				albedo *= texture(albedo_textures, vec3(layer_uv, float(i))).rgb;
+				albedo *= sample_triplanar(albedo_textures, tex_idx, world_pos, uv_scale, uv_offset, tri_blend).rgb;
 			}
 			
-			// Sample normal and convert to tangent space [-1, 1]
-			vec3 layer_normal_tangent = vec3(0.0, 0.0, 1.0);
+			// Sample normal with triplanar and apply RNM blending
 			if (tex_flags.y > 0.5) { // has_normal
-				vec3 normal_sample = texture(normal_textures, vec3(layer_uv, float(i))).rgb;
-				// Convert from [0,1] to [-1,1] tangent space
-				vec3 normal_ts = normal_sample * 2.0 - 1.0;
-				// Apply strength by lerping between flat normal and sampled normal
-				// Clamp strength to prevent overly harsh normals
-				float normal_strength = clamp(color_normal.w, 0.0, 1.0);
-				layer_normal_tangent = mix(vec3(0.0, 0.0, 1.0), normal_ts, normal_strength * 0.5);
-				layer_normal_tangent = normalize(layer_normal_tangent);
+				vec3 normal_sample = sample_triplanar(normal_textures, tex_idx, world_pos, uv_scale, uv_offset, tri_blend).rgb;
+				// Apply strength
+				float normal_strength = clamp(color_normal.w, 0.0, 2.0);
+				normal_sample = mix(vec3(0.5, 0.5, 1.0), normal_sample, normal_strength);
+				// RNM blend with accumulator
+				final_normal = blend_rnm(final_normal, normal_sample);
 			}
 			
-			// Sample roughness
+			// Sample roughness with triplanar
 			float roughness = pbr_params.x;
 			if (tex_flags.z > 0.5) { // has_roughness
-				roughness *= texture(roughness_textures, vec3(layer_uv, float(i))).r;
+				roughness *= sample_triplanar(roughness_textures, tex_idx, world_pos, uv_scale, uv_offset, tri_blend).r;
 			}
 			
-			// Sample metallic
+			// Sample metallic with triplanar
 			float metallic_val = pbr_params.y;
 			if (tex_flags.w > 0.5) { // has_metallic
-				metallic_val *= texture(metallic_textures, vec3(layer_uv, float(i))).r;
+				metallic_val *= sample_triplanar(metallic_textures, tex_idx, world_pos, uv_scale, uv_offset, tri_blend).r;
 			}
 			
-			// Sample AO
+			// Sample AO with triplanar
 			float ao = 1.0;
 			if (extra_flags.x > 0.5) { // has_ao
-				ao = mix(1.0, texture(ao_textures, vec3(layer_uv, float(i))).r, pbr_params.z);
+				ao = mix(1.0, sample_triplanar(ao_textures, tex_idx, world_pos, uv_scale, uv_offset, tri_blend).r, pbr_params.z);
 			}
 			
-			// Simple weighted blend (weights are already normalized to sum to 1.0)
-			float weight = weights[i];
+			// Weighted blend for non-normal properties
 			final_albedo += albedo * weight;
-			final_normal_map += layer_normal_tangent * weight;
 			final_roughness += roughness * weight;
 			final_metallic += metallic_val * weight;
 			final_ao += ao * weight;
 		}
 		
-		// Normalize the blended normal vector and soften it
-		vec3 final_normal = normalize(final_normal_map);
-		// Blend normal with flat normal to reduce harshness
-		final_normal = normalize(mix(vec3(0.0, 0.0, 1.0), final_normal, 0.7));
+		// Convert final normal from [0,1] to [-1,1] for NORMAL_MAP
+		vec3 final_normal_ts = final_normal * 2.0 - 1.0;
 		
 		// Output
 		ALBEDO = final_albedo;
-		NORMAL_MAP = final_normal;
+		NORMAL_MAP = normalize(final_normal_ts);
 		ROUGHNESS = clamp(final_roughness, 0.0, 1.0);
 		METALLIC = clamp(final_metallic, 0.0, 1.0);
 		AO = clamp(final_ao, 0.0, 1.0);

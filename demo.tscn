@@ -1,7 +1,11 @@
-[gd_scene load_steps=10 format=3 uid="uid://megrg78jfp83"]
+[gd_scene load_steps=15 format=3 uid="uid://megrg78jfp83"]
 
 [ext_resource type="Script" uid="uid://b03v1mqy58bj4" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_0bhed"]
-[ext_resource type="Script" uid="uid://ck4gtrjpc6yu2" path="res://addons/terrainy/nodes/basic/noise_terrain_node.gd" id="2_m0rpm"]
+[ext_resource type="Script" uid="uid://dru71ftjlqkij" path="res://addons/terrainy/nodes/landscapes/mountain_range_node.gd" id="2_0bhed"]
+[ext_resource type="Script" uid="uid://ddlru3rps1tmg" path="res://addons/terrainy/resources/terrain_texture_layer.gd" id="2_kem5a"]
+[ext_resource type="Resource" uid="uid://capvahs7dnlxf" path="res://textures/rocky_terrain/rocky_terrain.tres" id="3_gxmxl"]
+[ext_resource type="Resource" uid="uid://dh8b8e3m2ucl7" path="res://textures/rock/rocky.tres" id="4_n4w22"]
+[ext_resource type="Resource" uid="uid://rnmk18jlmr5v" path="res://textures/snow/snow.tres" id="5_884kg"]
 
 [sub_resource type="Gradient" id="Gradient_kem5a"]
 interpolation_mode = 2
@@ -39,10 +43,15 @@ fog_mode = 1
 fog_density = 1.0
 adjustment_enabled = true
 
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_m0rpm"]
+seed = -702277543
+frequency = 0.008
+fractal_octaves = 2
+
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_c6xj6"]
-noise_type = 3
-seed = -1445708933
+seed = -1125165996
 frequency = 0.05
+fractal_octaves = 4
 
 [node name="Node3D" type="Node3D"]
 
@@ -59,12 +68,15 @@ script = ExtResource("1_0bhed")
 terrain_size = Vector2(1024, 1024)
 resolution = 512
 base_height = 1.0
+texture_layers = Array[ExtResource("2_kem5a")]([ExtResource("3_gxmxl"), ExtResource("4_n4w22"), ExtResource("5_884kg")])
 metadata/_custom_type_script = "uid://b03v1mqy58bj4"
 
-[node name="PerlinNoiseNode" type="Node3D" parent="TerrainComposer"]
-script = ExtResource("2_m0rpm")
-noise = SubResource("FastNoiseLite_c6xj6")
-influence_size = Vector2(107.92975, 107.92975)
-blend_mode = 3
-metadata/_custom_type_script = "uid://ck4gtrjpc6yu2"
+[node name="MountainRangeNode" type="Node3D" parent="TerrainComposer"]
+script = ExtResource("2_0bhed")
+peak_noise = SubResource("FastNoiseLite_m0rpm")
+detail_noise = SubResource("FastNoiseLite_c6xj6")
+height = 203.62354
+influence_size = Vector2(539.9198, 539.9198)
+smoothing = 3
+metadata/_custom_type_script = "uid://dru71ftjlqkij"
 metadata/_gizmo_manipulating = false

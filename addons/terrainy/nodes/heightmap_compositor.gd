@@ -58,21 +58,26 @@ func compose_gpu(
 	
 	var start_time = Time.get_ticks_msec()
 	
-	# Create output texture
+	# Create output texture (R32F for 4x less bandwidth than RGBA32F)
 	var output_format := RDTextureFormat.new()
 	output_format.width = resolution.x
 	output_format.height = resolution.y
-	output_format.format = RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT
+	output_format.format = RenderingDevice.DATA_FORMAT_R32_SFLOAT
 	output_format.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
 	
 	var output_texture := _rd.texture_create(output_format, RDTextureView.new())
 	
+	# Clamp to 32 layers max (shader limitation)
+	var layer_count = mini(feature_heightmaps.size(), 32)
+	if feature_heightmaps.size() > 32:
+		push_warning("[HeightmapCompositor] Too many layers (%d), clamping to 32" % feature_heightmaps.size())
+	
 	# Flatten heightmap data into single buffer
 	var total_pixels = resolution.x * resolution.y
 	var heightmap_buffer_data := PackedFloat32Array()
-	heightmap_buffer_data.resize(total_pixels * feature_heightmaps.size())
+	heightmap_buffer_data.resize(total_pixels * layer_count)
 	
-	for layer_idx in range(feature_heightmaps.size()):
+	for layer_idx in range(layer_count):
 		var img = feature_heightmaps[layer_idx]
 		for y in range(resolution.y):
 			for x in range(resolution.x):
@@ -82,9 +87,9 @@ func compose_gpu(
 	
 	# Flatten influence data into single buffer
 	var influence_buffer_data := PackedFloat32Array()
-	influence_buffer_data.resize(total_pixels * influence_maps.size())
+	influence_buffer_data.resize(total_pixels * layer_count)
 	
-	for layer_idx in range(influence_maps.size()):
+	for layer_idx in range(layer_count):
 		var img = influence_maps[layer_idx]
 		for y in range(resolution.y):
 			for x in range(resolution.x):
@@ -122,7 +127,7 @@ func compose_gpu(
 	
 	# Parameters buffer
 	var params_data := PackedInt32Array([
-		feature_heightmaps.size(),
+		layer_count,
 		0,  # padding
 		resolution.x,
 		resolution.y
@@ -184,16 +189,9 @@ func compose_gpu(
 	_rd.submit()
 	_rd.sync()
 	
-	# Read back result
+	# Read back result (already in R32F format, no conversion needed)
 	var output_bytes := _rd.texture_get_data(output_texture, 0)
-	var result_image := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RGBAF, output_bytes)
-	
-	# Convert to single channel
-	var final_image := Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
-	for y in range(resolution.y):
-		for x in range(resolution.x):
-			var pixel := result_image.get_pixel(x, y)
-			final_image.set_pixel(x, y, Color(pixel.r, 0, 0, 1))
+	var final_image := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, output_bytes)
 	
 	# Cleanup
 	_rd.free_rid(output_texture)
