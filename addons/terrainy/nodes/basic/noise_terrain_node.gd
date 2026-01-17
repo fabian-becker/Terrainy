@@ -5,6 +5,10 @@ extends NoiseNode
 const NoiseNode = preload("res://addons/terrainy/nodes/basic/noise_node.gd")
 
 ## Terrain feature using Perlin noise for organic variation
+##
+## TIP: Noise terrain can look rough. Use Modifiers to improve appearance:
+## - Set "Smoothing" to LIGHT or MEDIUM for smoother rolling hills
+## - Enable "Terracing" for stylized, stepped terrain
 
 func _ready() -> void:
 	if not noise:

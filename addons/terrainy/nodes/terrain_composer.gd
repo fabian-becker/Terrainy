@@ -138,6 +138,7 @@ var _dirty_regions: Array[Rect2] = []
 var _full_rebuild_needed: bool = true
 var _cached_resolution: int = 0
 var _cached_terrain_size: Vector2 = Vector2.ZERO
+var _is_building_cache: bool = false
 
 # Optimization: Update queue and cancellation
 var _update_queue: Array[Dictionary] = []
@@ -350,10 +351,7 @@ func _add_dirty_region(rect: Rect2) -> void:
 
 func _process(delta: float) -> void:
 	if _update_queued:
-		_debounce_timer -= delta
-		if show_optimization_stats and int(_debounce_timer * 10) % 3 == 0:
-			print("[TerrainComposer] Debounce timer: %.2f" % _debounce_timer)
-		
+		_debounce_timer -= delta		
 		if _debounce_timer <= 0.0:
 			_update_queued = false
 			_debounce_timer = 0.0
@@ -592,7 +590,11 @@ func _capture_feature_data() -> Array:
 		var feature_copy = feature  # Capture in closure
 		var height_func = func(world_pos: Vector3) -> float:
 			# This will be called from main thread during capture to create lookup
-			return feature_copy.get_height_at(world_pos)
+			var height = feature_copy.get_height_at(world_pos)
+			# Apply modifiers
+			if feature_copy.has_method("_apply_modifiers"):
+				height = feature_copy._apply_modifiers(world_pos, height)
+			return height
 		
 		# Capture all data we need from this feature node
 		var data = {
@@ -614,6 +616,16 @@ func _capture_feature_data() -> Array:
 
 ## Initialize or update the height cache
 func _build_height_cache() -> void:
+	# Prevent concurrent cache building
+	if _is_building_cache:
+		if show_optimization_stats:
+			print("[TerrainComposer] Cache build already in progress, waiting...")
+		while _is_building_cache:
+			await get_tree().process_frame
+		return
+	
+	_is_building_cache = true
+	
 	var total_points = (resolution + 1) * (resolution + 1)
 	
 	# Check if we need to resize the cache
@@ -641,6 +653,8 @@ func _build_height_cache() -> void:
 				await get_tree().process_frame
 	
 	_height_cache_valid = true
+	_is_building_cache = false
+	
 	if show_optimization_stats:
 		print("[TerrainComposer] Height cache built (%d points)" % total_points)
 
@@ -876,6 +890,9 @@ func _calculate_height_at(world_pos: Vector3) -> float:
 		var weight = feature.get_influence_weight(world_pos)
 		if weight > 0.001:
 			var height = feature.get_height_at(world_pos)
+			# Apply modifiers to the height
+			if feature.has_method("_apply_modifiers"):
+				height = feature._apply_modifiers(world_pos, height)
 			weighted_heights.append({
 				"height": height,
 				"weight": weight * feature.strength,
