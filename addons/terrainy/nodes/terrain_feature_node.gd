@@ -117,10 +117,54 @@ enum BlendMode {
 # Cache for smoothed height values
 var _smoothing_cache: Dictionary = {}
 
+# Internal cache for heightmap generation
+var _heightmap_dirty: bool = true
+
 ## Generate height value at a given world position
 ## Override this in derived classes
 func get_height_at(world_pos: Vector3) -> float:
 	return 0.0
+
+## Generate a heightmap for this feature
+## This is the new primary method for terrain generation
+func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:
+	var start_time = Time.get_ticks_msec()
+	
+	# Create heightmap image (RF = single channel float)
+	var heightmap = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
+	
+	# Calculate step size
+	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
+	
+	# Generate heightmap
+	for y in range(resolution.y):
+		for x in range(resolution.x):
+			var world_x = terrain_bounds.position.x + (x * step.x)
+			var world_z = terrain_bounds.position.y + (y * step.y)
+			var world_pos = Vector3(world_x, 0, world_z)
+			
+			# Get height with modifiers applied
+			var height = get_height_at(world_pos)
+			height = _apply_modifiers(world_pos, height)
+			
+			# Store in heightmap
+			heightmap.set_pixel(x, y, Color(height, 0, 0, 1))
+	
+	_heightmap_dirty = false
+	
+	var elapsed = Time.get_ticks_msec() - start_time
+	if Engine.is_editor_hint():
+		print("[%s] Generated %dx%d heightmap in %d ms" % [name, resolution.x, resolution.y, elapsed])
+	
+	return heightmap
+
+## Mark heightmap as dirty (needs regeneration)
+func mark_dirty() -> void:
+	_heightmap_dirty = true
+
+## Check if heightmap needs regeneration
+func is_dirty() -> bool:
+	return _heightmap_dirty
 
 ## Thread-safe version: Generate height from pre-computed local AND world position
 ## This avoids calling to_local() which requires main thread
@@ -334,6 +378,7 @@ func _is_gizmo_manipulating() -> bool:
 
 ## Helper to emit parameters_changed signal only when not manipulating via gizmo
 func _commit_parameter_change() -> void:
+	_heightmap_dirty = true
 	if not _is_gizmo_manipulating():
 		parameters_changed.emit()
 		if Engine.is_editor_hint():

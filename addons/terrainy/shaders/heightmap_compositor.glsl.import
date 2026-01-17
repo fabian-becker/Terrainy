@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://b7avf35rq1lo3"
+path="res://.godot/imported/heightmap_compositor.glsl-a76d2e10ef78ac1ba994eed67af7952b.res"
+
+[deps]
+
+source_file="res://addons/terrainy/shaders/heightmap_compositor.glsl"
+dest_files=["res://.godot/imported/heightmap_compositor.glsl-a76d2e10ef78ac1ba994eed67af7952b.res"]
+
+[params]
+

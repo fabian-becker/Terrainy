@@ -1,11 +1,7 @@
-[gd_scene load_steps=14 format=3 uid="uid://megrg78jfp83"]
+[gd_scene load_steps=10 format=3 uid="uid://megrg78jfp83"]
 
-[ext_resource type="Script" uid="uid://b03v1mqy58bj4" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_c6xj6"]
-[ext_resource type="Script" uid="uid://ddlru3rps1tmg" path="res://addons/terrainy/resources/terrain_texture_layer.gd" id="2_n4w22"]
-[ext_resource type="Resource" uid="uid://capvahs7dnlxf" path="res://textures/rocky_terrain/rocky_terrain.tres" id="3_884kg"]
-[ext_resource type="Resource" uid="uid://dh8b8e3m2ucl7" path="res://textures/rock/rocky.tres" id="4_d4o4o"]
-[ext_resource type="Resource" uid="uid://rnmk18jlmr5v" path="res://textures/snow/snow.tres" id="5_gdsc3"]
-[ext_resource type="Script" uid="uid://b06n2v4b3hlyt" path="res://addons/terrainy/nodes/primitives/mountain_node.gd" id="6_kem5a"]
+[ext_resource type="Script" uid="uid://b03v1mqy58bj4" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_0bhed"]
+[ext_resource type="Script" uid="uid://ck4gtrjpc6yu2" path="res://addons/terrainy/nodes/basic/noise_terrain_node.gd" id="2_m0rpm"]
 
 [sub_resource type="Gradient" id="Gradient_kem5a"]
 interpolation_mode = 2
@@ -43,8 +39,10 @@ fog_mode = 1
 fog_density = 1.0
 adjustment_enabled = true
 
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_gxmxl"]
-fractal_type = 2
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_c6xj6"]
+noise_type = 3
+seed = -1445708933
+frequency = 0.05
 
 [node name="Node3D" type="Node3D"]
 
@@ -57,19 +55,16 @@ light_energy = 0.4
 shadow_enabled = true
 
 [node name="TerrainComposer" type="Node3D" parent="."]
-script = ExtResource("1_c6xj6")
+script = ExtResource("1_0bhed")
 terrain_size = Vector2(1024, 1024)
 resolution = 512
-texture_layers = Array[ExtResource("2_n4w22")]([ExtResource("3_884kg"), ExtResource("4_d4o4o"), ExtResource("5_gdsc3")])
+base_height = 1.0
 metadata/_custom_type_script = "uid://b03v1mqy58bj4"
 
-[node name="MountainNode" type="Node3D" parent="TerrainComposer"]
-script = ExtResource("6_kem5a")
-peak_type = 1
-noise = SubResource("FastNoiseLite_gxmxl")
-height = 130.0
-influence_size = Vector2(269.0068, 269.0068)
-smoothing = 3
-smoothing_radius = 6.0
-metadata/_custom_type_script = "uid://b06n2v4b3hlyt"
+[node name="PerlinNoiseNode" type="Node3D" parent="TerrainComposer"]
+script = ExtResource("2_m0rpm")
+noise = SubResource("FastNoiseLite_c6xj6")
+influence_size = Vector2(107.92975, 107.92975)
+blend_mode = 3
+metadata/_custom_type_script = "uid://ck4gtrjpc6yu2"
 metadata/_gizmo_manipulating = false
