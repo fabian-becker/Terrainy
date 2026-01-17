@@ -28,6 +28,27 @@ A hybrid node-based and spatial terrain editor for Godot 4 with live preview and
 - Perlin Noise
 - Voronoi patterns
 
+### Terrain Modifiers
+
+All terrain features support modifiers that can be applied to adjust their appearance:
+
+**Smoothing**
+- **None**: No smoothing applied (default)
+- **Light**: Subtle smoothing for reducing sharp edges
+- **Medium**: Balanced smoothing for most use cases
+- **Heavy**: Strong smoothing for very rounded terrain
+
+Smoothing is particularly useful for reducing the spikiness of procedural terrain like mountains and noise patterns. Adjust the `smoothing_radius` to control the area of influence.
+
+**Terracing**
+- Creates stepped, layered terrain effects
+- Adjust `terrace_levels` for the number of steps
+- Control `terrace_smoothness` for hard edges vs smooth transitions
+
+**Height Clamping**
+- Limit minimum and/or maximum height values
+- Useful for creating plateaus or preventing extreme elevation changes
+
 ## Installation
 
 1. Copy the `addons/terrainy` folder to your Godot project's `addons` directory

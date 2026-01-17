@@ -5,6 +5,11 @@ extends LandscapeNode
 const LandscapeNode = preload("res://addons/terrainy/nodes/landscapes/landscape_node.gd")
 
 ## A mountain range terrain feature
+##
+## TIP: Mountains can appear very spiky by default. Try using the Modifiers:
+## - Set "Smoothing" to MEDIUM or HEAVY for more natural-looking peaks
+## - Adjust "Smoothing Radius" to 2.0-4.0 for best results
+## - Enable "Terracing" with 8-12 levels for a layered mountain effect
 
 @export var ridge_sharpness: float = 0.5:
 	set(value):

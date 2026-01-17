@@ -12,6 +12,13 @@ enum InfluenceShape {
 	ELLIPSE
 }
 
+enum SmoothingMode {
+	NONE,
+	LIGHT,
+	MEDIUM,
+	HEAVY
+}
+
 ## Shape of the influence area
 @export var influence_shape: InfluenceShape = InfluenceShape.CIRCLE:
 	set(value):
@@ -41,6 +48,65 @@ enum InfluenceShape {
 	set(value):
 		strength = value
 		_commit_parameter_change()
+
+@export_group("Modifiers")
+
+## Smoothing level to apply to the terrain feature
+@export var smoothing: SmoothingMode = SmoothingMode.NONE:
+	set(value):
+		smoothing = value
+		_smoothing_cache.clear()
+		_commit_parameter_change()
+
+## Smoothing radius (in world units) - larger values = more smoothing
+@export_range(0.5, 10.0) var smoothing_radius: float = 2.0:
+	set(value):
+		smoothing_radius = value
+		_smoothing_cache.clear()
+		_commit_parameter_change()
+
+## Enable terracing effect (creates stepped layers)
+@export var enable_terracing: bool = false:
+	set(value):
+		enable_terracing = value
+		_commit_parameter_change()
+
+## Number of terrace levels
+@export_range(2, 20) var terrace_levels: int = 5:
+	set(value):
+		terrace_levels = value
+		_commit_parameter_change()
+
+## Smoothness of terrace transitions (0.0 = hard steps, 1.0 = smooth)
+@export_range(0.0, 1.0) var terrace_smoothness: float = 0.2:
+	set(value):
+		terrace_smoothness = value
+		_commit_parameter_change()
+
+## Clamp minimum height
+@export var enable_min_clamp: bool = false:
+	set(value):
+		enable_min_clamp = value
+		_commit_parameter_change()
+
+@export var min_height: float = 0.0:
+	set(value):
+		min_height = value
+		_commit_parameter_change()
+
+## Clamp maximum height
+@export var enable_max_clamp: bool = false:
+	set(value):
+		enable_max_clamp = value
+		_commit_parameter_change()
+
+@export var max_height: float = 100.0:
+	set(value):
+		max_height = value
+		_commit_parameter_change()
+
+# Cache for smoothed height values
+var _smoothing_cache: Dictionary = {}
 
 ## Generate height value at a given world position
 ## Override this in derived classes
@@ -116,8 +182,111 @@ func get_influence_weight(world_pos: Vector3) -> float:
 ## Get the final blended height contribution at a position
 func get_blended_height_at(world_pos: Vector3) -> float:
 	var height = get_height_at(world_pos)
+	
+	# Apply modifiers
+	height = _apply_modifiers(world_pos, height)
+	
 	var weight = get_influence_weight(world_pos)
 	return height * weight * strength
+
+## Apply all enabled modifiers to the height value
+func _apply_modifiers(world_pos: Vector3, base_height: float) -> float:
+	var height = base_height
+	
+	# Apply smoothing
+	if smoothing != SmoothingMode.NONE:
+		height = _apply_smoothing(world_pos, height)
+	
+	# Apply terracing
+	if enable_terracing:
+		height = _apply_terracing(height)
+	
+	# Apply height clamping
+	if enable_min_clamp:
+		height = max(height, min_height)
+	if enable_max_clamp:
+		height = min(height, max_height)
+	
+	return height
+
+## Apply smoothing to the height value
+func _apply_smoothing(world_pos: Vector3, center_height: float) -> float:
+	# Cache key based on position (rounded to improve cache hits)
+	var grid_size = smoothing_radius * 0.5
+	var cache_key = Vector3i(
+		int(world_pos.x / grid_size),
+		0,
+		int(world_pos.z / grid_size)
+	)
+	
+	if _smoothing_cache.has(cache_key):
+		return _smoothing_cache[cache_key]
+	
+	var sample_count: int
+	var sample_radius: float
+	
+	match smoothing:
+		SmoothingMode.LIGHT:
+			sample_count = 4
+			sample_radius = smoothing_radius * 0.5
+		SmoothingMode.MEDIUM:
+			sample_count = 8
+			sample_radius = smoothing_radius
+		SmoothingMode.HEAVY:
+			sample_count = 12
+			sample_radius = smoothing_radius * 1.5
+		_:
+			return center_height
+	
+	# Gather samples in a circle around the position
+	var total_height = center_height
+	var total_weight = 1.0
+	
+	for i in range(sample_count):
+		var angle = (i / float(sample_count)) * TAU
+		var offset = Vector3(
+			cos(angle) * sample_radius,
+			0,
+			sin(angle) * sample_radius
+		)
+		var sample_pos = world_pos + offset
+		
+		# Get raw height without smoothing to avoid infinite recursion
+		var sample_height = get_height_at(sample_pos)
+		
+		# Weight samples by distance (closer = more weight)
+		var weight = 1.0 - (offset.length() / (sample_radius * 1.5))
+		weight = max(0.0, weight)
+		
+		total_height += sample_height * weight
+		total_weight += weight
+	
+	var smoothed_height = total_height / total_weight
+	_smoothing_cache[cache_key] = smoothed_height
+	
+	return smoothed_height
+
+## Apply terracing effect to create stepped layers
+func _apply_terracing(height: float) -> float:
+	if terrace_levels <= 1:
+		return height
+	
+	# Normalize height to 0-1 range for easier calculation
+	# Assuming typical height range - adjust if needed
+	var normalized_height = height / 100.0
+	
+	# Calculate which terrace level this falls into
+	var level = floor(normalized_height * terrace_levels)
+	var level_height = level / float(terrace_levels)
+	
+	if terrace_smoothness > 0.0:
+		# Smooth transition between levels
+		var next_level_height = (level + 1.0) / float(terrace_levels)
+		var t = (normalized_height * terrace_levels) - level
+		t = smoothstep(0.0, 1.0, t / terrace_smoothness)
+		level_height = lerp(level_height, next_level_height, t)
+	
+	return level_height * 100.0
 
 ## Get axis-aligned bounding box of influence area
 func get_influence_aabb() -> AABB:
