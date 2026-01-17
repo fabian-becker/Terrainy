@@ -276,6 +276,7 @@ func _get_handle_value(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool
 	# Signal that manipulation is starting (first handle grab)
 	if not node.get_meta("_gizmo_manipulating", false):
 		node.set_meta("_gizmo_manipulating", true)
+		node.set_meta("_gizmo_manipulation_time", Time.get_ticks_msec() / 1000.0)
 		gizmo_manipulation_started.emit(node)
 	
 	var handle_index = 0
@@ -447,6 +448,7 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 	var was_manipulating = node.get_meta("_gizmo_manipulating", false)
 	if was_manipulating:
 		node.set_meta("_gizmo_manipulating", false)
+		node.remove_meta("_gizmo_manipulation_time")
 		gizmo_manipulation_ended.emit(node)
 	
 	if not is_instance_valid(undo_redo):

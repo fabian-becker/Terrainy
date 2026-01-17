@@ -134,9 +134,22 @@ func get_influence_aabb() -> AABB:
 
 ## Helper to check if gizmo is currently manipulating this node
 func _is_gizmo_manipulating() -> bool:
-	return get_meta("_gizmo_manipulating", false)
+	var is_manipulating = get_meta("_gizmo_manipulating", false)
+	
+	# Safety: if gizmo manipulation flag has been set for more than 5 seconds, clear it
+	# This prevents stuck metadata from blocking updates
+	if is_manipulating:
+		var last_gizmo_time = get_meta("_gizmo_manipulation_time", 0.0)
+		var current_time = Time.get_ticks_msec() / 1000.0
+		if current_time - last_gizmo_time > 5.0:
+			set_meta("_gizmo_manipulating", false)
+			return false
+	
+	return is_manipulating
 
 ## Helper to emit parameters_changed signal only when not manipulating via gizmo
 func _commit_parameter_change() -> void:
 	if not _is_gizmo_manipulating():
 		parameters_changed.emit()
+		if Engine.is_editor_hint():
+			print("[%s] parameters_changed emitted" % name)
