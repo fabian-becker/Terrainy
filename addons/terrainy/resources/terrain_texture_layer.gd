@@ -44,7 +44,7 @@ signal layer_changed
 		layer_changed.emit()
 
 ## Roughness value (used if no texture, or as multiplier)
-@export_range(0.0, 1.0) var roughness: float = 0.5:
+@export_range(0.0, 1.0) var roughness: float = 1.0:
 	set(value):
 		roughness = value
 		layer_changed.emit()
@@ -74,8 +74,8 @@ signal layer_changed
 		layer_changed.emit()
 
 @export_group("UV Settings")
-## UV tiling/scale
-@export var uv_scale: Vector2 = Vector2(1.0, 1.0):
+## UV tiling/scale (meters per texture repeat - larger values = larger texture tiles)
+@export var uv_scale: Vector2 = Vector2(10.0, 10.0):
 	set(value):
 		uv_scale = value
 		layer_changed.emit()
