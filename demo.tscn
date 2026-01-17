@@ -1,28 +1,103 @@
-[gd_scene load_steps=5 format=3 uid="uid://b7x280tq4b4un"]
+[gd_scene load_steps=23 format=3 uid="uid://b7x280tq4b4un"]
 
 [ext_resource type="Script" uid="uid://bvnbjheswdsy0" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_0bhed"]
-[ext_resource type="Script" uid="uid://dru71ftjlqkij" path="res://addons/terrainy/nodes/landscapes/mountain_range_node.gd" id="2_0bhed"]
+[ext_resource type="Script" uid="uid://ddlru3rps1tmg" path="res://addons/terrainy/resources/terrain_texture_layer.gd" id="2_n4w22"]
+[ext_resource type="Texture2D" uid="uid://d0o63xppfig7q" path="res://textures/rocky_terrain/rocky_terrain_02_diff_2k.jpg" id="3_884kg"]
+[ext_resource type="Texture2D" uid="uid://cn6fjwtg2402r" path="res://textures/sand/coast_sand_03_diff_2k.jpg" id="3_jbdfk"]
+[ext_resource type="Texture2D" uid="uid://k5vf7polde3u" path="res://textures/sand/coast_sand_03_nor_gl_2k.jpg" id="4_4gl14"]
+[ext_resource type="Texture2D" uid="uid://c15mpfthvac3b" path="res://textures/rocky_terrain/rocky_terrain_02_nor_gl_2k.jpg" id="4_d4o4o"]
+[ext_resource type="Texture2D" uid="uid://c4amiux16fqhf" path="res://textures/rock/rock_05_diff_2k.jpg" id="5_gdsc3"]
+[ext_resource type="Texture2D" uid="uid://biwdpyonx0p23" path="res://textures/rock/rock_05_nor_gl_2k.jpg" id="6_svejp"]
+[ext_resource type="Texture2D" uid="uid://bjffoy7hav6p1" path="res://textures/rock/rock_05_rough_2k.jpg" id="7_36gju"]
+[ext_resource type="Script" uid="uid://ck4gtrjpc6yu2" path="res://addons/terrainy/nodes/basic/noise_terrain_node.gd" id="8_884kg"]
+[ext_resource type="Texture2D" uid="uid://7ci04808kdj7" path="res://textures/snow/snow_01_diff_2k.jpg" id="8_svejp"]
+[ext_resource type="Texture2D" uid="uid://clbv4gc1wkj7w" path="res://textures/snow/snow_01_nor_gl_2k.jpg" id="9_36gju"]
+[ext_resource type="Script" uid="uid://b6wf04jk2wgbk" path="res://addons/terrainy/nodes/gradients/cone_node.gd" id="9_d4o4o"]
+[ext_resource type="Texture2D" uid="uid://cphiu0x3nblrb" path="res://textures/snow/snow_01_rough_2k.jpg" id="10_tql22"]
+[ext_resource type="Script" uid="uid://dhj8ktxmw3t6s" path="res://addons/terrainy/nodes/primitives/hill_node.gd" id="13_36gju"]
+[ext_resource type="Script" uid="uid://e1syivvdenmk" path="res://addons/terrainy/nodes/landscapes/canyon_node.gd" id="16_4gl14"]
 
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_m0rpm"]
-seed = 1712791584
-frequency = 0.008
-fractal_octaves = 2
+[sub_resource type="Resource" id="Resource_5g7v7"]
+script = ExtResource("2_n4w22")
+layer_name = "Sand"
+albedo_texture = ExtResource("3_jbdfk")
+normal_texture = ExtResource("4_4gl14")
+uv_scale = Vector2(10, 10)
+height_max = -5.0
+metadata/_custom_type_script = "uid://ddlru3rps1tmg"
 
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_c6xj6"]
-seed = -1086065466
+[sub_resource type="Resource" id="Resource_tql22"]
+script = ExtResource("2_n4w22")
+layer_name = "Rocky"
+albedo_texture = ExtResource("3_884kg")
+normal_texture = ExtResource("4_d4o4o")
+uv_scale = Vector2(100, 100)
+height_min = 0.0
+height_max = 10.0
+metadata/_custom_type_script = "uid://ddlru3rps1tmg"
+
+[sub_resource type="Resource" id="Resource_jbdfk"]
+script = ExtResource("2_n4w22")
+layer_name = "Rocky"
+albedo_texture = ExtResource("5_gdsc3")
+normal_texture = ExtResource("6_svejp")
+roughness_texture = ExtResource("7_36gju")
+uv_scale = Vector2(100, 100)
+height_min = 10.0
+height_max = 100.0
+metadata/_custom_type_script = "uid://ddlru3rps1tmg"
+
+[sub_resource type="Resource" id="Resource_4gl14"]
+script = ExtResource("2_n4w22")
+layer_name = "Snow"
+albedo_texture = ExtResource("8_svejp")
+normal_texture = ExtResource("9_36gju")
+roughness_texture = ExtResource("10_tql22")
+uv_scale = Vector2(10, 10)
+height_min = 80.0
+metadata/_custom_type_script = "uid://ddlru3rps1tmg"
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_gdsc3"]
+noise_type = 3
+seed = 1682715173
 frequency = 0.05
-fractal_octaves = 4
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_5g7v7"]
+seed = 1205343219
 
 [node name="Node3D" type="Node3D"]
 
 [node name="TerrainComposer" type="Node3D" parent="."]
 script = ExtResource("1_0bhed")
 terrain_size = Vector2(1024, 1024)
+resolution = 512
+use_chunked_generation = true
+texture_layers = Array[ExtResource("2_n4w22")]([SubResource("Resource_5g7v7"), SubResource("Resource_tql22"), SubResource("Resource_jbdfk"), SubResource("Resource_4gl14")])
 metadata/_custom_type_script = "uid://bvnbjheswdsy0"
 
-[node name="MountainRangeNode" type="Node3D" parent="TerrainComposer"]
-script = ExtResource("2_0bhed")
-peak_noise = SubResource("FastNoiseLite_m0rpm")
-detail_noise = SubResource("FastNoiseLite_c6xj6")
-influence_radius = 76.720924
-metadata/_custom_type_script = "uid://dru71ftjlqkij"
+[node name="PerlinNoiseNode" type="Node3D" parent="TerrainComposer"]
+script = ExtResource("8_884kg")
+amplitude = 22.0
+frequency = 1.0
+noise = SubResource("FastNoiseLite_gdsc3")
+influence_radius = 180.0
+metadata/_custom_type_script = "uid://ck4gtrjpc6yu2"
+
+[node name="ConeNode" type="Node3D" parent="TerrainComposer/PerlinNoiseNode"]
+script = ExtResource("9_d4o4o")
+start_height = 120.0
+influence_radius = 168.83583
+edge_falloff = 0.4941109778057945
+metadata/_custom_type_script = "uid://b6wf04jk2wgbk"
+
+[node name="HillNode" type="Node3D" parent="TerrainComposer"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -180.14995, 0, -175.71095)
+script = ExtResource("13_36gju")
+metadata/_custom_type_script = "uid://dhj8ktxmw3t6s"
+
+[node name="CanyonNode" type="Node3D" parent="TerrainComposer"]
+transform = Transform3D(0.69710255, -0.71697146, 0, 0.71697146, 0.69710255, 0, 0, 0, 1, 71.47562, 0, -360.3219)
+script = ExtResource("16_4gl14")
+height = 10.909554
+noise = SubResource("FastNoiseLite_5g7v7")
+metadata/_custom_type_script = "uid://e1syivvdenmk"

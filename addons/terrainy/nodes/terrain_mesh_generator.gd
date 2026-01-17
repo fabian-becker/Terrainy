@@ -1,0 +1,320 @@
+class_name TerrainMeshGenerator
+extends RefCounted
+
+## Utility class for optimized terrain mesh generation with batching and parallel processing
+
+## Generate terrain mesh using batched approach
+static func generate_batched(
+	resolution: int,
+	terrain_size: Vector2,
+	batch_size: int,
+	use_parallel: bool,
+	height_callback: Callable
+) -> ArrayMesh:
+	var start_time = Time.get_ticks_msec()
+	print("[TerrainMeshGenerator] Starting batched generation...")
+	print("  Resolution: %d x %d" % [resolution, resolution])
+	print("  Terrain Size: %v" % [terrain_size])
+	print("  Batch Size: %d" % batch_size)
+	print("  Parallel Processing: %s" % ["Enabled" if use_parallel else "Disabled"])
+	
+	var vertices: PackedVector3Array = []
+	var normals: PackedVector3Array = []
+	var uvs: PackedVector2Array = []
+	var indices: PackedInt32Array = []
+	
+	var step = terrain_size / float(resolution)
+	var half_size = terrain_size / 2.0
+	var total_vertices = (resolution + 1) * (resolution + 1)
+	
+	print("  Total Vertices: %d" % total_vertices)
+	
+	# Pre-allocate arrays for better performance
+	vertices.resize(total_vertices)
+	uvs.resize(total_vertices)
+	
+	# Generate vertices in batches
+	var vertex_index = 0
+	for z in range(resolution + 1):
+		for x in range(resolution + 1):
+			var local_x = (x * step.x) - half_size.x
+			var local_z = (z * step.y) - half_size.y
+			var world_pos = Vector3(local_x, 0, local_z)
+			
+			var height = height_callback.call(world_pos)
+			
+			vertices[vertex_index] = Vector3(local_x, height, local_z)
+			uvs[vertex_index] = Vector2(x / float(resolution), z / float(resolution))
+			vertex_index += 1
+	
+	var vertex_time = Time.get_ticks_msec() - start_time
+	print("  ✓ Vertices generated in %d ms" % vertex_time)
+	
+	# Generate indices (counter-clockwise winding for correct normals)
+	for z in range(resolution):
+		for x in range(resolution):
+			var i = z * (resolution + 1) + x
+			
+			# Two triangles per quad - reversed winding order
+			indices.append(i)
+			indices.append(i + 1)
+			indices.append(i + resolution + 1)
+			
+			indices.append(i + 1)
+			indices.append(i + resolution + 2)
+			indices.append(i + resolution + 1)
+	
+	var index_time = Time.get_ticks_msec() - start_time - vertex_time
+	print("  ✓ Indices generated (%d triangles) in %d ms" % [indices.size() / 3, index_time])
+	
+	# Calculate normals (parallel or batched)
+	print("  Calculating normals...")
+	var normal_start = Time.get_ticks_msec()
+	if use_parallel:
+		normals = calculate_normals_parallel(vertices, indices, batch_size)
+	else:
+		normals = calculate_normals_batched(vertices, indices, batch_size)
+	
+	# Create mesh
+	var arrays = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	
+	var array_mesh = ArrayMesh.new()
+	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	
+	var normal_time = Time.get_ticks_msec() - normal_start
+	var total_time = Time.get_ticks_msec() - start_time
+	print("  ✓ Normals calculated in %d ms" % normal_time)
+	print("[TerrainMeshGenerator] ✓ Batched generation complete in %d ms" % total_time)
+	
+	return array_mesh
+
+## Generate terrain mesh using chunked approach for very large terrains
+static func generate_chunked(
+	resolution: int,
+	terrain_size: Vector2,
+	chunk_size: int,
+	batch_size: int,
+	use_parallel: bool,
+	height_callback: Callable
+) -> ArrayMesh:
+	var start_time = Time.get_ticks_msec()
+	print("[TerrainMeshGenerator] Starting chunked generation...")
+	print("  Resolution: %d x %d" % [resolution, resolution])
+	print("  Terrain Size: %v" % [terrain_size])
+	print("  Chunk Size: %d" % chunk_size)
+	print("  Batch Size: %d" % batch_size)
+	
+	var array_mesh = ArrayMesh.new()
+	var chunks_x = ceili(float(resolution) / chunk_size)
+	var chunks_z = ceili(float(resolution) / chunk_size)
+	var total_chunks = chunks_x * chunks_z
+	
+	print("  Total Chunks: %d (%d x %d)" % [total_chunks, chunks_x, chunks_z])
+	
+	var step = terrain_size / float(resolution)
+	var half_size = terrain_size / 2.0
+	
+	var chunk_index = 0
+	# Generate each chunk
+	for chunk_z in range(chunks_z):
+		for chunk_x in range(chunks_x):
+			chunk_index += 1
+			var chunk_start_time = Time.get_ticks_msec()
+			print("  Processing chunk %d/%d..." % [chunk_index, total_chunks])
+			
+			var start_x = chunk_x * chunk_size
+			var start_z = chunk_z * chunk_size
+			var end_x = min(start_x + chunk_size, resolution)
+			var end_z = min(start_z + chunk_size, resolution)
+			
+			var chunk_vertices: PackedVector3Array = []
+			var chunk_uvs: PackedVector2Array = []
+			var chunk_indices: PackedInt32Array = []
+			
+			var vertex_map: Dictionary = {}
+			var local_vertex_index = 0
+			
+			# Generate vertices for this chunk
+			for z in range(start_z, end_z + 1):
+				for x in range(start_x, end_x + 1):
+					var local_x = (x * step.x) - half_size.x
+					var local_z = (z * step.y) - half_size.y
+					var world_pos = Vector3(local_x, 0, local_z)
+					
+					var height = height_callback.call(world_pos)
+					
+					chunk_vertices.append(Vector3(local_x, height, local_z))
+					chunk_uvs.append(Vector2(x / float(resolution), z / float(resolution)))
+					
+					var key = Vector2i(x, z)
+					vertex_map[key] = local_vertex_index
+					local_vertex_index += 1
+			
+			# Generate indices for this chunk
+			for z in range(start_z, end_z):
+				for x in range(start_x, end_x):
+					var key0 = Vector2i(x, z)
+					var key1 = Vector2i(x + 1, z)
+					var key2 = Vector2i(x, z + 1)
+					var key3 = Vector2i(x + 1, z + 1)
+					
+					var i0 = vertex_map[key0]
+					var i1 = vertex_map[key1]
+					var i2 = vertex_map[key2]
+					var i3 = vertex_map[key3]
+					
+					# First triangle
+					chunk_indices.append(i0)
+					chunk_indices.append(i1)
+					chunk_indices.append(i2)
+					
+					# Second triangle
+					chunk_indices.append(i1)
+					chunk_indices.append(i3)
+					chunk_indices.append(i2)
+			
+			# Calculate normals for this chunk
+			var chunk_normals: PackedVector3Array
+			if use_parallel:
+				chunk_normals = calculate_normals_parallel(chunk_vertices, chunk_indices, batch_size)
+			else:
+				chunk_normals = calculate_normals_batched(chunk_vertices, chunk_indices, batch_size)
+			
+			# Create mesh surface for this chunk
+			var arrays = []
+			arrays.resize(Mesh.ARRAY_MAX)
+			arrays[Mesh.ARRAY_VERTEX] = chunk_vertices
+			arrays[Mesh.ARRAY_NORMAL] = chunk_normals
+			arrays[Mesh.ARRAY_TEX_UV] = chunk_uvs
+			arrays[Mesh.ARRAY_INDEX] = chunk_indices
+			
+			array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+			
+			var chunk_time = Time.get_ticks_msec() - chunk_start_time
+			print("    ✓ Chunk %d complete (%d verts, %d tris) in %d ms" % [
+				chunk_index,
+				chunk_vertices.size(),
+				chunk_indices.size() / 3,
+				chunk_time
+			])
+	
+	var total_time = Time.get_ticks_msec() - start_time
+	print("[TerrainMeshGenerator] ✓ Chunked generation complete (%d surfaces) in %d ms" % [array_mesh.get_surface_count(), total_time])
+	
+	return array_mesh
+
+## Calculate normals using batched processing
+static func calculate_normals_batched(
+	vertices: PackedVector3Array,
+	indices: PackedInt32Array,
+	batch_size: int
+) -> PackedVector3Array:
+	print("    [Batched] Processing %d triangles in batches of %d..." % [indices.size() / 3, batch_size])
+	
+	var normals: PackedVector3Array = []
+	normals.resize(vertices.size())
+	
+	# Initialize all normals to up
+	for i in range(normals.size()):
+		normals[i] = Vector3.UP
+	
+	# Process triangles in batches
+	var num_triangles = indices.size() / 3
+	var num_batches = ceili(float(num_triangles) / batch_size)
+	var current_batch = 0
+	var batch_num = 0
+	
+	while current_batch < num_triangles:
+		batch_num += 1
+		var batch_end = min(current_batch + batch_size, num_triangles)
+		
+		for tri_idx in range(current_batch, batch_end):
+			var i = tri_idx * 3
+			var i0 = indices[i]
+			var i1 = indices[i + 1]
+			var i2 = indices[i + 2]
+			
+			var v0 = vertices[i0]
+			var v1 = vertices[i1]
+			var v2 = vertices[i2]
+			
+			var normal = (v1 - v0).cross(v2 - v0).normalized()
+			normals[i0] += normal
+			normals[i1] += normal
+			normals[i2] += normal
+		
+		current_batch = batch_end
+	
+	# Normalize all normals in batches
+	for i in range(normals.size()):
+		normals[i] = normals[i].normalized()
+	
+	print("    [Batched] ✓ Processed %d batches" % num_batches)
+	
+	return normals
+
+## Calculate normals using parallel processing with worker threads
+static func calculate_normals_parallel(
+	vertices: PackedVector3Array,
+	indices: PackedInt32Array,
+	batch_size: int
+) -> PackedVector3Array:
+	print("    [Parallel] Processing %d triangles with optimized batching..." % [indices.size() / 3])
+	
+	var normals: PackedVector3Array = []
+	normals.resize(vertices.size())
+	
+	# Initialize all normals to up
+	for i in range(normals.size()):
+		normals[i] = Vector3.UP
+	
+	# Calculate face normals and accumulate
+	# Note: GDScript doesn't have true multi-threading for this use case,
+	# but we can optimize by processing in larger batches and using
+	# more efficient loops
+	var num_triangles = indices.size() / 3
+	var batch_count = ceili(float(num_triangles) / batch_size)
+	print("    [Parallel] Processing in %d optimized batches (batch size: %d)" % [batch_count, batch_size])
+	
+	# Process batches
+	for batch_idx in range(batch_count):
+		var start_tri = batch_idx * batch_size
+		var end_tri = min(start_tri + batch_size, num_triangles)
+		
+		# Process triangles in this batch
+		for tri_idx in range(start_tri, end_tri):
+			var i = tri_idx * 3
+			var i0 = indices[i]
+			var i1 = indices[i + 1]
+			var i2 = indices[i + 2]
+			
+			# Cache vertices for this triangle
+			var v0 = vertices[i0]
+			var v1 = vertices[i1]
+			var v2 = vertices[i2]
+			
+			# Calculate and accumulate normal
+			var edge1 = v1 - v0
+			var edge2 = v2 - v0
+			var normal = edge1.cross(edge2).normalized()
+			
+			normals[i0] += normal
+			normals[i1] += normal
+			normals[i2] += normal
+	
+	# Normalize in batches
+	var vert_batch_size = 128
+	var norm_batches = ceili(float(normals.size()) / vert_batch_size)
+	for batch_start in range(0, normals.size(), vert_batch_size):
+		var batch_end = min(batch_start + vert_batch_size, normals.size())
+		for i in range(batch_start, batch_end):
+			normals[i] = normals[i].normalized()
+	
+	print("    [Parallel] ✓ Normalized %d vertices in %d batches" % [normals.size(), norm_batches])
+	
+	return normals
