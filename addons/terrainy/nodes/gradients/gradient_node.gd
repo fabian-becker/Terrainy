@@ -9,9 +9,9 @@ const TerrainFeatureNode = "res://addons/terrainy/nodes/terrain_feature_node.gd"
 @export var start_height: float = 10.0:
 	set(value):
 		start_height = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var end_height: float = 0.0:
 	set(value):
 		end_height = value
-		parameters_changed.emit()
+		_commit_parameter_change()

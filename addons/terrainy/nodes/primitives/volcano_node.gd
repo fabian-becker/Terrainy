@@ -25,11 +25,13 @@ func get_height_at(world_pos: Vector3) -> float:
 	var local_pos = to_local(world_pos)
 	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
 	
-	if distance_2d >= influence_radius:
+	var radius = influence_size.x
+	
+	if distance_2d >= radius:
 		return 0.0
 	
-	var normalized_distance = distance_2d / influence_radius
-	var crater_radius = influence_radius * crater_radius_ratio
+	var normalized_distance = distance_2d / radius
+	var crater_radius = radius * crater_radius_ratio
 	
 	var result_height = 0.0
 	
@@ -39,7 +41,7 @@ func get_height_at(world_pos: Vector3) -> float:
 		result_height = height - (crater_depth * (1.0 - crater_t * crater_t))
 	else:
 		# Outer slopes
-		var slope_distance = (distance_2d - crater_radius) / (influence_radius - crater_radius)
+		var slope_distance = (distance_2d - crater_radius) / (radius - crater_radius)
 		result_height = height * pow(1.0 - slope_distance, slope_concavity)
 	
 	return result_height

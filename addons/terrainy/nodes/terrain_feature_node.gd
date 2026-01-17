@@ -6,29 +6,41 @@ extends Node3D
 
 signal parameters_changed
 
-## The size of this terrain feature's area of influence
-@export var influence_radius: float = 50.0:
+enum InfluenceShape {
+	CIRCLE,
+	RECTANGLE,
+	ELLIPSE
+}
+
+## Shape of the influence area
+@export var influence_shape: InfluenceShape = InfluenceShape.CIRCLE:
 	set(value):
-		influence_radius = value
-		parameters_changed.emit()
+		influence_shape = value
+		_commit_parameter_change()
+
+## The size of this terrain feature's area of influence (radius for circle, width/depth for others)
+@export var influence_size: Vector2 = Vector2(50.0, 50.0):
+	set(value):
+		influence_size = value
+		_commit_parameter_change()
 
 ## Falloff distance for blending at edges (0.0 = hard edge, 1.0 = smooth across full radius)
 @export_range(0.0, 1.0) var edge_falloff: float = 0.3:
 	set(value):
 		edge_falloff = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 ## Blend mode with other terrain features
 @export_enum("Add", "Max", "Min", "Multiply", "Average") var blend_mode: int = 0:
 	set(value):
 		blend_mode = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 ## Weight/strength of this feature (0.0 = invisible, 1.0 = full strength)
 @export_range(0.0, 2.0) var strength: float = 1.0:
 	set(value):
 		strength = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 ## Generate height value at a given world position
 ## Override this in derived classes
@@ -42,22 +54,64 @@ func get_influence_weight(world_pos: Vector3) -> float:
 		return 0.0
 	
 	var local_pos = to_local(world_pos)
-	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
+	var local_pos_2d = Vector2(local_pos.x, local_pos.z)
 	
-	if distance_2d >= influence_radius:
-		return 0.0
+	var distance: float
+	var max_distance: float
+	
+	match influence_shape:
+		InfluenceShape.CIRCLE:
+			# Use X component as radius for circular shape
+			distance = local_pos_2d.length()
+			max_distance = influence_size.x
+		
+		InfluenceShape.RECTANGLE:
+			# Check if inside rectangle bounds
+			var half_size = influence_size * 0.5
+			if abs(local_pos_2d.x) > half_size.x or abs(local_pos_2d.y) > half_size.y:
+				return 0.0
+			
+			# Distance to nearest edge
+			var dist_x = half_size.x - abs(local_pos_2d.x)
+			var dist_y = half_size.y - abs(local_pos_2d.y)
+			distance = min(dist_x, dist_y)
+			max_distance = min(half_size.x, half_size.y)
+		
+		InfluenceShape.ELLIPSE:
+			# Ellipse distance formula
+			var normalized = Vector2(
+				local_pos_2d.x / influence_size.x,
+				local_pos_2d.y / influence_size.y
+			)
+			distance = normalized.length()
+			max_distance = 1.0
+			
+			if distance >= max_distance:
+				return 0.0
+	
+	if influence_shape == InfluenceShape.CIRCLE or influence_shape == InfluenceShape.ELLIPSE:
+		if distance >= max_distance:
+			return 0.0
 	
 	if edge_falloff <= 0.0:
 		return 1.0
 	
 	# Calculate falloff
-	var falloff_start = influence_radius * (1.0 - edge_falloff)
-	if distance_2d < falloff_start:
-		return 1.0
-	
-	# Smooth falloff using smoothstep
-	var t = (distance_2d - falloff_start) / (influence_radius - falloff_start)
-	return 1.0 - smoothstep(0.0, 1.0, t)
+	var falloff_distance: float
+	if influence_shape == InfluenceShape.RECTANGLE:
+		# For rectangle, distance is already the distance to edge
+		falloff_distance = max_distance * edge_falloff
+		if distance > falloff_distance:
+			return 1.0
+		var t = distance / falloff_distance
+		return smoothstep(0.0, 1.0, t)
+	else:
+		# For circle and ellipse
+		var falloff_start = max_distance * (1.0 - edge_falloff)
+		if distance < falloff_start:
+			return 1.0
+		var t = (distance - falloff_start) / (max_distance - falloff_start)
+		return 1.0 - smoothstep(0.0, 1.0, t)
 
 ## Get the final blended height contribution at a position
 func get_blended_height_at(world_pos: Vector3) -> float:
@@ -67,8 +121,22 @@ func get_blended_height_at(world_pos: Vector3) -> float:
 
 ## Get axis-aligned bounding box of influence area
 func get_influence_aabb() -> AABB:
-	var size = influence_radius * 2.0
+	var half_size: Vector2
+	if influence_shape == InfluenceShape.CIRCLE:
+		half_size = Vector2(influence_size.x, influence_size.x)
+	else:
+		half_size = influence_size * 0.5
+	
 	return AABB(
-		global_position + Vector3(-influence_radius, -100, -influence_radius),
-		Vector3(size, 200, size)
+		global_position + Vector3(-half_size.x, -100, -half_size.y),
+		Vector3(half_size.x * 2.0, 200, half_size.y * 2.0)
 	)
+
+## Helper to check if gizmo is currently manipulating this node
+func _is_gizmo_manipulating() -> bool:
+	return get_meta("_gizmo_manipulating", false)
+
+## Helper to emit parameters_changed signal only when not manipulating via gizmo
+func _commit_parameter_change() -> void:
+	if not _is_gizmo_manipulating():
+		parameters_changed.emit()

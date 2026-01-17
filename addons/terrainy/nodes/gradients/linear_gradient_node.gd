@@ -9,12 +9,12 @@ const GradientNode = preload("res://addons/terrainy/nodes/gradients/gradient_nod
 @export var direction: Vector2 = Vector2(1, 0):
 	set(value):
 		direction = value.normalized()
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export_enum("Linear", "Smooth", "Ease In", "Ease Out") var interpolation: int = 1:
 	set(value):
 		interpolation = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 func get_height_at(world_pos: Vector3) -> float:
 	var local_pos = to_local(world_pos)
@@ -24,7 +24,8 @@ func get_height_at(world_pos: Vector3) -> float:
 	var projected = pos_2d.dot(direction)
 	
 	# Normalize to influence radius
-	var t = (projected + influence_radius) / (influence_radius * 2.0)
+	var radius = influence_size.x
+	var t = (projected + radius) / (radius * 2.0)
 	t = clamp(t, 0.0, 1.0)
 	
 	# Apply interpolation

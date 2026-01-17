@@ -5,6 +5,9 @@ extends EditorNode3DGizmoPlugin
 
 const TerrainFeatureNode = preload("res://addons/terrainy/nodes/terrain_feature_node.gd")
 
+signal gizmo_manipulation_started(node: Node3D)
+signal gizmo_manipulation_ended(node: Node3D)
+
 var show_gizmos: bool = true
 var undo_redo: EditorUndoRedoManager
 
@@ -38,6 +41,7 @@ func _has_gizmo(node: Node3D) -> bool:
 		return true
 	
 	return false
+
 func _redraw(gizmo: EditorNode3DGizmo) -> void:
 	gizmo.clear()
 	
@@ -53,32 +57,28 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 	var direction_lines = PackedVector3Array()
 	var height_lines = PackedVector3Array()
 	
-	var radius = node.influence_radius
+	var size = node.influence_size
 	var segments = 64
 	
-	# Draw influence radius circle
-	for i in range(segments):
-		var angle1 = (i / float(segments)) * TAU
-		var angle2 = ((i + 1) / float(segments)) * TAU
+	# Draw influence shape based on type
+	match node.influence_shape:
+		TerrainFeatureNode.InfluenceShape.CIRCLE:
+			_draw_circle(lines, size.x, segments)
+			if node.edge_falloff > 0.0:
+				var falloff_radius = size.x * (1.0 - node.edge_falloff)
+				_draw_circle(falloff_lines, falloff_radius, segments)
 		
-		var p1 = Vector3(cos(angle1) * radius, 0, sin(angle1) * radius)
-		var p2 = Vector3(cos(angle2) * radius, 0, sin(angle2) * radius)
+		TerrainFeatureNode.InfluenceShape.RECTANGLE:
+			_draw_rectangle(lines, size)
+			if node.edge_falloff > 0.0:
+				var falloff_size = size * (1.0 - node.edge_falloff)
+				_draw_rectangle(falloff_lines, falloff_size)
 		
-		lines.push_back(p1)
-		lines.push_back(p2)
-	
-	# Draw falloff zone if applicable
-	if node.edge_falloff > 0.0:
-		var falloff_radius = radius * (1.0 - node.edge_falloff)
-		for i in range(segments):
-			var angle1 = (i / float(segments)) * TAU
-			var angle2 = ((i + 1) / float(segments)) * TAU
-			
-			var p1 = Vector3(cos(angle1) * falloff_radius, 0, sin(angle1) * falloff_radius)
-			var p2 = Vector3(cos(angle2) * falloff_radius, 0, sin(angle2) * falloff_radius)
-			
-			falloff_lines.push_back(p1)
-			falloff_lines.push_back(p2)
+		TerrainFeatureNode.InfluenceShape.ELLIPSE:
+			_draw_ellipse(lines, size, segments)
+			if node.edge_falloff > 0.0:
+				var falloff_size = size * (1.0 - node.edge_falloff)
+				_draw_ellipse(falloff_lines, falloff_size, segments)
 	
 	# Add cross at center
 	lines.push_back(Vector3(-5, 0, 0))
@@ -90,7 +90,8 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 	if "direction" in node:
 		var dir = node.direction as Vector2
 		var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-		var arrow_length = radius * 0.7
+		var max_size = max(size.x, size.y)
+		var arrow_length = max_size * 0.7
 		var arrow_head_size = 10.0
 		
 		# Main arrow line
@@ -109,7 +110,7 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		# Draw perpendicular lines for gradients to show the gradient direction
 		if node is GradientNode:
 			var perp = Vector3(-dir_3d.z, 0, dir_3d.x)
-			var line_length = radius * 0.5
+			var line_length = max_size * 0.5
 			direction_lines.push_back(arrow_end + perp * line_length)
 			direction_lines.push_back(arrow_end - perp * line_length)
 	
@@ -135,7 +136,8 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		if "direction" in node:
 			var dir = node.direction as Vector2
 			var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-			back_pos = -dir_3d * radius
+			var max_size = max(size.x, size.y)
+			back_pos = -dir_3d * max_size
 		
 		height_lines.push_back(back_pos)
 		height_lines.push_back(back_pos + Vector3(0, start_h, 0))
@@ -145,7 +147,8 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		if "direction" in node:
 			var dir = node.direction as Vector2
 			var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-			front_pos = dir_3d * radius
+			var max_size = max(size.x, size.y)
+			front_pos = dir_3d * max_size
 		
 		height_lines.push_back(front_pos)
 		height_lines.push_back(front_pos + Vector3(0, end_h, 0))
@@ -167,13 +170,17 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 	var handles = PackedVector3Array()
 	var handle_ids = PackedInt32Array()
 	
-	# Handle 0: Radius control (right side)
-	handles.push_back(Vector3(radius, 0, 0))
+	# Handle 0: Size control (right side for width)
+	handles.push_back(Vector3(size.x, 0, 0))
 	
-	# Handle 1: Falloff control (if falloff exists)
+	# Handle 1: Size control (depth, for rectangle and ellipse)
+	if node.influence_shape != TerrainFeatureNode.InfluenceShape.CIRCLE:
+		handles.push_back(Vector3(0, 0, size.y))
+	
+	# Handle 2: Falloff control (if falloff exists)
 	if node.edge_falloff > 0.0:
-		var falloff_radius = radius * (1.0 - node.edge_falloff)
-		handles.push_back(Vector3(falloff_radius, 0, 0))
+		var falloff_size = size.x * (1.0 - node.edge_falloff)
+		handles.push_back(Vector3(falloff_size, 0, 0))
 	
 	# Handle 2: Height control (vertical, for primitives and landscapes)
 	if "height" in node and not ("start_height" in node):
@@ -185,7 +192,8 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		var start_h = node.start_height
 		var dir = node.direction as Vector2
 		var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-		var back_pos = -dir_3d * radius
+		var max_size = max(size.x, size.y)
+		var back_pos = -dir_3d * max_size
 		handles.push_back(back_pos + Vector3(0, start_h, 0))
 	
 	# Handle 4: End height control (for gradients)
@@ -193,14 +201,16 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		var end_h = node.end_height
 		var dir = node.direction as Vector2
 		var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-		var front_pos = dir_3d * radius
+		var max_size = max(size.x, size.y)
+		var front_pos = dir_3d * max_size
 		handles.push_back(front_pos + Vector3(0, end_h, 0))
 	
 	# Handle 5: Direction control (for landscapes and gradients)
 	if "direction" in node:
 		var dir = node.direction as Vector2
 		var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-		var arrow_length = radius * 0.7
+		var max_size = max(size.x, size.y)
+		var arrow_length = max_size * 0.7
 		handles.push_back(dir_3d * arrow_length)
 	
 	gizmo.add_handles(handles, get_material("handles", gizmo), handle_ids)
@@ -212,15 +222,24 @@ func _get_handle_name(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool)
 	
 	var handle_index = 0
 	
-	# Handle 0: Always radius
+	# Handle 0: Size X (width)
 	if handle_index == handle_id:
-		return "Influence Radius"
+		if node.influence_shape == TerrainFeatureNode.InfluenceShape.CIRCLE:
+			return "Radius"
+		else:
+			return "Width"
 	handle_index += 1
 	
-	# Handle 1: Falloff (if exists)
+	# Handle 1: Size Y (depth, for rectangle and ellipse)
+	if node.influence_shape != TerrainFeatureNode.InfluenceShape.CIRCLE:
+		if handle_index == handle_id:
+			return "Depth"
+		handle_index += 1
+	
+	# Handle 2: Falloff (if exists)
 	if node.edge_falloff > 0.0:
 		if handle_index == handle_id:
-			return "Falloff Radius"
+			return "Falloff"
 		handle_index += 1
 	
 	# Handle 2: Height (for primitives and landscapes, not gradients)
@@ -254,14 +273,25 @@ func _get_handle_value(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool
 	if not node:
 		return null
 	
+	# Signal that manipulation is starting (first handle grab)
+	if not node.get_meta("_gizmo_manipulating", false):
+		node.set_meta("_gizmo_manipulating", true)
+		gizmo_manipulation_started.emit(node)
+	
 	var handle_index = 0
 	
-	# Handle 0: Always radius
+	# Handle 0: Size X (width/radius)
 	if handle_index == handle_id:
-		return node.influence_radius
+		return node.influence_size.x
 	handle_index += 1
 	
-	# Handle 1: Falloff (if exists)
+	# Handle 1: Size Y (depth, for rectangle and ellipse)
+	if node.influence_shape != TerrainFeatureNode.InfluenceShape.CIRCLE:
+		if handle_index == handle_id:
+			return node.influence_size.y
+		handle_index += 1
+	
+	# Handle 2: Falloff (if exists)
 	if node.edge_falloff > 0.0:
 		if handle_index == handle_id:
 			return node.edge_falloff
@@ -308,18 +338,34 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 	
 	var handle_index = 0
 	
-	# Handle 0: Radius
+	# Handle 0: Size X (width/radius)
 	if handle_index == handle_id:
 		var plane = Plane(Vector3.UP, 0)
 		var intersection = plane.intersects_ray(ray_from, ray_dir)
 		if intersection != null:
 			var local_intersection = node.to_local(intersection)
-			var distance = Vector2(local_intersection.x, local_intersection.z).length()
-			node.influence_radius = max(1.0, distance)
+			var new_size_x = max(1.0, abs(local_intersection.x))
+			if node.influence_shape == TerrainFeatureNode.InfluenceShape.CIRCLE:
+				node.influence_size = Vector2(new_size_x, new_size_x)
+			else:
+				node.influence_size.x = new_size_x
+		_redraw(gizmo)
 		return
 	handle_index += 1
 	
-	# Handle 1: Falloff
+	# Handle 1: Size Y (depth, for rectangle and ellipse)
+	if node.influence_shape != TerrainFeatureNode.InfluenceShape.CIRCLE:
+		if handle_index == handle_id:
+			var plane = Plane(Vector3.UP, 0)
+			var intersection = plane.intersects_ray(ray_from, ray_dir)
+			if intersection != null:
+				var local_intersection = node.to_local(intersection)
+				node.influence_size.y = max(1.0, abs(local_intersection.z))
+			_redraw(gizmo)
+			return
+		handle_index += 1
+	
+	# Handle 2: Falloff
 	if node.edge_falloff > 0.0:
 		if handle_index == handle_id:
 			var plane = Plane(Vector3.UP, 0)
@@ -327,12 +373,14 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 			if intersection != null:
 				var local_intersection = node.to_local(intersection)
 				var distance = Vector2(local_intersection.x, local_intersection.z).length()
+				var max_size = max(node.influence_size.x, node.influence_size.y)
 				var new_falloff_radius = max(0.1, distance)
-				node.edge_falloff = clamp(1.0 - (new_falloff_radius / node.influence_radius), 0.0, 1.0)
+				node.edge_falloff = clamp(1.0 - (new_falloff_radius / max_size), 0.0, 1.0)
+			_redraw(gizmo)
 			return
 		handle_index += 1
 	
-	# Handle 2: Height (for primitives and landscapes)
+	# Handle 3: Height (for primitives and landscapes)
 	if "height" in node and not ("start_height" in node):
 		if handle_index == handle_id:
 			var vertical_plane = Plane(Vector3.RIGHT, 0)
@@ -340,6 +388,7 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 			if vertical_intersection != null:
 				var local_y = node.to_local(vertical_intersection).y
 				node.height = local_y
+			_redraw(gizmo)
 			return
 		handle_index += 1
 	
@@ -348,12 +397,14 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 		if handle_index == handle_id:
 			var dir = node.direction as Vector2
 			var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-			var back_pos_global = node.to_global(-dir_3d * node.influence_radius)
+			var max_size = max(node.influence_size.x, node.influence_size.y)
+			var back_pos_global = node.to_global(-dir_3d * max_size)
 			var vertical_plane = Plane(Vector3.RIGHT.rotated(Vector3.UP, atan2(dir_3d.z, dir_3d.x)), back_pos_global)
 			var vertical_intersection = vertical_plane.intersects_ray(ray_from, ray_dir)
 			if vertical_intersection != null:
 				var local_y = node.to_local(vertical_intersection).y
 				node.start_height = local_y
+			_redraw(gizmo)
 			return
 		handle_index += 1
 	
@@ -362,12 +413,14 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 		if handle_index == handle_id:
 			var dir = node.direction as Vector2
 			var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-			var front_pos_global = node.to_global(dir_3d * node.influence_radius)
+			var max_size = max(node.influence_size.x, node.influence_size.y)
+			var front_pos_global = node.to_global(dir_3d * max_size)
 			var vertical_plane = Plane(Vector3.RIGHT.rotated(Vector3.UP, atan2(dir_3d.z, dir_3d.x)), front_pos_global)
 			var vertical_intersection = vertical_plane.intersects_ray(ray_from, ray_dir)
 			if vertical_intersection != null:
 				var local_y = node.to_local(vertical_intersection).y
 				node.end_height = local_y
+			_redraw(gizmo)
 			return
 		handle_index += 1
 	
@@ -381,6 +434,7 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 				var dir_2d = Vector2(local_intersection.x, local_intersection.z)
 				if dir_2d.length() > 0.1:
 					node.direction = dir_2d.normalized()
+			_redraw(gizmo)
 			return
 		handle_index += 1
 
@@ -389,25 +443,51 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 	if not node:
 		return
 	
+	# Signal that manipulation has ended
+	var was_manipulating = node.get_meta("_gizmo_manipulating", false)
+	if was_manipulating:
+		node.set_meta("_gizmo_manipulating", false)
+		gizmo_manipulation_ended.emit(node)
+	
 	if not is_instance_valid(undo_redo):
 		push_warning("TerrainFeatureGizmoPlugin: undo_redo is invalid, changes will not be undoable")
+		# Still emit the parameters_changed signal to update the terrain
+		if was_manipulating:
+			node.parameters_changed.emit()
 		return
 	
 	var handle_index = 0
 	
-	# Handle 0: Radius
+	# Handle 0: Size X (width/radius)
 	if handle_index == handle_id:
 		if cancel:
-			node.influence_radius = restore
+			node.influence_size = restore
 		else:
-			undo_redo.create_action("Change Influence Radius")
-			undo_redo.add_do_property(node, "influence_radius", node.influence_radius)
-			undo_redo.add_undo_property(node, "influence_radius", restore)
+			undo_redo.create_action("Change Influence Size")
+			undo_redo.add_do_property(node, "influence_size", node.influence_size)
+			undo_redo.add_undo_property(node, "influence_size", restore)
 			undo_redo.commit_action()
+		if was_manipulating:
+			node.parameters_changed.emit()
 		return
 	handle_index += 1
 	
-	# Handle 1: Falloff
+	# Handle 1: Size Y (depth, for rectangle and ellipse)
+	if node.influence_shape != TerrainFeatureNode.InfluenceShape.CIRCLE or cancel:
+		if handle_index == handle_id:
+			if cancel:
+				node.influence_size = restore
+			else:
+				undo_redo.create_action("Change Influence Depth")
+				undo_redo.add_do_property(node, "influence_size", node.influence_size)
+				undo_redo.add_undo_property(node, "influence_size", restore)
+				undo_redo.commit_action()
+			if was_manipulating:
+				node.parameters_changed.emit()
+			return
+		handle_index += 1
+	
+	# Handle 2: Falloff
 	if node.edge_falloff > 0.0 or cancel:
 		if handle_index == handle_id:
 			if cancel:
@@ -417,10 +497,12 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 				undo_redo.add_do_property(node, "edge_falloff", node.edge_falloff)
 				undo_redo.add_undo_property(node, "edge_falloff", restore)
 				undo_redo.commit_action()
+			if was_manipulating:
+				node.parameters_changed.emit()
 			return
 		handle_index += 1
 	
-	# Handle 2: Height (for primitives and landscapes)
+	# Handle 3: Height (for primitives and landscapes)
 	if "height" in node and not ("start_height" in node):
 		if handle_index == handle_id:
 			if cancel:
@@ -430,6 +512,8 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 				undo_redo.add_do_property(node, "height", node.height)
 				undo_redo.add_undo_property(node, "height", restore)
 				undo_redo.commit_action()
+			if was_manipulating:
+				node.parameters_changed.emit()
 			return
 		handle_index += 1
 	
@@ -443,6 +527,8 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 				undo_redo.add_do_property(node, "start_height", node.start_height)
 				undo_redo.add_undo_property(node, "start_height", restore)
 				undo_redo.commit_action()
+			if was_manipulating:
+				node.parameters_changed.emit()
 			return
 		handle_index += 1
 	
@@ -456,6 +542,8 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 				undo_redo.add_do_property(node, "end_height", node.end_height)
 				undo_redo.add_undo_property(node, "end_height", restore)
 				undo_redo.commit_action()
+			if was_manipulating:
+				node.parameters_changed.emit()
 			return
 		handle_index += 1
 	
@@ -469,5 +557,46 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 				undo_redo.add_do_property(node, "direction", node.direction)
 				undo_redo.add_undo_property(node, "direction", restore)
 				undo_redo.commit_action()
+			if was_manipulating:
+				node.parameters_changed.emit()
 			return
 		handle_index += 1
+
+## Helper functions for drawing different shapes
+func _draw_circle(lines: PackedVector3Array, radius: float, segments: int) -> void:
+	for i in range(segments):
+		var angle1 = (i / float(segments)) * TAU
+		var angle2 = ((i + 1) / float(segments)) * TAU
+
+		var p1 = Vector3(cos(angle1) * radius, 0, sin(angle1) * radius)
+		var p2 = Vector3(cos(angle2) * radius, 0, sin(angle2) * radius)
+
+		lines.push_back(p1)
+		lines.push_back(p2)
+
+func _draw_rectangle(lines: PackedVector3Array, size: Vector2) -> void:
+	var half_size = size * 0.5
+
+	# Four corners
+	var corners = [
+	Vector3(-half_size.x, 0, -half_size.y),
+	Vector3(half_size.x, 0, -half_size.y),
+	Vector3(half_size.x, 0, half_size.y),
+	Vector3(-half_size.x, 0, half_size.y)
+	]
+
+	# Draw four edges
+	for i in range(4):
+		lines.push_back(corners[i])
+		lines.push_back(corners[(i + 1) % 4])
+
+func _draw_ellipse(lines: PackedVector3Array, size: Vector2, segments: int) -> void:
+	for i in range(segments):
+		var angle1 = (i / float(segments)) * TAU
+		var angle2 = ((i + 1) / float(segments)) * TAU
+
+		var p1 = Vector3(cos(angle1) * size.x, 0, sin(angle1) * size.y)
+		var p2 = Vector3(cos(angle2) * size.x, 0, sin(angle2) * size.y)
+
+		lines.push_back(p1)
+		lines.push_back(p2)
