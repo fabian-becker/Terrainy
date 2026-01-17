@@ -5,6 +5,7 @@ extends Node3D
 const TerrainFeatureNode = preload("res://addons/terrainy/nodes/terrain_feature_node.gd")
 const TerrainTextureLayer = preload("res://addons/terrainy/resources/terrain_texture_layer.gd")
 const TerrainMeshGenerator = preload("res://addons/terrainy/nodes/terrain_mesh_generator.gd")
+const HeightmapCompositor = preload("res://addons/terrainy/nodes/heightmap_compositor.gd")
 
 ## Simple terrain composer - generates mesh from TerrainFeatureNodes
 
@@ -14,12 +15,14 @@ signal texture_layers_changed
 @export var terrain_size: Vector2 = Vector2(100, 100):
 	set(value):
 		terrain_size = value
+		_heightmap_cache.clear()  # Resolution-dependent, must regenerate
 		if auto_update and is_inside_tree():
 			rebuild_terrain()
 
 @export var resolution: int = 128:
 	set(value):
 		resolution = clamp(value, 16, 512)
+		_heightmap_cache.clear()  # Resolution-dependent, must regenerate
 		if auto_update and is_inside_tree():
 			rebuild_terrain()
 
@@ -30,6 +33,15 @@ signal texture_layers_changed
 			rebuild_terrain()
 
 @export var auto_update: bool = true
+
+@export_group("Performance")
+@export var use_gpu_composition: bool = true:
+	set(value):
+		use_gpu_composition = value
+		if value and not _gpu_compositor:
+			_initialize_gpu_compositor()
+		if is_inside_tree() and auto_update:
+			rebuild_terrain()
 
 @export_group("Material")
 @export var terrain_material: Material
@@ -64,7 +76,16 @@ var _feature_nodes: Array[TerrainFeatureNode] = []
 var _shader_material: ShaderMaterial
 var _is_generating: bool = false
 
+# Heightmap composition cache
+var _heightmap_cache: Dictionary = {}  # feature -> Image
+var _final_heightmap: Image
+var _terrain_bounds: Rect2
+var _gpu_compositor: HeightmapCompositor
+
 func _ready() -> void:
+	# Initialize GPU compositor if enabled
+	_initialize_gpu_compositor()
+	
 	# Setup mesh instance
 	if not _mesh_instance:
 		_mesh_instance = MeshInstance3D.new()
@@ -120,6 +141,18 @@ func _rescan_and_rebuild() -> void:
 	if auto_update and is_inside_tree():
 		rebuild_terrain()
 
+func _initialize_gpu_compositor() -> void:
+	if not use_gpu_composition or _gpu_compositor:
+		return
+	
+	print("[TerrainComposer] Initializing GPU compositor...")
+	_gpu_compositor = HeightmapCompositor.new()
+	if not _gpu_compositor.is_available():
+		push_warning("[TerrainComposer] GPU composition unavailable, will use CPU fallback")
+		# Don't disable - just fall back when needed
+	else:
+		print("[TerrainComposer] GPU compositor ready")
+
 func _on_feature_changed() -> void:
 	if auto_update:
 		rebuild_terrain()
@@ -134,11 +167,40 @@ func rebuild_terrain() -> void:
 	
 	_is_generating = true
 	
-	# Generate mesh
-	var mesh = TerrainMeshGenerator.generate(
-		resolution,
-		terrain_size,
-		_calculate_height_at
+	# Calculate terrain bounds
+	_terrain_bounds = Rect2(
+		-terrain_size / 2.0,
+		terrain_size
+	)
+	
+	# Resolution for heightmaps
+	var heightmap_resolution = Vector2i(resolution + 1, resolution + 1)
+	
+	# Step 1: Generate/update heightmaps for dirty features
+	for feature in _feature_nodes:
+		if not is_instance_valid(feature) or not feature.is_inside_tree() or not feature.visible:
+			if _heightmap_cache.has(feature):
+				_heightmap_cache.erase(feature)
+			continue
+		
+		# Check if we need to regenerate this feature's heightmap
+		if not _heightmap_cache.has(feature) or feature.is_dirty():
+			_heightmap_cache[feature] = feature.generate_heightmap(heightmap_resolution, _terrain_bounds)
+	
+	# Step 2: Compose all heightmaps into final heightmap
+	if use_gpu_composition and _gpu_compositor and _gpu_compositor.is_available():
+		_final_heightmap = _compose_heightmaps_gpu(heightmap_resolution)
+		# If GPU failed, fall back to CPU
+		if not _final_heightmap:
+			push_warning("[TerrainComposer] GPU composition failed, falling back to CPU")
+			_final_heightmap = _compose_heightmaps_cpu(heightmap_resolution)
+	else:
+		_final_heightmap = _compose_heightmaps_cpu(heightmap_resolution)
+	
+	# Step 3: Generate mesh from final heightmap
+	var mesh = TerrainMeshGenerator.generate_from_heightmap(
+		_final_heightmap,
+		terrain_size
 	)
 	
 	if _mesh_instance:
@@ -149,11 +211,145 @@ func rebuild_terrain() -> void:
 	terrain_updated.emit()
 	_is_generating = false
 
+## Compose all feature heightmaps into a single final heightmap (GPU)
+func _compose_heightmaps_gpu(resolution: Vector2i) -> Image:
+	var start_time = Time.get_ticks_msec()
+	
+	# Prepare data arrays
+	var feature_heightmaps: Array[Image] = []
+	var influence_maps: Array[Image] = []
+	var blend_modes := PackedInt32Array()
+	var strengths := PackedFloat32Array()
+	
+	# Collect valid features
+	for feature in _feature_nodes:
+		if not _heightmap_cache.has(feature):
+			continue
+		
+		var feature_map = _heightmap_cache[feature]
+		
+		# Validate resolution match
+		if feature_map.get_width() != resolution.x or feature_map.get_height() != resolution.y:
+			continue
+		
+		# Generate influence map for this feature
+		var influence_map = _generate_influence_map(feature, resolution)
+		
+		feature_heightmaps.append(feature_map)
+		influence_maps.append(influence_map)
+		blend_modes.append(feature.blend_mode)
+		strengths.append(feature.strength)
+	
+	# If no features, return base height
+	if feature_heightmaps.is_empty():
+		var base_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
+		base_map.fill(Color(base_height, 0, 0, 1))
+		return base_map
+	
+	# Compose on GPU
+	var result = _gpu_compositor.compose_gpu(
+		resolution,
+		base_height,
+		feature_heightmaps,
+		influence_maps,
+		blend_modes,
+		strengths
+	)
+	
+	var elapsed = Time.get_ticks_msec() - start_time
+	print("[TerrainComposer] GPU composed %d features in %d ms (total with influence maps)" % [
+		feature_heightmaps.size(), elapsed
+	])
+	
+	return result
+
+## Generate influence map for a feature
+func _generate_influence_map(feature: TerrainFeatureNode, resolution: Vector2i) -> Image:
+	var influence_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
+	
+	var step = _terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
+	
+	for y in range(resolution.y):
+		for x in range(resolution.x):
+			var world_x = _terrain_bounds.position.x + (x * step.x)
+			var world_z = _terrain_bounds.position.y + (y * step.y)
+			var world_pos = Vector3(world_x, 0, world_z)
+			
+			var weight = feature.get_influence_weight(world_pos)
+			influence_map.set_pixel(x, y, Color(weight, 0, 0, 1))
+	
+	return influence_map
+
+## Compose all feature heightmaps into a single final heightmap (CPU)
+func _compose_heightmaps_cpu(resolution: Vector2i) -> Image:
+	var start_time = Time.get_ticks_msec()
+	
+	# Create base heightmap
+	var final_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
+	final_map.fill(Color(base_height, 0, 0, 1))
+	
+	# Blend each feature's heightmap
+	for feature in _feature_nodes:
+		if not _heightmap_cache.has(feature):
+			continue
+		
+		var feature_map = _heightmap_cache[feature]
+		
+		# Validate resolution match
+		if feature_map.get_width() != resolution.x or feature_map.get_height() != resolution.y:
+			push_warning("[TerrainComposer] Feature '%s' heightmap size mismatch, skipping" % feature.name)
+			continue
+		
+		# Blend feature into final heightmap
+		for y in range(resolution.y):
+			for x in range(resolution.x):
+				# Calculate world position for influence weight
+				var step = _terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
+				var world_x = _terrain_bounds.position.x + (x * step.x)
+				var world_z = _terrain_bounds.position.y + (y * step.y)
+				var world_pos = Vector3(world_x, 0, world_z)
+				
+				# Get influence weight
+				var weight = feature.get_influence_weight(world_pos)
+				if weight <= 0.001:
+					continue
+				
+				# Get heights
+				var current_height = final_map.get_pixel(x, y).r
+				var feature_height = feature_map.get_pixel(x, y).r
+				var weighted_height = feature_height * weight * feature.strength
+				
+				# Apply blend mode
+				var new_height: float
+				match feature.blend_mode:
+					TerrainFeatureNode.BlendMode.ADD:
+						new_height = current_height + weighted_height
+					TerrainFeatureNode.BlendMode.SUBTRACT:
+						new_height = current_height - weighted_height
+					TerrainFeatureNode.BlendMode.MULTIPLY:
+						new_height = current_height * (1.0 + weighted_height)
+					TerrainFeatureNode.BlendMode.MAX:
+						new_height = max(current_height, feature_height * weight)
+					TerrainFeatureNode.BlendMode.MIN:
+						new_height = min(current_height, feature_height * weight)
+					TerrainFeatureNode.BlendMode.AVERAGE:
+						new_height = (current_height + weighted_height) * 0.5
+					_:
+						new_height = current_height + weighted_height
+				
+				final_map.set_pixel(x, y, Color(new_height, 0, 0, 1))
+	
+	var elapsed = Time.get_ticks_msec() - start_time
+	print("[TerrainComposer] Composed %d feature heightmaps in %d ms" % [_heightmap_cache.size(), elapsed])
+	
+	return final_map
+
 func _calculate_height_at(local_pos: Vector3) -> float:
+	# Legacy callback - should not be used with heightmap approach
+	# Kept for compatibility but not recommended
 	var world_pos = to_global(local_pos)
 	var final_height = base_height
 	
-	# Blend all feature contributions
 	for feature in _feature_nodes:
 		if not is_instance_valid(feature) or not feature.is_inside_tree() or not feature.visible:
 			continue
