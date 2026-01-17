@@ -1,4 +1,4 @@
-# Terrainy
+![Terrainy Logo](logo.png)
 
 A hybrid node-based and spatial terrain editor for Godot 4 with live preview and blending capabilities.
 
