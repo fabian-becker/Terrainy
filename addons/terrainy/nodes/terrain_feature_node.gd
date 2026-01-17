@@ -19,6 +19,15 @@ enum SmoothingMode {
 	HEAVY
 }
 
+enum BlendMode {
+	ADD,
+	SUBTRACT,
+	MAX,
+	MIN,
+	MULTIPLY,
+	AVERAGE
+}
+
 ## Shape of the influence area
 @export var influence_shape: InfluenceShape = InfluenceShape.CIRCLE:
 	set(value):

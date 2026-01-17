@@ -50,7 +50,7 @@ func _enter_tree() -> void:
 	add_custom_type("VoronoiNode", "Node3D", preload("res://addons/terrainy/nodes/basic/voronoi_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	
 	# Utility nodes
-	add_custom_type("ConstantNode", "Node3D", preload("res://addons/terrainy/nodes/basic/constant_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
+	add_custom_type("ConstantNode", "Node3D", preload("res://addons/terrainy/nodes/constant_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	add_custom_type("ShapeNode", "Node3D", preload("res://addons/terrainy/nodes/basic/shape_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	
 	# Add gizmo plugin

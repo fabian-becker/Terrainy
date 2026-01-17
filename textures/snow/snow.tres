@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="TerrainTextureLayer" load_steps=4 format=3 uid="uid://rnmk18jlmr5v"]
+
+[ext_resource type="Texture2D" uid="uid://7ci04808kdj7" path="res://textures/snow/snow_01_diff_2k.jpg" id="1_k1tyh"]
+[ext_resource type="Texture2D" uid="uid://clbv4gc1wkj7w" path="res://textures/snow/snow_01_nor_gl_2k.jpg" id="2_uoaqu"]
+[ext_resource type="Script" uid="uid://ddlru3rps1tmg" path="res://addons/terrainy/resources/terrain_texture_layer.gd" id="4_uhl4b"]
+
+[resource]
+script = ExtResource("4_uhl4b")
+layer_name = "Snow"
+albedo_texture = ExtResource("1_k1tyh")
+normal_texture = ExtResource("2_uoaqu")
+roughness = 0.3
+uv_scale = Vector2(64, 64)
+height_min = 98.0
+metadata/_custom_type_script = "uid://ddlru3rps1tmg"
