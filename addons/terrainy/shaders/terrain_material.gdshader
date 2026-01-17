@@ -123,7 +123,7 @@ void fragment() {
 		
 		// Blend all layers
 		vec3 final_albedo = vec3(0.0);
-		vec3 final_normal_map = vec3(0.5, 0.5, 1.0);
+		vec3 final_normal_map = vec3(0.0, 0.0, 0.0);
 		float final_roughness = 0.0;
 		float final_metallic = 0.0;
 		float final_ao = 0.0;
@@ -134,9 +134,9 @@ void fragment() {
 			// Get layer parameters
 			vec4 uv_params = layer_uv_params[i];
 			// Use world-space XZ coordinates for texture mapping to prevent swimming
-			// Divide by scale to get proper tiling (larger scale = smaller tiles)
+			// Scale controls texture density: smaller values = larger tiles
 			vec2 world_uv = vec2(world_pos.x, world_pos.z);
-			vec2 layer_uv = (world_uv / uv_params.xy) + uv_params.zw;
+			vec2 layer_uv = (world_uv / max(uv_params.xy, vec2(0.001, 0.001))) + uv_params.zw;
 			vec4 color_normal = layer_color_normal[i];
 			vec4 pbr_params = layer_pbr_params[i];
 			vec4 tex_flags = layer_texture_flags[i];
@@ -148,15 +148,15 @@ void fragment() {
 				albedo *= texture(albedo_textures, vec3(layer_uv, float(i))).rgb;
 			}
 			
-			// Sample normal
-			vec3 normal_sample = vec3(0.5, 0.5, 1.0);
+			// Sample normal and convert to tangent space [-1, 1]
+			vec3 layer_normal_tangent = vec3(0.0, 0.0, 1.0);
 			if (tex_flags.y > 0.5) { // has_normal
-				normal_sample = texture(normal_textures, vec3(layer_uv, float(i))).rgb;
+				vec3 normal_sample = texture(normal_textures, vec3(layer_uv, float(i))).rgb;
+				// Convert from [0,1] to [-1,1] tangent space
+				vec3 normal_ts = normalize(normal_sample * 2.0 - 1.0);
 				// Apply strength by lerping between flat normal and sampled normal
-				normal_sample = mix(vec3(0.5, 0.5, 1.0), normal_sample, color_normal.w);
+				layer_normal_tangent = normalize(mix(vec3(0.0, 0.0, 1.0), normal_ts, color_normal.w));
 			}
-			// Keep in tangent space [0,1] for now, will convert after blending
-			vec3 layer_normal_map = normal_sample;
 			
 			// Sample roughness
 			float roughness = pbr_params.x;
@@ -182,27 +182,27 @@ void fragment() {
 			
 			if (blend_mode == 0) { // Normal blend
 				final_albedo += albedo * weight;
-				final_normal_map += layer_normal_map * weight;
+				final_normal_map += layer_normal_tangent * weight;
 				final_roughness += roughness * weight;
 				final_metallic += metallic_val * weight;
 				final_ao += ao * weight;
 			} else if (blend_mode == 1) { // Add
 				final_albedo += albedo * weight;
-				final_normal_map += layer_normal_map * weight;
+				final_normal_map += layer_normal_tangent * weight;
 				final_roughness += roughness * weight;
 				final_metallic += metallic_val * weight;
 				final_ao += ao * weight;
 			} else if (blend_mode == 2) { // Multiply
 				final_albedo = mix(final_albedo, final_albedo * albedo, weight);
-				final_normal_map += layer_normal_map * weight;
+				final_normal_map += layer_normal_tangent * weight;
 				final_roughness = mix(final_roughness, final_roughness * roughness, weight);
 				final_metallic = mix(final_metallic, final_metallic * metallic_val, weight);
 				final_ao = mix(final_ao, final_ao * ao, weight);
 			}
 		}
 		
-		// Convert blended normal from [0,1] tangent space to [-1,1] and normalize
-		vec3 final_normal = normalize(final_normal_map * 2.0 - 1.0);
+		// Normalize the blended normal vector
+		vec3 final_normal = normalize(final_normal_map);
 		
 		// Output
 		ALBEDO = final_albedo;

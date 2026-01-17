@@ -48,7 +48,7 @@ signal generation_progress(stage: String, progress: float)  # Progress updates d
 
 @export var resolution: int = 128:
 	set(value):
-		resolution = clamp(value, 16, 512)
+		resolution = clamp(value, 16, 1024)
 		_request_update("resolution")
 
 @export var base_height: float = 0.0:
@@ -625,6 +625,7 @@ func _build_height_cache() -> void:
 		return
 	
 	_is_building_cache = true
+	var cache_start_time = Time.get_ticks_msec()
 	
 	var total_points = (resolution + 1) * (resolution + 1)
 	
@@ -637,7 +638,17 @@ func _build_height_cache() -> void:
 	var step = terrain_size / float(resolution)
 	var half_size = terrain_size / 2.0
 	
-	# Calculate all heights
+	# Pre-filter active features
+	var active_features: Array = []
+	for feature in _feature_nodes:
+		if is_instance_valid(feature) and feature.is_inside_tree() and feature.visible:
+			active_features.append(feature)
+	
+	if show_optimization_stats:
+		print("[TerrainComposer] Building height cache with %d active features..." % active_features.size())
+	
+	# Calculate all heights in batches
+	var batch_size = 1024
 	var index = 0
 	for z in range(resolution + 1):
 		for x in range(resolution + 1):
@@ -645,18 +656,24 @@ func _build_height_cache() -> void:
 			var local_z = (z * step.y) - half_size.y
 			var world_pos = to_global(Vector3(local_x, 0, local_z))
 			
-			_height_cache[index] = _calculate_height_at(world_pos)
+			# Optimized height calculation with pre-filtered features
+			_height_cache[index] = _calculate_height_at_fast(world_pos, active_features)
 			index += 1
 			
-			# Yield occasionally to keep editor responsive
-			if index % 256 == 0:
+			# Yield every batch to keep editor responsive
+			if index % batch_size == 0:
+				if show_optimization_stats:
+					print("  Progress: %d/%d (%.1f%%)" % [index, total_points, (index * 100.0) / total_points])
 				await get_tree().process_frame
 	
 	_height_cache_valid = true
 	_is_building_cache = false
 	
 	if show_optimization_stats:
-		print("[TerrainComposer] Height cache built (%d points)" % total_points)
+		var elapsed = Time.get_ticks_msec() - cache_start_time
+		print("[TerrainComposer] Height cache built (%d points) in %d ms (%.2f ms/1000 points)" % [
+			total_points, elapsed, (elapsed * 1000.0) / total_points
+		])
 
 ## Update only the heights in dirty regions
 func _update_dirty_regions_in_cache() -> void:
@@ -879,12 +896,19 @@ func _calculate_height_at(world_pos: Vector3) -> float:
 	var total_weight = 0.0
 	var weighted_heights: Array[Dictionary] = []
 	
-	# Collect all feature contributions
+	# Collect all feature contributions with early rejection
 	for feature in _feature_nodes:
-		if not is_instance_valid(feature) or not feature.is_inside_tree():
+		if not is_instance_valid(feature) or not feature.is_inside_tree() or not feature.visible:
 			continue
 		
-		if not feature.visible:
+		# Quick distance check before expensive influence calculation
+		var feature_pos = feature.global_position
+		var dist_sq = world_pos.distance_squared_to(feature_pos)
+		var max_influence = max(feature.influence_size.x, feature.influence_size.y)
+		var max_influence_sq = max_influence * max_influence * 1.5  # Add margin
+		
+		# Skip if definitely outside influence range
+		if dist_sq > max_influence_sq:
 			continue
 		
 		var weight = feature.get_influence_weight(world_pos)
@@ -906,6 +930,58 @@ func _calculate_height_at(world_pos: Vector3) -> float:
 	
 	# Sort by blend mode for proper layering
 	# For now, simple blending
+	for data in weighted_heights:
+		match data.mode:
+			0: # Add
+				final_height += data.height * data.weight
+			1: # Max
+				final_height = max(final_height, data.height * data.weight)
+			2: # Min
+				final_height = min(final_height, data.height * data.weight)
+			3: # Multiply
+				final_height *= (1.0 + data.height * data.weight)
+			4: # Average
+				final_height += data.height * data.weight
+	
+	return final_height
+
+## Fast height calculation with pre-filtered features (avoids repeated filtering)
+func _calculate_height_at_fast(world_pos: Vector3, active_features: Array) -> float:
+	var final_height = base_height
+	
+	# Quick path for no features
+	if active_features.is_empty():
+		return final_height
+	
+	var weighted_heights: Array[Dictionary] = []
+	
+	# Check only active features with spatial culling
+	for feature in active_features:
+		# Quick distance check before expensive influence calculation
+		var feature_pos = feature.global_position
+		var dist_sq = world_pos.distance_squared_to(feature_pos)
+		var max_influence = max(feature.influence_size.x, feature.influence_size.y)
+		var max_influence_sq = max_influence * max_influence * 1.5
+		
+		# Skip if definitely outside influence range
+		if dist_sq > max_influence_sq:
+			continue
+		
+		var weight = feature.get_influence_weight(world_pos)
+		if weight > 0.001:
+			var height = feature.get_height_at(world_pos)
+			if feature.has_method("_apply_modifiers"):
+				height = feature._apply_modifiers(world_pos, height)
+			weighted_heights.append({
+				"height": height,
+				"weight": weight * feature.strength,
+				"mode": feature.blend_mode
+			})
+	
+	# Blend all features
+	if weighted_heights.is_empty():
+		return final_height
+	
 	for data in weighted_heights:
 		match data.mode:
 			0: # Add
@@ -955,12 +1031,14 @@ func _build_texture_arrays() -> void:
 	var layer_count = min(texture_layers.size(), 32)
 	_shader_material.set_shader_parameter("layer_count", layer_count)
 	
-	# Determine the texture size (use the first valid texture's size)
-	var texture_size: Vector2i = Vector2i(1024, 1024)
+	# Determine the texture size (find the largest texture to preserve quality)
+	var texture_size: Vector2i = Vector2i(2048, 2048)  # Default to 2K for quality
 	for layer in texture_layers:
-		if layer.albedo_texture:
-			texture_size = layer.albedo_texture.get_size()
-			break
+		for tex in [layer.albedo_texture, layer.normal_texture, layer.roughness_texture, layer.metallic_texture, layer.ao_texture]:
+			if tex:
+				var size = tex.get_size()
+				texture_size.x = max(texture_size.x, size.x)
+				texture_size.y = max(texture_size.y, size.y)
 	
 	# Create arrays for layer parameters
 	var height_slope_params: Array[Vector4] = []
@@ -1040,9 +1118,7 @@ func _build_texture_arrays() -> void:
 		# Collect texture images
 		albedo_images.append(_get_or_create_image(layer.albedo_texture, texture_size, Color.WHITE))
 		normal_images.append(_get_or_create_image(layer.normal_texture, texture_size, Color(0.5, 0.5, 1.0, 1.0)))
-		roughness_images.append(_get_or_create_image(layer.roughness_texture, texture_size, Color(0.5, 0.5, 0.5, 1.0)))
-		metallic_images.append(_get_or_create_image(layer.metallic_texture, texture_size, Color.BLACK))
-		ao_images.append(_get_or_create_image(layer.ao_texture, texture_size, Color.WHITE))
+		roughness_images.append(_get_or_create_image(layer.roughness_texture, texture_size, Color.WHITE))
 	
 	# Set shader parameters
 	_shader_material.set_shader_parameter("layer_height_slope_params", height_slope_params)
@@ -1077,16 +1153,28 @@ func _build_texture_arrays() -> void:
 func _get_or_create_image(texture: Texture2D, size: Vector2i, default_color: Color) -> Image:
 	var img: Image
 	
-	if texture and texture.get_image():
-		img = texture.get_image().duplicate()
+	if texture:
+		# Get the image data from the texture
+		img = texture.get_image()
 		
-		# Convert to RGBA8 format for consistency
-		if img.get_format() != Image.FORMAT_RGBA8:
-			img.convert(Image.FORMAT_RGBA8)
-		
-		# Resize if needed (Texture2DArray requires all textures to be the same size)
-		if img.get_size() != size:
-			img.resize(size.x, size.y, Image.INTERPOLATE_LANCZOS)
+		if img:
+			img = img.duplicate()
+			
+			# Decompress if needed to preserve quality
+			if img.is_compressed():
+				img.decompress()
+			
+			# Convert to RGBA8 format for consistency
+			if img.get_format() != Image.FORMAT_RGBA8:
+				img.convert(Image.FORMAT_RGBA8)
+			
+			# Resize if needed (Texture2DArray requires all textures to be the same size)
+			if img.get_size() != size:
+				img.resize(size.x, size.y, Image.INTERPOLATE_LANCZOS)
+		else:
+			# Fallback if image can't be retrieved
+			img = Image.create(size.x, size.y, false, Image.FORMAT_RGBA8)
+			img.fill(default_color)
 	else:
 		# Create default colored image
 		img = Image.create(size.x, size.y, false, Image.FORMAT_RGBA8)
@@ -1108,6 +1196,10 @@ func _create_texture_array(images: Array[Image]) -> Texture2DArray:
 			images[i].convert(format)
 		if images[i].get_size() != size:
 			images[i].resize(size.x, size.y, Image.INTERPOLATE_LANCZOS)
+		
+		# Generate mipmaps to prevent texture aliasing/moiré patterns
+		if not images[i].has_mipmaps():
+			images[i].generate_mipmaps()
 	
 	var texture_array = Texture2DArray.new()
 	

@@ -1,11 +1,9 @@
-[gd_scene load_steps=25 format=3 uid="uid://b7x280tq4b4un"]
+[gd_scene load_steps=24 format=3 uid="uid://b7x280tq4b4un"]
 
 [ext_resource type="Script" uid="uid://bvnbjheswdsy0" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_0bhed"]
 [ext_resource type="Texture2D" uid="uid://c30o87vyn3121" path="res://textures/sky_23_2k.png" id="1_jbdfk"]
 [ext_resource type="Script" uid="uid://ddlru3rps1tmg" path="res://addons/terrainy/resources/terrain_texture_layer.gd" id="2_n4w22"]
 [ext_resource type="Texture2D" uid="uid://d0o63xppfig7q" path="res://textures/rocky_terrain/rocky_terrain_02_diff_2k.jpg" id="3_884kg"]
-[ext_resource type="Texture2D" uid="uid://cn6fjwtg2402r" path="res://textures/sand/coast_sand_03_diff_2k.jpg" id="3_jbdfk"]
-[ext_resource type="Texture2D" uid="uid://k5vf7polde3u" path="res://textures/sand/coast_sand_03_nor_gl_2k.jpg" id="4_4gl14"]
 [ext_resource type="Texture2D" uid="uid://c15mpfthvac3b" path="res://textures/rocky_terrain/rocky_terrain_02_nor_gl_2k.jpg" id="4_d4o4o"]
 [ext_resource type="Texture2D" uid="uid://c4amiux16fqhf" path="res://textures/rock/rock_05_diff_2k.jpg" id="5_gdsc3"]
 [ext_resource type="Texture2D" uid="uid://biwdpyonx0p23" path="res://textures/rock/rock_05_nor_gl_2k.jpg" id="6_svejp"]
@@ -13,6 +11,7 @@
 [ext_resource type="Texture2D" uid="uid://7ci04808kdj7" path="res://textures/snow/snow_01_diff_2k.jpg" id="8_svejp"]
 [ext_resource type="Texture2D" uid="uid://clbv4gc1wkj7w" path="res://textures/snow/snow_01_nor_gl_2k.jpg" id="9_36gju"]
 [ext_resource type="Texture2D" uid="uid://cphiu0x3nblrb" path="res://textures/snow/snow_01_rough_2k.jpg" id="10_tql22"]
+[ext_resource type="Script" uid="uid://ck4gtrjpc6yu2" path="res://addons/terrainy/nodes/basic/noise_terrain_node.gd" id="12_36gju"]
 [ext_resource type="Script" uid="uid://dru71ftjlqkij" path="res://addons/terrainy/nodes/landscapes/mountain_range_node.gd" id="14_tql22"]
 
 [sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_4gl14"]
@@ -24,26 +23,14 @@ sky_material = SubResource("PanoramaSkyMaterial_4gl14")
 [sub_resource type="Environment" id="Environment_i1g04"]
 background_mode = 2
 sky = SubResource("Sky_5g7v7")
-tonemap_mode = 2
 glow_enabled = true
-
-[sub_resource type="Resource" id="Resource_5g7v7"]
-script = ExtResource("2_n4w22")
-layer_name = "Sand"
-albedo_texture = ExtResource("3_jbdfk")
-normal_texture = ExtResource("4_4gl14")
-uv_scale = Vector2(10, 10)
-height_min = 7.0
-height_max = 10.0
-metadata/_custom_type_script = "uid://ddlru3rps1tmg"
 
 [sub_resource type="Resource" id="Resource_tql22"]
 script = ExtResource("2_n4w22")
-layer_name = "Rocky"
+layer_name = "Grass"
 albedo_texture = ExtResource("3_884kg")
 normal_texture = ExtResource("4_d4o4o")
-uv_scale = Vector2(100, 100)
-height_min = 0.0
+uv_scale = Vector2(64, 64)
 height_max = 10.0
 metadata/_custom_type_script = "uid://ddlru3rps1tmg"
 
@@ -54,7 +41,7 @@ albedo_texture = ExtResource("5_gdsc3")
 albedo_color = Color(0.49411765, 0.4, 0.24313726, 1)
 normal_texture = ExtResource("6_svejp")
 roughness_texture = ExtResource("7_36gju")
-uv_scale = Vector2(100, 100)
+uv_scale = Vector2(64, 64)
 height_min = 10.0
 height_max = 100.0
 metadata/_custom_type_script = "uid://ddlru3rps1tmg"
@@ -65,9 +52,15 @@ layer_name = "Snow"
 albedo_texture = ExtResource("8_svejp")
 normal_texture = ExtResource("9_36gju")
 roughness_texture = ExtResource("10_tql22")
-uv_scale = Vector2(10, 10)
-height_min = 80.0
+uv_scale = Vector2(64, 64)
+height_min = 76.0
+height_falloff = 12.0
 metadata/_custom_type_script = "uid://ddlru3rps1tmg"
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_5g7v7"]
+noise_type = 3
+seed = -600439699
+frequency = 0.05
 
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_jbdfk"]
 seed = -108653960
@@ -88,28 +81,42 @@ environment = SubResource("Environment_i1g04")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
 transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 166.9424, 0)
+light_color = Color(0.9779369, 0.97793704, 0.9779369, 1)
+light_energy = 0.8
 shadow_enabled = true
 
 [node name="TerrainComposer" type="Node3D" parent="."]
 script = ExtResource("1_0bhed")
-terrain_size = Vector2(4096, 4096)
-resolution = 512
-base_height = 8.0
+terrain_size = Vector2(1024, 1024)
+resolution = 1024
+update_debounce_time = 1.0
+batch_size = 128
 use_chunked_generation = true
+use_height_cache = false
 show_optimization_stats = true
-texture_layers = Array[ExtResource("2_n4w22")]([SubResource("Resource_5g7v7"), SubResource("Resource_tql22"), SubResource("Resource_jbdfk"), SubResource("Resource_4gl14")])
+texture_layers = Array[ExtResource("2_n4w22")]([SubResource("Resource_tql22"), SubResource("Resource_jbdfk"), SubResource("Resource_4gl14")])
 metadata/_custom_type_script = "uid://bvnbjheswdsy0"
 
-[node name="MountainRangeNode" type="Node3D" parent="TerrainComposer"]
+[node name="PerlinNoiseNode" type="Node3D" parent="TerrainComposer"]
+script = ExtResource("12_36gju")
+noise = SubResource("FastNoiseLite_5g7v7")
+influence_shape = 1
+influence_size = Vector2(1024, 1024)
+edge_falloff = 0.1
+metadata/_custom_type_script = "uid://ck4gtrjpc6yu2"
+metadata/_gizmo_manipulating = false
+
+[node name="MountainRangeNode" type="Node3D" parent="TerrainComposer/PerlinNoiseNode"]
 script = ExtResource("14_tql22")
 peak_noise = SubResource("FastNoiseLite_jbdfk")
 detail_noise = SubResource("FastNoiseLite_4gl14")
-height = 128.0
-direction = Vector2(0.44558674, -0.8952388)
+height = 237.23294
+direction = Vector2(0.83797616, 0.5457069)
 noise = SubResource("FastNoiseLite_tql22")
-influence_shape = 1
-influence_size = Vector2(350.54822, 301.1301)
-edge_falloff = 0.5914743264508612
+influence_shape = 2
+influence_size = Vector2(522.1407, 301.1301)
+edge_falloff = 0.5
+blend_mode = 4
 smoothing = 2
 smoothing_radius = 8.0
 metadata/_custom_type_script = "uid://dru71ftjlqkij"
