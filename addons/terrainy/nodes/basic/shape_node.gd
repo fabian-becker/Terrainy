@@ -41,22 +41,24 @@ func get_height_at(world_pos: Vector3) -> float:
 		)
 	
 	var distance = _calculate_shape_distance(pos_2d)
+	var radius = influence_size.x
 	
-	if distance >= influence_radius:
+	if distance >= radius:
 		return 0.0
 	
 	# Smooth falloff at edges
-	var edge_start = influence_radius * (1.0 - smoothness)
+	var edge_start = radius * (1.0 - smoothness)
 	var height_factor = 1.0
 	
 	if distance > edge_start:
-		var edge_t = (distance - edge_start) / (influence_radius - edge_start)
+		var edge_t = (distance - edge_start) / (radius - edge_start)
 		height_factor = 1.0 - smoothstep(0.0, 1.0, edge_t)
 	
 	return shape_height * height_factor
 
 func _calculate_shape_distance(pos: Vector2) -> float:
 	var abs_pos = Vector2(abs(pos.x), abs(pos.y))
+	var radius = influence_size.x
 	
 	match shape_type:
 		0: # Circle
@@ -67,8 +69,8 @@ func _calculate_shape_distance(pos: Vector2) -> float:
 			return abs_pos.x + abs_pos.y
 		3: # Star (5-pointed approximation)
 			var angle = atan2(pos.y, pos.x)
-			var star_radius = influence_radius * (0.6 + 0.4 * abs(sin(angle * 2.5)))
-			return pos.length() / star_radius * influence_radius
+			var star_radius = radius * (0.6 + 0.4 * abs(sin(angle * 2.5)))
+			return pos.length() / star_radius * radius
 		4: # Cross
 			return min(abs_pos.x, abs_pos.y) * 2.0 + max(abs_pos.x, abs_pos.y) * 0.5
 	

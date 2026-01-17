@@ -10,6 +10,7 @@ const TerrainMeshGenerator = preload("res://addons/terrainy/nodes/terrain_mesh_g
 
 signal terrain_updated
 signal texture_layers_changed
+signal generation_progress(stage: String, progress: float)  # Progress updates during generation
 
 @export var terrain_size: Vector2 = Vector2(100, 100):
 	set(value):
@@ -205,7 +206,8 @@ func _process(delta: float) -> void:
 					_mesh_instance.mesh = mesh
 					_update_material()
 				
-				_update_collision()
+				# Defer collision to prevent blocking
+				call_deferred("_update_collision")
 				terrain_updated.emit()
 				print("[TerrainComposer] Mesh applied successfully")
 			else:
@@ -227,12 +229,13 @@ func _update_terrain() -> void:
 		_update_terrain_immediate()
 
 func _update_terrain_immediate() -> void:
-	var mesh = _generate_terrain_mesh()
+	var mesh = await _generate_terrain_mesh()
 	if _mesh_instance:
 		_mesh_instance.mesh = mesh
 		_update_material()
 	
-	_update_collision()
+	# Defer collision to next frame to keep responsive
+	call_deferred("_update_collision")
 	terrain_updated.emit()
 
 func _update_terrain_threaded() -> void:
@@ -243,9 +246,9 @@ func _update_terrain_threaded() -> void:
 	
 	# Threading with feature nodes requires pre-calculating heights
 	# Since feature nodes use to_local() which can't be called from threads,
-	# we fall back to immediate mode if features are present
+	# we fall back to async immediate mode if features are present
 	if not _feature_nodes.is_empty():
-		print("[TerrainComposer] Features detected - using immediate mode (threading not supported with feature nodes)")
+		print("[TerrainComposer] Features detected - using async immediate mode (threading not supported with feature nodes)")
 		_update_terrain_immediate()
 		return
 	
@@ -281,48 +284,55 @@ func _generate_terrain_mesh() -> ArrayMesh:
 		var world_pos = to_global(local_pos)
 		return _calculate_height_at(world_pos)
 	
+	var scene_tree = get_tree()
+	
 	if use_chunked_generation:
-		return TerrainMeshGenerator.generate_chunked(
+		return await TerrainMeshGenerator.generate_chunked(
 			resolution,
 			terrain_size,
 			chunk_size,
 			batch_size,
 			use_parallel_processing,
-			height_callback
+			height_callback,
+			scene_tree
 		)
 	else:
-		return TerrainMeshGenerator.generate_batched(
+		return await TerrainMeshGenerator.generate_batched(
 			resolution,
 			terrain_size,
 			batch_size,
 			use_parallel_processing,
-			height_callback
+			height_callback,
+			scene_tree
 		)
 
 func _generate_mesh_on_thread() -> ArrayMesh:
 	# This runs on a worker thread for simple terrains without feature nodes
+	# Note: Can't use async/await in threads, so scene_tree is null (no yielding)
 	var thread_base_height = base_height
 	
 	var height_callback = func(local_pos: Vector3) -> float:
 		return thread_base_height
 	
-	# Generate mesh using the thread-safe callback
+	# Generate mesh using the thread-safe callback (no scene_tree = no yielding)
 	if use_chunked_generation:
-		return TerrainMeshGenerator.generate_chunked(
+		return await TerrainMeshGenerator.generate_chunked(
 			resolution,
 			terrain_size,
 			chunk_size,
 			batch_size,
 			use_parallel_processing,
-			height_callback
+			height_callback,
+			null  # No scene_tree on worker thread
 		)
 	else:
-		return TerrainMeshGenerator.generate_batched(
+		return await TerrainMeshGenerator.generate_batched(
 			resolution,
 			terrain_size,
 			batch_size,
 			use_parallel_processing,
-			height_callback
+			height_callback,
+			null  # No scene_tree on worker thread
 		)
 
 ## Pre-capture all feature node data on the main thread for thread-safe processing
@@ -346,7 +356,8 @@ func _capture_feature_data() -> Array:
 			"visible": feature.visible,
 			"global_transform": feature.global_transform,
 			"inverse_transform": feature.global_transform.affine_inverse(),
-			"influence_radius": feature.influence_radius,
+			"influence_size": feature.influence_size,
+			"influence_shape": feature.influence_shape,
 			"edge_falloff": feature.edge_falloff,
 			"strength": feature.strength,
 			"blend_mode": feature.blend_mode,
@@ -461,6 +472,8 @@ func _build_texture_arrays() -> void:
 	
 	for i in range(layer_count):
 		var layer = texture_layers[i]
+		if layer == null:
+			continue
 		
 		# Pack layer parameters
 		var slope_min_rad = deg_to_rad(layer.slope_min)

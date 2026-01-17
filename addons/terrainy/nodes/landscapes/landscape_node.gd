@@ -9,12 +9,12 @@ const TerrainFeatureNode = "res://addons/terrainy/nodes/terrain_feature_node.gd"
 @export var height: float = 30.0:
 	set(value):
 		height = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var direction: Vector2 = Vector2(1, 0):
 	set(value):
 		direction = value.normalized()
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var noise: FastNoiseLite:
 	set(value):

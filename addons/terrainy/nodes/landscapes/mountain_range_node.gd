@@ -42,7 +42,9 @@ func get_height_at(world_pos: Vector3) -> float:
 	var local_pos = to_local(world_pos)
 	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
 	
-	if distance_2d >= influence_radius:
+	var radius = influence_size.x
+	
+	if distance_2d >= radius:
 		return 0.0
 	
 	# Distance perpendicular to ridge
@@ -53,7 +55,7 @@ func get_height_at(world_pos: Vector3) -> float:
 	var along_ridge = Vector2(local_pos.x, local_pos.z).dot(direction)
 	
 	# Base ridge height profile
-	var ridge_falloff = 1.0 - pow(lateral_distance / influence_radius, ridge_sharpness)
+	var ridge_falloff = 1.0 - pow(lateral_distance / radius, ridge_sharpness)
 	ridge_falloff = max(0.0, ridge_falloff)
 	
 	var result_height = height * ridge_falloff

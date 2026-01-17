@@ -3,13 +3,14 @@ extends RefCounted
 
 ## Utility class for optimized terrain mesh generation with batching and parallel processing
 
-## Generate terrain mesh using batched approach
+## Generate terrain mesh using batched approach (async to prevent main thread blocking)
 static func generate_batched(
 	resolution: int,
 	terrain_size: Vector2,
 	batch_size: int,
 	use_parallel: bool,
-	height_callback: Callable
+	height_callback: Callable,
+	scene_tree: SceneTree = null
 ) -> ArrayMesh:
 	var start_time = Time.get_ticks_msec()
 	print("[TerrainMeshGenerator] Starting batched generation...")
@@ -33,8 +34,11 @@ static func generate_batched(
 	vertices.resize(total_vertices)
 	uvs.resize(total_vertices)
 	
-	# Generate vertices in batches
+	# Generate vertices in batches with frame yielding
 	var vertex_index = 0
+	var yield_counter = 0
+	var yield_frequency = 128  # Yield every 128 vertices
+	
 	for z in range(resolution + 1):
 		for x in range(resolution + 1):
 			var local_x = (x * step.x) - half_size.x
@@ -46,11 +50,18 @@ static func generate_batched(
 			vertices[vertex_index] = Vector3(local_x, height, local_z)
 			uvs[vertex_index] = Vector2(x / float(resolution), z / float(resolution))
 			vertex_index += 1
+			
+			# Yield to prevent blocking the main thread
+			yield_counter += 1
+			if scene_tree and yield_counter >= yield_frequency:
+				yield_counter = 0
+				await scene_tree.process_frame
 	
 	var vertex_time = Time.get_ticks_msec() - start_time
 	print("  ✓ Vertices generated in %d ms" % vertex_time)
 	
 	# Generate indices (counter-clockwise winding for correct normals)
+	yield_counter = 0
 	for z in range(resolution):
 		for x in range(resolution):
 			var i = z * (resolution + 1) + x
@@ -63,6 +74,12 @@ static func generate_batched(
 			indices.append(i + 1)
 			indices.append(i + resolution + 2)
 			indices.append(i + resolution + 1)
+			
+			# Yield periodically
+			yield_counter += 1
+			if scene_tree and yield_counter >= yield_frequency:
+				yield_counter = 0
+				await scene_tree.process_frame
 	
 	var index_time = Time.get_ticks_msec() - start_time - vertex_time
 	print("  ✓ Indices generated (%d triangles) in %d ms" % [indices.size() / 3, index_time])
@@ -71,9 +88,9 @@ static func generate_batched(
 	print("  Calculating normals...")
 	var normal_start = Time.get_ticks_msec()
 	if use_parallel:
-		normals = calculate_normals_parallel(vertices, indices, batch_size)
+		normals = await calculate_normals_parallel(vertices, indices, batch_size, scene_tree)
 	else:
-		normals = calculate_normals_batched(vertices, indices, batch_size)
+		normals = await calculate_normals_batched(vertices, indices, batch_size, scene_tree)
 	
 	# Create mesh
 	var arrays = []
@@ -93,14 +110,15 @@ static func generate_batched(
 	
 	return array_mesh
 
-## Generate terrain mesh using chunked approach for very large terrains
+## Generate terrain mesh using chunked approach for very large terrains (async)
 static func generate_chunked(
 	resolution: int,
 	terrain_size: Vector2,
 	chunk_size: int,
 	batch_size: int,
 	use_parallel: bool,
-	height_callback: Callable
+	height_callback: Callable,
+	scene_tree: SceneTree = null
 ) -> ArrayMesh:
 	var start_time = Time.get_ticks_msec()
 	print("[TerrainMeshGenerator] Starting chunked generation...")
@@ -181,9 +199,9 @@ static func generate_chunked(
 			# Calculate normals for this chunk
 			var chunk_normals: PackedVector3Array
 			if use_parallel:
-				chunk_normals = calculate_normals_parallel(chunk_vertices, chunk_indices, batch_size)
+				chunk_normals = await calculate_normals_parallel(chunk_vertices, chunk_indices, batch_size, scene_tree)
 			else:
-				chunk_normals = calculate_normals_batched(chunk_vertices, chunk_indices, batch_size)
+				chunk_normals = await calculate_normals_batched(chunk_vertices, chunk_indices, batch_size, scene_tree)
 			
 			# Create mesh surface for this chunk
 			var arrays = []
@@ -202,17 +220,22 @@ static func generate_chunked(
 				chunk_indices.size() / 3,
 				chunk_time
 			])
+			
+			# Yield after each chunk to keep editor responsive
+			if scene_tree:
+				await scene_tree.process_frame
 	
 	var total_time = Time.get_ticks_msec() - start_time
 	print("[TerrainMeshGenerator] ✓ Chunked generation complete (%d surfaces) in %d ms" % [array_mesh.get_surface_count(), total_time])
 	
 	return array_mesh
 
-## Calculate normals using batched processing
+## Calculate normals using batched processing (async)
 static func calculate_normals_batched(
 	vertices: PackedVector3Array,
 	indices: PackedInt32Array,
-	batch_size: int
+	batch_size: int,
+	scene_tree: SceneTree = null
 ) -> PackedVector3Array:
 	print("    [Batched] Processing %d triangles in batches of %d..." % [indices.size() / 3, batch_size])
 	
@@ -249,6 +272,10 @@ static func calculate_normals_batched(
 			normals[i2] += normal
 		
 		current_batch = batch_end
+		
+		# Yield every few batches to prevent blocking
+		if scene_tree and batch_num % 4 == 0:
+			await scene_tree.process_frame
 	
 	# Normalize all normals in batches
 	for i in range(normals.size()):
@@ -258,11 +285,12 @@ static func calculate_normals_batched(
 	
 	return normals
 
-## Calculate normals using parallel processing with worker threads
+## Calculate normals using parallel processing with worker threads (async)
 static func calculate_normals_parallel(
 	vertices: PackedVector3Array,
 	indices: PackedInt32Array,
-	batch_size: int
+	batch_size: int,
+	scene_tree: SceneTree = null
 ) -> PackedVector3Array:
 	print("    [Parallel] Processing %d triangles with optimized batching..." % [indices.size() / 3])
 	
@@ -306,6 +334,10 @@ static func calculate_normals_parallel(
 			normals[i0] += normal
 			normals[i1] += normal
 			normals[i2] += normal
+		
+		# Yield every few batches
+		if scene_tree and batch_idx % 4 == 0:
+			await scene_tree.process_frame
 	
 	# Normalize in batches
 	var vert_batch_size = 128

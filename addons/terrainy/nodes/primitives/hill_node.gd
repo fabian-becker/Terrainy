@@ -14,11 +14,12 @@ const PrimitiveNode = preload("res://addons/terrainy/nodes/primitives/primitive_
 func get_height_at(world_pos: Vector3) -> float:
 	var local_pos = to_local(world_pos)
 	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
+	var radius = influence_size.x
 	
-	if distance_2d >= influence_radius:
+	if distance_2d >= radius:
 		return 0.0
 	
-	var normalized_distance = distance_2d / influence_radius
+	var normalized_distance = distance_2d / radius
 	var height_multiplier = 0.0
 	
 	match shape:
