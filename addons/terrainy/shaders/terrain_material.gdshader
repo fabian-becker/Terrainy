@@ -8,11 +8,11 @@ varying vec3 world_pos;
 const int MAX_LAYERS = 32;
 
 // Texture arrays for PBR materials
-uniform sampler2DArray albedo_textures : filter_linear_mipmap, repeat_enable;
-uniform sampler2DArray normal_textures : filter_linear_mipmap, repeat_enable;
-uniform sampler2DArray roughness_textures : filter_linear_mipmap, repeat_enable;
-uniform sampler2DArray metallic_textures : filter_linear_mipmap, repeat_enable;
-uniform sampler2DArray ao_textures : filter_linear_mipmap, repeat_enable;
+uniform sampler2DArray albedo_textures : filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2DArray normal_textures : filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2DArray roughness_textures : filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2DArray metallic_textures : filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2DArray ao_textures : filter_linear_mipmap_anisotropic, repeat_enable;
 
 // Layer count
 uniform int layer_count : hint_range(0, 32) = 0;
@@ -35,9 +35,44 @@ uniform vec4 layer_extra_flags[MAX_LAYERS];
 
 // World space parameters for blending
 uniform float world_height_offset = 0.0;
+uniform float blend_noise_scale : hint_range(0.0, 100.0) = 10.0;
+uniform float blend_noise_strength : hint_range(0.0, 20.0) = 2.0;
+
+// Simple 2D noise function for height variation
+float hash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float noise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	
+	float a = hash(i);
+	float b = hash(i + vec2(1.0, 0.0));
+	float c = hash(i + vec2(0.0, 1.0));
+	float d = hash(i + vec2(1.0, 1.0));
+	
+	return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// Fractal noise for more organic variation
+float fbm(vec2 p) {
+	float value = 0.0;
+	float amplitude = 0.5;
+	float frequency = 1.0;
+	
+	for (int i = 0; i < 4; i++) {
+		value += amplitude * noise(p * frequency);
+		frequency *= 2.0;
+		amplitude *= 0.5;
+	}
+	
+	return value;
+}
 
 // Calculate blend weight for a layer based on height and slope
-float calculate_layer_weight(int layer_idx, float world_height, float slope_angle) {
+float calculate_layer_weight(int layer_idx, float world_height, float slope_angle, vec2 world_xz) {
 	vec4 hs_params = layer_height_slope_params[layer_idx];
 	vec4 blend_params = layer_blend_params[layer_idx];
 	
@@ -51,35 +86,45 @@ float calculate_layer_weight(int layer_idx, float world_height, float slope_angl
 	
 	float weight = 1.0;
 	
-	// Height influence with falloff
-	if (world_height < height_min - height_falloff) {
-		return 0.0;
-	} else if (world_height < height_min + height_falloff) {
-		float t = (world_height - (height_min - height_falloff)) / (height_falloff * 2.0);
-		weight *= smoothstep(0.0, 1.0, t);
-	}
+	// Add noise-based height variation to break up horizontal banding
+	float height_noise = fbm(world_xz / blend_noise_scale) * 2.0 - 1.0;
+	float adjusted_height = world_height + height_noise * blend_noise_strength;
 	
-	if (world_height > height_max + height_falloff) {
-		return 0.0;
-	} else if (world_height > height_max - height_falloff) {
-		float t = ((height_max + height_falloff) - world_height) / (height_falloff * 2.0);
-		weight *= smoothstep(0.0, 1.0, t);
+	// Height influence with smoother falloff
+	float height_weight = 1.0;
+	if (height_falloff > 0.001) {
+		if (adjusted_height < height_min) {
+			float dist = height_min - adjusted_height;
+			height_weight *= 1.0 - smoothstep(0.0, height_falloff, dist);
+		} else if (adjusted_height > height_max) {
+			float dist = adjusted_height - height_max;
+			height_weight *= 1.0 - smoothstep(0.0, height_falloff, dist);
+		}
+	} else {
+		// No falloff - hard cutoff
+		if (adjusted_height < height_min || adjusted_height > height_max) {
+			return 0.0;
+		}
 	}
+	weight *= height_weight;
 	
-	// Slope influence with falloff
-	if (slope_angle < slope_min - slope_falloff) {
-		return 0.0;
-	} else if (slope_angle < slope_min + slope_falloff) {
-		float t = (slope_angle - (slope_min - slope_falloff)) / (slope_falloff * 2.0);
-		weight *= smoothstep(0.0, 1.0, t);
+	// Slope influence with smoother falloff
+	float slope_weight = 1.0;
+	if (slope_falloff > 0.001) {
+		if (slope_angle < slope_min) {
+			float dist = slope_min - slope_angle;
+			slope_weight *= 1.0 - smoothstep(0.0, slope_falloff, dist);
+		} else if (slope_angle > slope_max) {
+			float dist = slope_angle - slope_max;
+			slope_weight *= 1.0 - smoothstep(0.0, slope_falloff, dist);
+		}
+	} else {
+		// No falloff - hard cutoff
+		if (slope_angle < slope_min || slope_angle > slope_max) {
+			return 0.0;
+		}
 	}
-	
-	if (slope_angle > slope_max + slope_falloff) {
-		return 0.0;
-	} else if (slope_angle > slope_max - slope_falloff) {
-		float t = ((slope_max + slope_falloff) - slope_angle) / (slope_falloff * 2.0);
-		weight *= smoothstep(0.0, 1.0, t);
-	}
+	weight *= slope_weight;
 	
 	return weight * layer_strength;
 }
@@ -93,6 +138,7 @@ void fragment() {
 	// Use world position from vertex shader for proper texture mapping
 	float world_height = world_pos.y + world_height_offset;
 	float slope_angle = acos(clamp(NORMAL.y, 0.0, 1.0)); // In radians
+	vec2 world_xz = vec2(world_pos.x, world_pos.z);
 	
 	// Handle case when no layers exist
 	if (layer_count == 0) {
@@ -106,19 +152,21 @@ void fragment() {
 		float total_weight = 0.0;
 		
 		for (int i = 0; i < layer_count && i < MAX_LAYERS; i++) {
-			weights[i] = calculate_layer_weight(i, world_height, slope_angle);
+			weights[i] = calculate_layer_weight(i, world_height, slope_angle, world_xz);
 			total_weight += weights[i];
 		}
 		
-		// Normalize weights
+		// Normalize weights with minimum threshold to ensure smooth blending
 		if (total_weight > 0.001) {
 			for (int i = 0; i < layer_count && i < MAX_LAYERS; i++) {
 				weights[i] /= total_weight;
 			}
 		} else {
 			// No layers contribute - use first layer with full weight
-			weights[0] = 1.0;
-			total_weight = 1.0;
+			if (layer_count > 0) {
+				weights[0] = 1.0;
+				total_weight = 1.0;
+			}
 		}
 		
 		// Blend all layers
@@ -153,9 +201,12 @@ void fragment() {
 			if (tex_flags.y > 0.5) { // has_normal
 				vec3 normal_sample = texture(normal_textures, vec3(layer_uv, float(i))).rgb;
 				// Convert from [0,1] to [-1,1] tangent space
-				vec3 normal_ts = normalize(normal_sample * 2.0 - 1.0);
+				vec3 normal_ts = normal_sample * 2.0 - 1.0;
 				// Apply strength by lerping between flat normal and sampled normal
-				layer_normal_tangent = normalize(mix(vec3(0.0, 0.0, 1.0), normal_ts, color_normal.w));
+				// Clamp strength to prevent overly harsh normals
+				float normal_strength = clamp(color_normal.w, 0.0, 1.0);
+				layer_normal_tangent = mix(vec3(0.0, 0.0, 1.0), normal_ts, normal_strength * 0.5);
+				layer_normal_tangent = normalize(layer_normal_tangent);
 			}
 			
 			// Sample roughness
@@ -176,33 +227,19 @@ void fragment() {
 				ao = mix(1.0, texture(ao_textures, vec3(layer_uv, float(i))).r, pbr_params.z);
 			}
 			
-			// Blend based on blend mode
-			int blend_mode = int(layer_blend_params[i].w);
+			// Simple weighted blend (weights are already normalized to sum to 1.0)
 			float weight = weights[i];
-			
-			if (blend_mode == 0) { // Normal blend
-				final_albedo += albedo * weight;
-				final_normal_map += layer_normal_tangent * weight;
-				final_roughness += roughness * weight;
-				final_metallic += metallic_val * weight;
-				final_ao += ao * weight;
-			} else if (blend_mode == 1) { // Add
-				final_albedo += albedo * weight;
-				final_normal_map += layer_normal_tangent * weight;
-				final_roughness += roughness * weight;
-				final_metallic += metallic_val * weight;
-				final_ao += ao * weight;
-			} else if (blend_mode == 2) { // Multiply
-				final_albedo = mix(final_albedo, final_albedo * albedo, weight);
-				final_normal_map += layer_normal_tangent * weight;
-				final_roughness = mix(final_roughness, final_roughness * roughness, weight);
-				final_metallic = mix(final_metallic, final_metallic * metallic_val, weight);
-				final_ao = mix(final_ao, final_ao * ao, weight);
-			}
+			final_albedo += albedo * weight;
+			final_normal_map += layer_normal_tangent * weight;
+			final_roughness += roughness * weight;
+			final_metallic += metallic_val * weight;
+			final_ao += ao * weight;
 		}
 		
-		// Normalize the blended normal vector
+		// Normalize the blended normal vector and soften it
 		vec3 final_normal = normalize(final_normal_map);
+		// Blend normal with flat normal to reduce harshness
+		final_normal = normalize(mix(vec3(0.0, 0.0, 1.0), final_normal, 0.7));
 		
 		// Output
 		ALBEDO = final_albedo;

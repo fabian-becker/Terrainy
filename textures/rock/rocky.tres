@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="TerrainTextureLayer" load_steps=5 format=3 uid="uid://dh8b8e3m2ucl7"]
+
+[ext_resource type="Texture2D" uid="uid://c4amiux16fqhf" path="res://textures/rock/rock_05_diff_2k.jpg" id="1_jacm2"]
+[ext_resource type="Texture2D" uid="uid://biwdpyonx0p23" path="res://textures/rock/rock_05_nor_gl_2k.jpg" id="2_0qvy0"]
+[ext_resource type="Texture2D" uid="uid://bjffoy7hav6p1" path="res://textures/rock/rock_05_rough_2k.jpg" id="3_43dt7"]
+[ext_resource type="Script" uid="uid://ddlru3rps1tmg" path="res://addons/terrainy/resources/terrain_texture_layer.gd" id="4_ij161"]
+
+[resource]
+script = ExtResource("4_ij161")
+layer_name = "Rocky"
+albedo_texture = ExtResource("1_jacm2")
+albedo_color = Color(0.49411765, 0.4, 0.24313726, 1)
+normal_texture = ExtResource("2_0qvy0")
+roughness_texture = ExtResource("3_43dt7")
+uv_scale = Vector2(64, 64)
+height_min = 8.0
+height_max = 100.0
+metadata/_custom_type_script = "uid://ddlru3rps1tmg"
