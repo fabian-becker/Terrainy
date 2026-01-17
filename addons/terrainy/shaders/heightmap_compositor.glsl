@@ -5,8 +5,8 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-// Output heightmap
-layout(rgba32f, set = 0, binding = 0) uniform writeonly image2D output_heightmap;
+// Output heightmap (r32f for 4x bandwidth reduction)
+layout(r32f, set = 0, binding = 0) uniform writeonly image2D output_heightmap;
 
 // Input data as storage buffers (simpler and more compatible)
 layout(std430, set = 0, binding = 1) readonly buffer HeightmapData {
@@ -72,8 +72,9 @@ void main() {
     int pixel_index = pixel_coords.y * params.resolution_x + pixel_coords.x;
     int total_pixels = params.resolution_x * params.resolution_y;
     
-    // Blend each layer
-    for (int i = 0; i < params.layer_count; i++) {
+    // Blend each layer (clamp to 32 to prevent buffer overrun)
+    int layer_count = min(params.layer_count, 32);
+    for (int i = 0; i < layer_count; i++) {
         // Calculate offset for this layer
         int layer_offset = i * total_pixels;
         int data_index = layer_offset + pixel_index;

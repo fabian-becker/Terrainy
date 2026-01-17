@@ -463,11 +463,16 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 	# Handle 0: Size X (width/radius)
 	if handle_index == handle_id:
 		if cancel:
-			node.influence_size = restore
+			# Restore is a float (influence_size.x), need to update only X component
+			if node.influence_shape == TerrainFeatureNode.InfluenceShape.CIRCLE:
+				node.influence_size = Vector2(restore, restore)
+			else:
+				node.influence_size.x = restore
 		else:
-			undo_redo.create_action("Change Influence Size")
+			undo_redo.create_action("Change Influence Size X")
 			undo_redo.add_do_property(node, "influence_size", node.influence_size)
-			undo_redo.add_undo_property(node, "influence_size", restore)
+			undo_redo.add_undo_property(node, "influence_size", 
+				Vector2(restore, restore) if node.influence_shape == TerrainFeatureNode.InfluenceShape.CIRCLE else Vector2(restore, node.influence_size.y))
 			undo_redo.commit_action()
 		if was_manipulating:
 			node.parameters_changed.emit()
@@ -475,14 +480,15 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 	handle_index += 1
 	
 	# Handle 1: Size Y (depth, for rectangle and ellipse)
-	if node.influence_shape != TerrainFeatureNode.InfluenceShape.CIRCLE or cancel:
+	if node.influence_shape != TerrainFeatureNode.InfluenceShape.CIRCLE:
 		if handle_index == handle_id:
 			if cancel:
-				node.influence_size = restore
+				# Restore is a float (influence_size.y), need to update only Y component
+				node.influence_size.y = restore
 			else:
 				undo_redo.create_action("Change Influence Depth")
 				undo_redo.add_do_property(node, "influence_size", node.influence_size)
-				undo_redo.add_undo_property(node, "influence_size", restore)
+				undo_redo.add_undo_property(node, "influence_size", Vector2(node.influence_size.x, restore))
 				undo_redo.commit_action()
 			if was_manipulating:
 				node.parameters_changed.emit()

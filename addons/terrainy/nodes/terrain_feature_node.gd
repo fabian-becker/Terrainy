@@ -2,6 +2,8 @@
 class_name TerrainFeatureNode
 extends Node3D
 
+const HeightmapModifierProcessor = preload("res://addons/terrainy/nodes/heightmap_modifier_processor.gd")
+
 ## Base class for all terrain feature nodes that can be positioned and blended
 
 signal parameters_changed
@@ -120,6 +122,17 @@ var _smoothing_cache: Dictionary = {}
 # Internal cache for heightmap generation
 var _heightmap_dirty: bool = true
 
+# GPU modifier processor (shared across all features)
+static var _gpu_modifier_processor: HeightmapModifierProcessor = null
+
+## Get or create the shared GPU modifier processor
+static func _get_gpu_modifier_processor() -> HeightmapModifierProcessor:
+	if not _gpu_modifier_processor:
+		_gpu_modifier_processor = HeightmapModifierProcessor.new()
+		if not _gpu_modifier_processor.is_available():
+			push_warning("[TerrainFeatureNode] GPU modifiers unavailable, will use CPU fallback")
+	return _gpu_modifier_processor
+
 ## Generate height value at a given world position
 ## Override this in derived classes
 func get_height_at(world_pos: Vector3) -> float:
@@ -136,19 +149,44 @@ func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:
 	# Calculate step size
 	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
 	
-	# Generate heightmap
+	# Generate RAW heightmap (no modifiers)
 	for y in range(resolution.y):
 		for x in range(resolution.x):
 			var world_x = terrain_bounds.position.x + (x * step.x)
 			var world_z = terrain_bounds.position.y + (y * step.y)
 			var world_pos = Vector3(world_x, 0, world_z)
 			
-			# Get height with modifiers applied
+			# Get raw height (no modifiers yet)
 			var height = get_height_at(world_pos)
-			height = _apply_modifiers(world_pos, height)
 			
 			# Store in heightmap
 			heightmap.set_pixel(x, y, Color(height, 0, 0, 1))
+	
+	# Apply modifiers (GPU if available, CPU fallback)
+	if _has_any_modifiers():
+		var processor = _get_gpu_modifier_processor()
+		if processor and processor.is_available():
+			# Apply modifiers on GPU
+			var modified = processor.apply_modifiers(
+				heightmap,
+				int(smoothing),
+				smoothing_radius,
+				enable_terracing,
+				terrace_levels,
+				terrace_smoothness,
+				enable_min_clamp,
+				min_height,
+				enable_max_clamp,
+				max_height
+			)
+			if modified:
+				heightmap = modified
+			else:
+				# GPU failed, fall back to CPU
+				_apply_modifiers_cpu(heightmap, terrain_bounds)
+		else:
+			# No GPU, use CPU
+			_apply_modifiers_cpu(heightmap, terrain_bounds)
 	
 	_heightmap_dirty = false
 	
@@ -157,6 +195,28 @@ func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:
 		print("[%s] Generated %dx%d heightmap in %d ms" % [name, resolution.x, resolution.y, elapsed])
 	
 	return heightmap
+
+## Check if any modifiers are enabled
+func _has_any_modifiers() -> bool:
+	return smoothing != SmoothingMode.NONE or \
+		   enable_terracing or \
+		   enable_min_clamp or \
+		   enable_max_clamp
+
+## Apply modifiers on CPU (fallback)
+func _apply_modifiers_cpu(heightmap: Image, terrain_bounds: Rect2) -> void:
+	var resolution = Vector2i(heightmap.get_width(), heightmap.get_height())
+	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
+	
+	for y in range(resolution.y):
+		for x in range(resolution.x):
+			var world_x = terrain_bounds.position.x + (x * step.x)
+			var world_z = terrain_bounds.position.y + (y * step.y)
+			var world_pos = Vector3(world_x, 0, world_z)
+			
+			var height = heightmap.get_pixel(x, y).r
+			height = _apply_modifiers(world_pos, height)
+			heightmap.set_pixel(x, y, Color(height, 0, 0, 1))
 
 ## Mark heightmap as dirty (needs regeneration)
 func mark_dirty() -> void:

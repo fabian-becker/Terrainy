@@ -16,6 +16,7 @@ signal texture_layers_changed
 	set(value):
 		terrain_size = value
 		_heightmap_cache.clear()  # Resolution-dependent, must regenerate
+		_influence_cache.clear()  # Also depends on bounds
 		if auto_update and is_inside_tree():
 			rebuild_terrain()
 
@@ -23,6 +24,7 @@ signal texture_layers_changed
 	set(value):
 		resolution = clamp(value, 16, 512)
 		_heightmap_cache.clear()  # Resolution-dependent, must regenerate
+		_influence_cache.clear()  # Also depends on resolution
 		if auto_update and is_inside_tree():
 			rebuild_terrain()
 
@@ -78,9 +80,13 @@ var _is_generating: bool = false
 
 # Heightmap composition cache
 var _heightmap_cache: Dictionary = {}  # feature -> Image
+var _influence_cache: Dictionary = {}  # feature -> Image
+var _influence_cache_keys: Dictionary = {}  # feature -> cache key
 var _final_heightmap: Image
 var _terrain_bounds: Rect2
 var _gpu_compositor: HeightmapCompositor
+var _cached_resolution: Vector2i
+var _cached_bounds: Rect2
 
 func _ready() -> void:
 	# Initialize GPU compositor if enabled
@@ -123,7 +129,7 @@ func _scan_features() -> void:
 	# Connect new signals
 	for feature in _feature_nodes:
 		if is_instance_valid(feature):
-			feature.parameters_changed.connect(_on_feature_changed)
+			feature.parameters_changed.connect(_on_feature_changed.bind(feature))
 
 func _scan_recursive(node: Node) -> void:
 	for child in node.get_children():
@@ -153,9 +159,27 @@ func _initialize_gpu_compositor() -> void:
 	else:
 		print("[TerrainComposer] GPU compositor ready")
 
-func _on_feature_changed() -> void:
+func _on_feature_changed(feature: TerrainFeatureNode) -> void:
+	# Only invalidate influence if influence-related properties changed
+	# (position, influence_size, influence_shape, edge_falloff)
+	var current_key = _get_influence_cache_key(feature)
+	if _influence_cache_keys.get(feature) != current_key:
+		if _influence_cache.has(feature):
+			_influence_cache.erase(feature)
+		_influence_cache_keys[feature] = current_key
+	
 	if auto_update:
 		rebuild_terrain()
+
+## Generate cache key for influence map based on properties that affect it
+func _get_influence_cache_key(feature: TerrainFeatureNode) -> String:
+	# Only include properties that affect influence calculation
+	return "%s_%s_%s_%s" % [
+		feature.global_position,
+		feature.influence_size,
+		feature.influence_shape,
+		feature.edge_falloff
+	]
 
 func _on_texture_layer_changed() -> void:
 	_update_material()
@@ -175,6 +199,12 @@ func rebuild_terrain() -> void:
 	
 	# Resolution for heightmaps
 	var heightmap_resolution = Vector2i(resolution + 1, resolution + 1)
+	
+	# Check if resolution or bounds changed (invalidate influence cache)
+	if _cached_resolution != heightmap_resolution or _cached_bounds != _terrain_bounds:
+		_influence_cache.clear()
+		_cached_resolution = heightmap_resolution
+		_cached_bounds = _terrain_bounds
 	
 	# Step 1: Generate/update heightmaps for dirty features
 	for feature in _feature_nodes:
@@ -232,8 +262,16 @@ func _compose_heightmaps_gpu(resolution: Vector2i) -> Image:
 		if feature_map.get_width() != resolution.x or feature_map.get_height() != resolution.y:
 			continue
 		
-		# Generate influence map for this feature
-		var influence_map = _generate_influence_map(feature, resolution)
+		# Get or generate cached influence map
+		var influence_map: Image
+		var cache_key = _get_influence_cache_key(feature)
+		
+		if _influence_cache.has(feature) and _influence_cache_keys.get(feature) == cache_key:
+			influence_map = _influence_cache[feature]
+		else:
+			influence_map = _generate_influence_map(feature, resolution)
+			_influence_cache[feature] = influence_map
+			_influence_cache_keys[feature] = cache_key
 		
 		feature_heightmaps.append(feature_map)
 		influence_maps.append(influence_map)
@@ -270,9 +308,9 @@ func _generate_influence_map(feature: TerrainFeatureNode, resolution: Vector2i) 
 	var step = _terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
 	
 	for y in range(resolution.y):
+		var world_z = _terrain_bounds.position.y + (y * step.y)
 		for x in range(resolution.x):
 			var world_x = _terrain_bounds.position.x + (x * step.x)
-			var world_z = _terrain_bounds.position.y + (y * step.y)
 			var world_pos = Vector3(world_x, 0, world_z)
 			
 			var weight = feature.get_influence_weight(world_pos)
@@ -288,6 +326,9 @@ func _compose_heightmaps_cpu(resolution: Vector2i) -> Image:
 	var final_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
 	final_map.fill(Color(base_height, 0, 0, 1))
 	
+	# Hoist step calculation outside loops
+	var step = _terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
+	
 	# Blend each feature's heightmap
 	for feature in _feature_nodes:
 		if not _heightmap_cache.has(feature):
@@ -302,11 +343,10 @@ func _compose_heightmaps_cpu(resolution: Vector2i) -> Image:
 		
 		# Blend feature into final heightmap
 		for y in range(resolution.y):
+			var world_z = _terrain_bounds.position.y + (y * step.y)
 			for x in range(resolution.x):
 				# Calculate world position for influence weight
-				var step = _terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
 				var world_x = _terrain_bounds.position.x + (x * step.x)
-				var world_z = _terrain_bounds.position.y + (y * step.y)
 				var world_pos = Vector3(world_x, 0, world_z)
 				
 				# Get influence weight
@@ -507,6 +547,12 @@ func _build_texture_arrays() -> void:
 	_shader_material.set_shader_parameter("layer_pbr_params", pbr_params)
 	_shader_material.set_shader_parameter("layer_texture_flags", texture_flags)
 	_shader_material.set_shader_parameter("layer_extra_flags", extra_flags)
+	
+	# Set texture index mapping (identity for now: layer i → texture slot i)
+	var texture_indices: PackedInt32Array = []
+	for i in range(layer_count):
+		texture_indices.append(i)
+	_shader_material.set_shader_parameter("layer_texture_index", texture_indices)
 	
 	# Create texture arrays
 	var albedo_array = _create_texture_array(albedo_images)

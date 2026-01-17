@@ -181,6 +181,7 @@ func _find_terrain_composer_recursive(node: Node) -> Node3D:
 	return null
 
 func _on_rebuild_pressed() -> void:
+	print("[Terrainy] Rebuild Terrain button pressed")
 	# Rebuild the selected terrain composer, or find one in the tree
 	var target = current_terrain_composer
 	if not target or not is_instance_valid(target):
