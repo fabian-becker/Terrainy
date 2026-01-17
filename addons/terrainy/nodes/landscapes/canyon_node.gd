@@ -29,7 +29,10 @@ func _ready() -> void:
 
 func get_height_at(world_pos: Vector3) -> float:
 	var local_pos = to_local(world_pos)
-	
+	return get_height_at_safe(world_pos, local_pos)
+
+## Thread-safe version using pre-computed local position
+func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
 	# Calculate distance perpendicular to canyon direction
 	var perpendicular = Vector2(-direction.y, direction.x)
 	var lateral_distance = abs(Vector2(local_pos.x, local_pos.z).dot(perpendicular))
