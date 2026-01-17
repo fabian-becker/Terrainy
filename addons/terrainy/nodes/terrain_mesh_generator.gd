@@ -119,9 +119,9 @@ static func generate_batched(
 			uvs[vertex_index] = Vector2(x / float(resolution), z / float(resolution))
 			vertex_index += 1
 			
-			# Yield to prevent blocking the main thread
+			# Yield to prevent blocking the main thread (less frequent for speed)
 			yield_counter += 1
-			if scene_tree and yield_counter >= yield_frequency:
+			if scene_tree and yield_counter >= 2048:  # Increased from 128
 				yield_counter = 0
 				await scene_tree.process_frame
 	
@@ -143,9 +143,9 @@ static func generate_batched(
 			indices.append(i + resolution + 2)
 			indices.append(i + resolution + 1)
 			
-			# Yield periodically
+			# Yield periodically (less frequent)
 			yield_counter += 1
-			if scene_tree and yield_counter >= yield_frequency:
+			if scene_tree and yield_counter >= 2048:
 				yield_counter = 0
 				await scene_tree.process_frame
 	
@@ -221,8 +221,8 @@ static func generate_chunked(
 			heights[vertex_idx] = height_callback.call(world_pos)
 			vertex_idx += 1
 			
-			# Yield periodically to keep editor responsive
-			if scene_tree and vertex_idx % 2048 == 0:
+			# Yield periodically to keep editor responsive (less frequent for performance)
+			if scene_tree and vertex_idx % 16384 == 0:
 				await scene_tree.process_frame
 	
 	var height_calc_time = Time.get_ticks_msec() - height_calc_start
@@ -238,7 +238,7 @@ static func generate_chunked(
 	var all_indices: PackedInt32Array = []
 	
 	# Process chunks in parallel batches
-	var parallel_batch_size = 32  # Process 32 chunks at a time
+	var parallel_batch_size = 128  # Process 128 chunks at a time for better performance
 	var num_batches = ceili(float(total_chunks) / parallel_batch_size)
 	
 	# Shared array to store results (thread-safe writes to different indices)
@@ -250,7 +250,7 @@ static func generate_chunked(
 		var batch_end = mini(batch_start + parallel_batch_size, total_chunks)
 		var batch_size_actual = batch_end - batch_start
 		
-		if batch_idx % 5 == 0 or batch_idx == num_batches - 1:
+		if batch_idx % 10 == 0 or batch_idx == num_batches - 1:
 			print("    Processing batch %d/%d (%.1f%%)..." % [batch_idx + 1, num_batches, ((batch_idx + 1) * 100.0) / num_batches])
 		
 		# Use WorkerThreadPool for parallel processing
@@ -276,8 +276,8 @@ static func generate_chunked(
 		for task_id in tasks:
 			WorkerThreadPool.wait_for_task_completion(task_id)
 		
-		# Yield to keep editor responsive
-		if scene_tree:
+		# Yield to keep editor responsive (less frequent for better performance)
+		if scene_tree and batch_idx % 4 == 0:
 			await scene_tree.process_frame
 	
 	# Merge all chunk results into final arrays
@@ -331,51 +331,54 @@ static func calculate_normals_batched(
 	batch_size: int,
 	scene_tree: SceneTree = null
 ) -> PackedVector3Array:
-	print("    [Batched] Processing %d triangles in batches of %d..." % [indices.size() / 3, batch_size])
+	var num_triangles = indices.size() / 3
+	print("    [Batched] Processing %d triangles..." % num_triangles)
 	
 	var normals: PackedVector3Array = []
 	normals.resize(vertices.size())
 	
-	# Initialize all normals to up
+	# Initialize all normals to zero
 	for i in range(normals.size()):
-		normals[i] = Vector3.UP
+		normals[i] = Vector3.ZERO
 	
-	# Process triangles in batches
-	var num_triangles = indices.size() / 3
-	var num_batches = ceili(float(num_triangles) / batch_size)
+	# Use larger batches (32K triangles)
+	var optimized_batch_size = 32768
+	var num_batches = ceili(float(num_triangles) / optimized_batch_size)
 	var current_batch = 0
-	var batch_num = 0
 	
-	while current_batch < num_triangles:
-		batch_num += 1
-		var batch_end = min(current_batch + batch_size, num_triangles)
+	for batch_idx in range(num_batches):
+		var start_tri = batch_idx * optimized_batch_size
+		var end_tri = min(start_tri + optimized_batch_size, num_triangles)
 		
-		for tri_idx in range(current_batch, batch_end):
+		# Tight loop for performance
+		for tri_idx in range(start_tri, end_tri):
 			var i = tri_idx * 3
 			var i0 = indices[i]
 			var i1 = indices[i + 1]
 			var i2 = indices[i + 2]
 			
-			var v0 = vertices[i0]
-			var v1 = vertices[i1]
-			var v2 = vertices[i2]
+			# Calculate face normal (unnormalized for speed)
+			var edge1 = vertices[i1] - vertices[i0]
+			var edge2 = vertices[i2] - vertices[i0]
+			var normal = edge1.cross(edge2)
 			
-			var normal = (v1 - v0).cross(v2 - v0).normalized()
 			normals[i0] += normal
 			normals[i1] += normal
 			normals[i2] += normal
 		
-		current_batch = batch_end
-		
-		# Yield every few batches to prevent blocking
-		if scene_tree and batch_num % 4 == 0:
+		# Yield less frequently
+		if scene_tree and batch_idx % 8 == 0 and batch_idx > 0:
 			await scene_tree.process_frame
 	
-	# Normalize all normals in batches
+	# Normalize all normals
 	for i in range(normals.size()):
-		normals[i] = normals[i].normalized()
+		var n = normals[i]
+		if n.length_squared() > 0.0:
+			normals[i] = n.normalized()
+		else:
+			normals[i] = Vector3.UP
 	
-	print("    [Batched] ✓ Processed %d batches" % num_batches)
+	print("    [Batched] ✓ Complete")
 	
 	return normals
 
@@ -386,61 +389,59 @@ static func calculate_normals_parallel(
 	batch_size: int,
 	scene_tree: SceneTree = null
 ) -> PackedVector3Array:
-	print("    [Parallel] Processing %d triangles with optimized batching..." % [indices.size() / 3])
+	var num_triangles = indices.size() / 3
+	print("    [Parallel] Processing %d triangles..." % num_triangles)
 	
 	var normals: PackedVector3Array = []
 	normals.resize(vertices.size())
 	
-	# Initialize all normals to up
+	# Initialize all normals to zero (we'll normalize at the end)
 	for i in range(normals.size()):
-		normals[i] = Vector3.UP
+		normals[i] = Vector3.ZERO
 	
-	# Calculate face normals and accumulate
-	# Note: GDScript doesn't have true multi-threading for this use case,
-	# but we can optimize by processing in larger batches and using
-	# more efficient loops
-	var num_triangles = indices.size() / 3
-	var batch_count = ceili(float(num_triangles) / batch_size)
-	print("    [Parallel] Processing in %d optimized batches (batch size: %d)" % [batch_count, batch_size])
+	# Use much larger batches for better performance (64K triangles per batch)
+	var optimized_batch_size = 65536
+	var batch_count = ceili(float(num_triangles) / optimized_batch_size)
+	print("    [Parallel] Processing in %d batches (batch size: %d)" % [batch_count, optimized_batch_size])
 	
-	# Process batches
+	# Process all triangles with minimal yielding
 	for batch_idx in range(batch_count):
-		var start_tri = batch_idx * batch_size
-		var end_tri = min(start_tri + batch_size, num_triangles)
+		var start_tri = batch_idx * optimized_batch_size
+		var end_tri = min(start_tri + optimized_batch_size, num_triangles)
 		
-		# Process triangles in this batch
-		for tri_idx in range(start_tri, end_tri):
-			var i = tri_idx * 3
+		# Process triangles in this batch - tight loop for maximum performance
+		var base_idx = start_tri * 3
+		var end_idx = end_tri * 3
+		
+		for i in range(base_idx, end_idx, 3):
 			var i0 = indices[i]
 			var i1 = indices[i + 1]
 			var i2 = indices[i + 2]
 			
-			# Cache vertices for this triangle
-			var v0 = vertices[i0]
-			var v1 = vertices[i1]
-			var v2 = vertices[i2]
+			# Calculate face normal (no normalization yet for speed)
+			var edge1 = vertices[i1] - vertices[i0]
+			var edge2 = vertices[i2] - vertices[i0]
+			var normal = edge1.cross(edge2)
 			
-			# Calculate and accumulate normal
-			var edge1 = v1 - v0
-			var edge2 = v2 - v0
-			var normal = edge1.cross(edge2).normalized()
-			
+			# Accumulate to vertex normals
 			normals[i0] += normal
 			normals[i1] += normal
 			normals[i2] += normal
 		
-		# Yield every few batches
-		if scene_tree and batch_idx % 4 == 0:
+		# Only yield every 4 batches to reduce overhead
+		if scene_tree and batch_idx % 4 == 0 and batch_idx > 0:
+			print("    [Parallel] Progress: %.1f%%" % ((batch_idx * 100.0) / batch_count))
 			await scene_tree.process_frame
 	
-	# Normalize in batches
-	var vert_batch_size = 128
-	var norm_batches = ceili(float(normals.size()) / vert_batch_size)
-	for batch_start in range(0, normals.size(), vert_batch_size):
-		var batch_end = min(batch_start + vert_batch_size, normals.size())
-		for i in range(batch_start, batch_end):
-			normals[i] = normals[i].normalized()
+	# Normalize all accumulated normals in one pass (no yielding for speed)
+	print("    [Parallel] Normalizing %d vertices..." % normals.size())
+	for i in range(normals.size()):
+		var n = normals[i]
+		if n.length_squared() > 0.0:
+			normals[i] = n.normalized()
+		else:
+			normals[i] = Vector3.UP
 	
-	print("    [Parallel] ✓ Normalized %d vertices in %d batches" % [normals.size(), norm_batches])
+	print("    [Parallel] ✓ Complete")
 	
 	return normals

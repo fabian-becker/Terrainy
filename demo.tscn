@@ -1,4 +1,4 @@
-[gd_scene load_steps=24 format=3 uid="uid://b7x280tq4b4un"]
+[gd_scene load_steps=20 format=3 uid="uid://b7x280tq4b4un"]
 
 [ext_resource type="Script" uid="uid://bvnbjheswdsy0" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_0bhed"]
 [ext_resource type="Texture2D" uid="uid://c30o87vyn3121" path="res://textures/sky_23_2k.png" id="1_jbdfk"]
@@ -12,7 +12,6 @@
 [ext_resource type="Texture2D" uid="uid://clbv4gc1wkj7w" path="res://textures/snow/snow_01_nor_gl_2k.jpg" id="9_36gju"]
 [ext_resource type="Texture2D" uid="uid://cphiu0x3nblrb" path="res://textures/snow/snow_01_rough_2k.jpg" id="10_tql22"]
 [ext_resource type="Script" uid="uid://ck4gtrjpc6yu2" path="res://addons/terrainy/nodes/basic/noise_terrain_node.gd" id="12_36gju"]
-[ext_resource type="Script" uid="uid://dru71ftjlqkij" path="res://addons/terrainy/nodes/landscapes/mountain_range_node.gd" id="14_tql22"]
 
 [sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_4gl14"]
 panorama = ExtResource("1_jbdfk")
@@ -62,18 +61,6 @@ noise_type = 3
 seed = -600439699
 frequency = 0.05
 
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_jbdfk"]
-seed = -108653960
-frequency = 0.008
-fractal_octaves = 2
-
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_4gl14"]
-seed = 488233139
-frequency = 0.05
-fractal_octaves = 4
-
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_tql22"]
-
 [node name="Node3D" type="Node3D"]
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
@@ -92,32 +79,17 @@ resolution = 1024
 update_debounce_time = 1.0
 batch_size = 128
 use_chunked_generation = true
-use_height_cache = false
 show_optimization_stats = true
 texture_layers = Array[ExtResource("2_n4w22")]([SubResource("Resource_tql22"), SubResource("Resource_jbdfk"), SubResource("Resource_4gl14")])
 metadata/_custom_type_script = "uid://bvnbjheswdsy0"
 
 [node name="PerlinNoiseNode" type="Node3D" parent="TerrainComposer"]
 script = ExtResource("12_36gju")
+frequency = 0.8
 noise = SubResource("FastNoiseLite_5g7v7")
 influence_shape = 1
 influence_size = Vector2(1024, 1024)
-edge_falloff = 0.1
-metadata/_custom_type_script = "uid://ck4gtrjpc6yu2"
-metadata/_gizmo_manipulating = false
-
-[node name="MountainRangeNode" type="Node3D" parent="TerrainComposer/PerlinNoiseNode"]
-script = ExtResource("14_tql22")
-peak_noise = SubResource("FastNoiseLite_jbdfk")
-detail_noise = SubResource("FastNoiseLite_4gl14")
-height = 237.23294
-direction = Vector2(0.83797616, 0.5457069)
-noise = SubResource("FastNoiseLite_tql22")
-influence_shape = 2
-influence_size = Vector2(522.1407, 301.1301)
-edge_falloff = 0.5
-blend_mode = 4
-smoothing = 2
+smoothing = 1
 smoothing_radius = 8.0
-metadata/_custom_type_script = "uid://dru71ftjlqkij"
+metadata/_custom_type_script = "uid://ck4gtrjpc6yu2"
 metadata/_gizmo_manipulating = false

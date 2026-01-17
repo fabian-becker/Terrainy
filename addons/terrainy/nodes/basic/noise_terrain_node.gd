@@ -26,3 +26,7 @@ func get_height_at(world_pos: Vector3) -> float:
 	
 	# Noise is in range [-1, 1], normalize to [0, 1] then scale
 	return (noise_value + 1.0) * 0.5 * amplitude
+
+## Thread-safe version (noise already uses world coords, so it's thread-safe)
+func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
+	return get_height_at(world_pos)
