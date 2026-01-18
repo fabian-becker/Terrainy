@@ -44,6 +44,19 @@ func _load_shader() -> void:
 func is_available() -> bool:
 	return _initialized
 
+## Clean up GPU resources
+func cleanup() -> void:
+	if not _initialized or not _rd:
+		return
+	
+	if _pipeline.is_valid():
+		_rd.free_rid(_pipeline)
+	if _shader.is_valid():
+		_rd.free_rid(_shader)
+	
+	_initialized = false
+	print("[HeightmapCompositor] GPU resources cleaned up")
+
 ## Compose heightmaps on GPU - returns final heightmap Image
 func compose_gpu(
 	resolution: Vector2i,
@@ -54,7 +67,19 @@ func compose_gpu(
 	strengths: PackedFloat32Array
 ) -> Image:
 	if not _initialized:
+		push_error("[HeightmapCompositor] GPU compositor not initialized")
 		return null
+	
+	# Validate inputs
+	if feature_heightmaps.size() != influence_maps.size():
+		push_error("[HeightmapCompositor] Heightmap and influence map count mismatch")
+		return null
+	
+	if feature_heightmaps.size() == 0:
+		push_warning("[HeightmapCompositor] No features to compose")
+		var base_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
+		base_map.fill(Color(base_height, 0, 0, 1))
+		return base_map
 	
 	var start_time = Time.get_ticks_msec()
 	
@@ -66,6 +91,9 @@ func compose_gpu(
 	output_format.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
 	
 	var output_texture := _rd.texture_create(output_format, RDTextureView.new())
+	if not output_texture.is_valid():
+		push_error("[HeightmapCompositor] Failed to create output texture")
+		return null
 	
 	# Clamp to 32 layers max (shader limitation)
 	var layer_count = mini(feature_heightmaps.size(), 32)
@@ -99,7 +127,17 @@ func compose_gpu(
 	
 	# Create storage buffers
 	var heightmap_buffer := _rd.storage_buffer_create(heightmap_buffer_data.size() * 4, heightmap_buffer_data.to_byte_array())
+	if not heightmap_buffer.is_valid():
+		push_error("[HeightmapCompositor] Failed to create heightmap buffer")
+		_rd.free_rid(output_texture)
+		return null
+	
 	var influence_buffer := _rd.storage_buffer_create(influence_buffer_data.size() * 4, influence_buffer_data.to_byte_array())
+	if not influence_buffer.is_valid():
+		push_error("[HeightmapCompositor] Failed to create influence buffer")
+		_rd.free_rid(output_texture)
+		_rd.free_rid(heightmap_buffer)
+		return null
 	
 	# Create uniform set
 	var uniforms: Array[RDUniform] = []

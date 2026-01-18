@@ -54,13 +54,13 @@ func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
 	var normalized_distance = distance_2d / radius
 	var result_height = 0.0
 	
-	# Beach zone
-	if normalized_distance < beach_width:
+	# Beach zone at the outer edge
+	if normalized_distance > (1.0 - beach_width):
 		result_height = beach_height
 	else:
-		# Rising inland
-		var inland_t = (normalized_distance - beach_width) / (1.0 - beach_width)
-		result_height = beach_height + (height - beach_height) * pow(1.0 - inland_t, 1.5)
+		# Rising from beach toward center - center is highest
+		var inland_t = normalized_distance / (1.0 - beach_width)
+		result_height = height - (height - beach_height) * inland_t
 	
 	# Add noise variation
 	if noise:

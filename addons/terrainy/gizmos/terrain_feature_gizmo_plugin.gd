@@ -5,6 +5,12 @@ extends EditorNode3DGizmoPlugin
 
 const TerrainFeatureNode = preload("res://addons/terrainy/nodes/terrain_feature_node.gd")
 
+# Gizmo color constants
+const GIZMO_COLOR_MAIN = Color(0.3, 0.8, 1.0, 0.6)
+const GIZMO_COLOR_FALLOFF = Color(0.8, 0.5, 0.2, 0.4)
+const GIZMO_COLOR_DIRECTION = Color(1.0, 0.3, 0.3, 0.8)
+const GIZMO_COLOR_HEIGHT = Color(0.3, 1.0, 0.3, 0.6)
+
 signal gizmo_manipulation_started(node: Node3D)
 signal gizmo_manipulation_ended(node: Node3D)
 
@@ -12,10 +18,10 @@ var show_gizmos: bool = true
 var undo_redo: EditorUndoRedoManager
 
 func _init():
-	create_material("main", Color(0.3, 0.8, 1.0, 0.6))
-	create_material("falloff", Color(0.8, 0.5, 0.2, 0.4))
-	create_material("direction", Color(1.0, 0.3, 0.3, 0.8))
-	create_material("height", Color(0.3, 1.0, 0.3, 0.6))
+	create_material("main", GIZMO_COLOR_MAIN)
+	create_material("falloff", GIZMO_COLOR_FALLOFF)
+	create_material("direction", GIZMO_COLOR_DIRECTION)
+	create_material("height", GIZMO_COLOR_HEIGHT)
 	create_handle_material("handles")
 
 func _get_gizmo_name() -> String:
@@ -384,7 +390,9 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 	# Handle 3: Height (for primitives and landscapes)
 	if "height" in node and not ("start_height" in node):
 		if handle_index == handle_id:
-			var vertical_plane = Plane(Vector3.RIGHT, 0)
+			# Create a vertical plane that passes through the node's position
+			var node_pos = node.global_position
+			var vertical_plane = Plane(Vector3.RIGHT, node_pos)
 			var vertical_intersection = vertical_plane.intersects_ray(ray_from, ray_dir)
 			if vertical_intersection != null:
 				var local_y = node.to_local(vertical_intersection).y

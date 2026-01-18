@@ -8,6 +8,11 @@ const HeightmapModifierProcessor = preload("res://addons/terrainy/nodes/heightma
 
 signal parameters_changed
 
+# Constants
+const INFLUENCE_WEIGHT_THRESHOLD = 0.001
+const GIZMO_MANIPULATION_TIMEOUT_SEC = 5.0
+const MIN_INFLUENCE_SIZE = 0.01
+
 enum InfluenceShape {
 	CIRCLE,
 	RECTANGLE,
@@ -49,7 +54,7 @@ enum BlendMode {
 		_commit_parameter_change()
 
 ## Blend mode with other terrain features
-@export_enum("Add", "Max", "Min", "Multiply", "Average") var blend_mode: int = 0:
+@export_enum("Add", "Subtract", "Max", "Min", "Multiply", "Average") var blend_mode: int = 0:
 	set(value):
 		blend_mode = value
 		_commit_parameter_change()
@@ -124,8 +129,21 @@ var _heightmap_dirty: bool = true
 
 # GPU modifier processor (shared across all features)
 static var _gpu_modifier_processor: HeightmapModifierProcessor = null
+static var _feature_reference_count: int = 0
 
-## Get or create the shared GPU modifier processor
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE:
+		_feature_reference_count -= 1
+		if _feature_reference_count <= 0 and _gpu_modifier_processor:
+			# Clean up GPU resources when last feature is destroyed
+			if _gpu_modifier_processor.has_method("cleanup"):
+				_gpu_modifier_processor.cleanup()
+			_gpu_modifier_processor = null
+			_feature_reference_count = 0
+
+func _ready() -> void:
+	_feature_reference_count += 1
+
 static func _get_gpu_modifier_processor() -> HeightmapModifierProcessor:
 	if not _gpu_modifier_processor:
 		_gpu_modifier_processor = HeightmapModifierProcessor.new()
@@ -249,11 +267,13 @@ func get_influence_weight(world_pos: Vector3) -> float:
 		InfluenceShape.CIRCLE:
 			# Use X component as radius for circular shape
 			distance = local_pos_2d.length()
-			max_distance = influence_size.x
+			max_distance = max(influence_size.x, MIN_INFLUENCE_SIZE)
 		
 		InfluenceShape.RECTANGLE:
 			# Check if inside rectangle bounds
 			var half_size = influence_size * 0.5
+			# Protect against zero size
+			half_size = half_size.max(Vector2(MIN_INFLUENCE_SIZE, MIN_INFLUENCE_SIZE))
 			if abs(local_pos_2d.x) > half_size.x or abs(local_pos_2d.y) > half_size.y:
 				return 0.0
 			
@@ -265,9 +285,12 @@ func get_influence_weight(world_pos: Vector3) -> float:
 		
 		InfluenceShape.ELLIPSE:
 			# Ellipse distance formula
+			# Protect against division by zero
+			var safe_size_x = max(influence_size.x, MIN_INFLUENCE_SIZE)
+			var safe_size_y = max(influence_size.y, MIN_INFLUENCE_SIZE)
 			var normalized = Vector2(
-				local_pos_2d.x / influence_size.x,
-				local_pos_2d.y / influence_size.y
+				local_pos_2d.x / safe_size_x,
+				local_pos_2d.y / safe_size_y
 			)
 			distance = normalized.length()
 			max_distance = 1.0
@@ -425,12 +448,12 @@ func get_influence_aabb() -> AABB:
 func _is_gizmo_manipulating() -> bool:
 	var is_manipulating = get_meta("_gizmo_manipulating", false)
 	
-	# Safety: if gizmo manipulation flag has been set for more than 5 seconds, clear it
+	# Safety: if gizmo manipulation flag has been set for more than threshold, clear it
 	# This prevents stuck metadata from blocking updates
 	if is_manipulating:
 		var last_gizmo_time = get_meta("_gizmo_manipulation_time", 0.0)
 		var current_time = Time.get_ticks_msec() / 1000.0
-		if current_time - last_gizmo_time > 5.0:
+		if current_time - last_gizmo_time > GIZMO_MANIPULATION_TIMEOUT_SEC:
 			set_meta("_gizmo_manipulating", false)
 			return false
 	
@@ -443,3 +466,22 @@ func _commit_parameter_change() -> void:
 		parameters_changed.emit()
 		if Engine.is_editor_hint():
 			print("[%s] parameters_changed emitted" % name)
+
+## Validate node configuration
+func validate_configuration() -> bool:
+	var is_valid = true
+	
+	if influence_size.x < MIN_INFLUENCE_SIZE or influence_size.y < MIN_INFLUENCE_SIZE:
+		push_warning("[%s] Influence size too small, clamping to minimum" % name)
+		influence_size = influence_size.max(Vector2(MIN_INFLUENCE_SIZE, MIN_INFLUENCE_SIZE))
+		is_valid = false
+	
+	if strength <= 0.0:
+		push_warning("[%s] Strength is zero or negative, feature will have no effect" % name)
+	
+	if "height" in self:
+		var height_value = get("height")
+		if abs(height_value) < 0.001:
+			push_warning("[%s] Height is near zero, feature may not be visible" % name)
+	
+	return is_valid
