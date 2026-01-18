@@ -7,13 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-01-18
+
 ### Added
-- **Terrain Modifiers System**: All terrain features now support post-processing modifiers
-  - **Smoothing**: Four levels (None, Light, Medium, Heavy) to reduce terrain spikiness
-  - **Smoothing Radius**: Adjustable radius for smoothing area of influence (0.5-10.0)
-  - **Terracing**: Create stepped, layered terrain effects with adjustable levels and smoothness
-  - **Height Clamping**: Optional min/max height limits for precise terrain control
-- Smoothing cache for improved performance during terrain generation
+- GPU-accelerated heightmap compositor for massive performance improvements
+- GPU-accelerated heightmap modifiers system with CPU fallback
+- Terrain modifiers: Smoothing, Terracing, and Height Clamping
+- Threaded mesh generation for improved performance
+- Influence shape system (circular, rectangular, elliptical) for terrain features
+- Thread-safe height calculation methods across all terrain nodes
+- Influence map caching mechanism for better performance
+- New GLSL shaders for heightmap composition and modifiers
+
+### Changed
+- Refactored `influence_radius` to `influence_size` for more flexible area definitions
+- Optimized terrain mesh generation with pre-calculated heights and parallel processing
+- Enhanced triplanar normal mapping and weight calculations in terrain shader
+- Improved terrain material blending with new BlendMode enum
+- Refactored collision shape updates to utilize heightmap data
+- Updated gizmo manipulation to be safer and more responsive
+- Improved parameter change handling to prevent unnecessary updates during manipulation
+- Enhanced GPU resource management and validation across terrain nodes
+- Simplified mesh generation by removing chunked generation system
+- Optimized shader code to use R32F format for reduced bandwidth
+- Normalized blended normal vectors and improved texture sampling
+
+### Fixed
+- Thread safety issues in terrain generation
+- Main thread blocking during mesh generation
+- Signal emission during gizmo manipulation
+- Normal vector blending in shader
+
+### Performance
+- Significantly reduced terrain generation time through parallel mesh building
+- GPU acceleration for heightmap processing where available
+- Improved memory usage with optimized heightmap formats
+- Enhanced rendering performance with better texture handling and mipmaps
 
 ## [0.1.0] - 2026-01-17
 
@@ -64,4 +93,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom terrain shader with multi-layer support
 - PBR material workflow compatibility
 
+[0.2.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.2.0
 [0.1.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.1.0
