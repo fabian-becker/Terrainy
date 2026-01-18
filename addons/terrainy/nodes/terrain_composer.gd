@@ -237,7 +237,7 @@ func rebuild_terrain() -> void:
 		_mesh_instance.mesh = mesh
 		_update_material()
 	
-	_update_collision()
+	_update_collision(_final_heightmap)
 	terrain_updated.emit()
 	_is_generating = false
 
@@ -415,11 +415,44 @@ func _calculate_height_at(local_pos: Vector3) -> float:
 	
 	return final_height
 
-func _update_collision() -> void:
+func _update_collision(heightmap: Image = null) -> void:
 	if not _collision_shape or not _mesh_instance:
 		return
 	
-	if generate_collision and _mesh_instance.mesh:
+	if generate_collision and heightmap:
+		var start_time = Time.get_ticks_msec()
+		_static_body.visible = true
+		
+		# Use HeightMapShape3D for much better performance than trimesh
+		var height_shape = HeightMapShape3D.new()
+		var width = heightmap.get_width()
+		var depth = heightmap.get_height()
+		height_shape.map_width = width
+		height_shape.map_depth = depth
+		
+		# Convert heightmap to float array
+		var map_data: PackedFloat32Array = PackedFloat32Array()
+		map_data.resize(width * depth)
+		for z in range(depth):
+			for x in range(width):
+				map_data[z * width + x] = heightmap.get_pixel(x, z).r
+		
+		height_shape.map_data = map_data
+		_collision_shape.shape = height_shape
+		
+		# Scale collision to match terrain size
+		_collision_shape.scale = Vector3(
+			terrain_size.x / (width - 1),
+			1.0,
+			terrain_size.y / (depth - 1)
+		)
+		# Center the collision shape
+		_collision_shape.position = Vector3(-terrain_size.x / 2.0, 0, -terrain_size.y / 2.0)
+		
+		var elapsed = Time.get_ticks_msec() - start_time
+		print("[TerrainComposer] Generated collision shape in %d ms" % elapsed)
+	elif generate_collision and _mesh_instance.mesh:
+		# Fallback to trimesh if no heightmap is provided (legacy support)
 		_static_body.visible = true
 		_collision_shape.shape = _mesh_instance.mesh.create_trimesh_shape()
 	else:
