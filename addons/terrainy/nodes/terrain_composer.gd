@@ -78,6 +78,11 @@ var _feature_nodes: Array[TerrainFeatureNode] = []
 var _shader_material: ShaderMaterial
 var _is_generating: bool = false
 
+# Threading
+var _mesh_thread: Thread = null
+var _pending_mesh: ArrayMesh = null
+var _pending_heightmap: Image = null
+
 # Heightmap composition cache
 var _heightmap_cache: Dictionary = {}  # feature -> Image
 var _influence_cache: Dictionary = {}  # feature -> Image
@@ -89,6 +94,8 @@ var _cached_resolution: Vector2i
 var _cached_bounds: Rect2
 
 func _ready() -> void:
+	set_process(false)  # Only enable when mesh generation is running
+	
 	# Initialize GPU compositor if enabled
 	_initialize_gpu_compositor()
 	
@@ -116,6 +123,27 @@ func _ready() -> void:
 	# Initial generation
 	_scan_features()
 	rebuild_terrain()
+
+func _process(_delta: float) -> void:
+	# Check if mesh generation thread completed
+	if _mesh_thread and not _mesh_thread.is_alive():
+		_mesh_thread.wait_to_finish()
+		_mesh_thread = null
+		
+		if _pending_mesh and _mesh_instance:
+			_mesh_instance.mesh = _pending_mesh
+			_update_material()
+			_update_collision(_pending_heightmap)
+			terrain_updated.emit()
+			_pending_mesh = null
+			_pending_heightmap = null
+		
+		_is_generating = false
+		set_process(false)
+
+func _exit_tree() -> void:
+	if _mesh_thread and _mesh_thread.is_alive():
+		_mesh_thread.wait_to_finish()
 
 func _scan_features() -> void:
 	# Disconnect old signals
@@ -227,19 +255,30 @@ func rebuild_terrain() -> void:
 	else:
 		_final_heightmap = _compose_heightmaps_cpu(heightmap_resolution)
 	
-	# Step 3: Generate mesh from final heightmap
+	# Step 3: Generate mesh from final heightmap in background thread
+	if _mesh_thread and _mesh_thread.is_alive():
+		_mesh_thread.wait_to_finish()
+	
+	_mesh_thread = Thread.new()
+	var thread_data = {
+		"heightmap": _final_heightmap,
+		"terrain_size": terrain_size
+	}
+	_mesh_thread.start(_generate_mesh_threaded.bind(thread_data))
+	
+	# Check for completion in process
+	set_process(true)
+
+## Thread worker function for mesh generation
+func _generate_mesh_threaded(data: Dictionary) -> void:
 	var mesh = TerrainMeshGenerator.generate_from_heightmap(
-		_final_heightmap,
-		terrain_size
+		data["heightmap"],
+		data["terrain_size"]
 	)
 	
-	if _mesh_instance:
-		_mesh_instance.mesh = mesh
-		_update_material()
-	
-	_update_collision(_final_heightmap)
-	terrain_updated.emit()
-	_is_generating = false
+	# Store results for main thread to pick up
+	_pending_mesh = mesh
+	_pending_heightmap = data["heightmap"]
 
 ## Compose all feature heightmaps into a single final heightmap (GPU)
 func _compose_heightmaps_gpu(resolution: Vector2i) -> Image:
