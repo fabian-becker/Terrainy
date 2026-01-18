@@ -73,51 +73,19 @@ float fbm(vec2 p) {
 	return value;
 }
 
-// Triplanar blend weights based on normal
-vec3 triplanar_weights(vec3 normal) {
-	vec3 blend = abs(normal);
-	// Sharpen the blend with power
-	blend = pow(blend, vec3(4.0));
-	float sum = blend.x + blend.y + blend.z;
-	blend /= max(sum, 1e-5);
-	return blend;
+// Sample texture with world-space XZ mapping (top-down for terrain)
+vec4 sample_terrain_texture(sampler2DArray tex_array, int layer_idx, vec3 position, vec2 uv_scale, vec2 uv_offset) {
+	// Use world XZ coordinates for UV mapping (top-down projection)
+	vec2 uv = (position.xz / max(uv_scale, vec2(0.001))) + uv_offset;
+	return texture(tex_array, vec3(uv, float(layer_idx)));
 }
 
-// Sample texture with triplanar projection
-vec4 sample_triplanar(sampler2DArray tex_array, int layer_idx, vec3 position, vec2 uv_scale, vec2 uv_offset, vec3 blend_weights) {
-	vec2 uv_x = (position.zy / max(uv_scale, vec2(0.001))) + uv_offset;
-	vec2 uv_y = (position.xz / max(uv_scale, vec2(0.001))) + uv_offset;
-	vec2 uv_z = (position.xy / max(uv_scale, vec2(0.001))) + uv_offset;
-	
-	vec4 col_x = texture(tex_array, vec3(uv_x, float(layer_idx)));
-	vec4 col_y = texture(tex_array, vec3(uv_y, float(layer_idx)));
-	vec4 col_z = texture(tex_array, vec3(uv_z, float(layer_idx)));
-	
-	return col_x * blend_weights.x + col_y * blend_weights.y + col_z * blend_weights.z;
-}
-
-// Sample normal map with triplanar projection and convert to world space
-vec3 sample_triplanar_normal(sampler2DArray tex_array, int layer_idx, vec3 position, vec2 uv_scale, vec2 uv_offset, vec3 blend_weights, vec3 world_normal) {
-	// Sample each projection
-	vec2 uv_x = (position.zy / max(uv_scale, vec2(0.001))) + uv_offset;
-	vec2 uv_y = (position.xz / max(uv_scale, vec2(0.001))) + uv_offset;
-	vec2 uv_z = (position.xy / max(uv_scale, vec2(0.001))) + uv_offset;
-	
-	vec3 tn_x = texture(tex_array, vec3(uv_x, float(layer_idx))).rgb * 2.0 - 1.0;
-	vec3 tn_y = texture(tex_array, vec3(uv_y, float(layer_idx))).rgb * 2.0 - 1.0;
-	vec3 tn_z = texture(tex_array, vec3(uv_z, float(layer_idx))).rgb * 2.0 - 1.0;
-	
-	// Transform each tangent-space normal to world space based on projection axis
-	// X projection (YZ plane): tangent=Z, bitangent=Y, normal=X
-	vec3 world_x = vec3(tn_x.z, tn_x.y, tn_x.x) * sign(world_normal.x);
-	// Y projection (XZ plane): tangent=X, bitangent=Z, normal=Y  
-	vec3 world_y = vec3(tn_y.x, tn_y.z, tn_y.y) * sign(world_normal.y);
-	// Z projection (XY plane): tangent=X, bitangent=Y, normal=Z
-	vec3 world_z = vec3(tn_z.x, tn_z.y, tn_z.z) * sign(world_normal.z);
-	
-	// Blend the world-space normals
-	vec3 blended = world_x * blend_weights.x + world_y * blend_weights.y + world_z * blend_weights.z;
-	return normalize(blended);
+// Sample normal map with world-space XZ mapping - returns tangent space normal
+vec3 sample_terrain_normal(sampler2DArray tex_array, int layer_idx, vec3 position, vec2 uv_scale, vec2 uv_offset) {
+	vec2 uv = (position.xz / max(uv_scale, vec2(0.001))) + uv_offset;
+	vec3 normal_map = texture(tex_array, vec3(uv, float(layer_idx))).xyz;
+	// Decode from [0,1] to [-1,1]
+	return normal_map * 2.0 - 1.0;
 }
 
 // Calculate blend weight for a layer based on height and slope
@@ -193,9 +161,6 @@ void fragment() {
 	float noise_scale = max(blend_noise_scale, 0.001);
 	float height_noise = fbm(world_xz / noise_scale) * 2.0 - 1.0;
 	
-	// Triplanar blend weights
-	vec3 tri_blend = triplanar_weights(NORMAL);
-	
 	// Handle case when no layers exist
 	if (layer_count == 0) {
 		ALBEDO = vec3(1.0, 0.0, 1.0);  // Magenta for visibility
@@ -230,7 +195,7 @@ void fragment() {
 		
 		// Pass 3: Blend all layers with triplanar projection
 		vec3 final_albedo = vec3(0.0);
-		vec3 final_normal_world = NORMAL;  // Start with mesh normal in world space
+		vec3 final_normal = vec3(0.0, 0.0, 1.0);  // Start with up (no perturbation)
 		float final_roughness = 0.0;
 		float final_metallic = 0.0;
 		float final_ao = 0.0;
@@ -250,38 +215,38 @@ void fragment() {
 			
 			int tex_idx = layer_texture_index[i];
 			
-			// Sample albedo with triplanar
+			// Sample albedo with world-space mapping
 			vec3 albedo = color_normal.rgb;
 			if (tex_flags.x > 0.5) { // has_albedo
-				albedo *= sample_triplanar(albedo_textures, tex_idx, world_pos, uv_scale, uv_offset, tri_blend).rgb;
+				albedo *= sample_terrain_texture(albedo_textures, tex_idx, world_pos, uv_scale, uv_offset).rgb;
 			}
 			
-			// Sample normal with proper triplanar world-space conversion
+			// Sample normal with world-space mapping
 			if (tex_flags.y > 0.5) { // has_normal
-				vec3 layer_normal_world = sample_triplanar_normal(normal_textures, tex_idx, world_pos, uv_scale, uv_offset, tri_blend, NORMAL);
-				// Apply strength with weight influence
+				vec3 layer_normal = sample_terrain_normal(normal_textures, tex_idx, world_pos, uv_scale, uv_offset);
+				
+				// Apply strength and blend
 				float normal_strength = clamp(color_normal.w, 0.0, 2.0);
-				float effective_strength = normal_strength * weight;
-				// Blend towards perturbed normal
-				final_normal_world = normalize(mix(final_normal_world, layer_normal_world, effective_strength));
+				// Blend normals with weight-adjusted strength
+				final_normal = normalize(mix(final_normal, layer_normal, normal_strength * weight));
 			}
 			
-			// Sample roughness with triplanar
+			// Sample roughness with world-space mapping
 			float roughness = pbr_params.x;
 			if (tex_flags.z > 0.5) { // has_roughness
-				roughness *= sample_triplanar(roughness_textures, tex_idx, world_pos, uv_scale, uv_offset, tri_blend).r;
+				roughness *= sample_terrain_texture(roughness_textures, tex_idx, world_pos, uv_scale, uv_offset).r;
 			}
 			
-			// Sample metallic with triplanar
+			// Sample metallic with world-space mapping
 			float metallic_val = pbr_params.y;
 			if (tex_flags.w > 0.5) { // has_metallic
-				metallic_val *= sample_triplanar(metallic_textures, tex_idx, world_pos, uv_scale, uv_offset, tri_blend).r;
+				metallic_val *= sample_terrain_texture(metallic_textures, tex_idx, world_pos, uv_scale, uv_offset).r;
 			}
 			
-			// Sample AO with triplanar
+			// Sample AO with world-space mapping
 			float ao = 1.0;
 			if (extra_flags.x > 0.5) { // has_ao
-				ao = mix(1.0, sample_triplanar(ao_textures, tex_idx, world_pos, uv_scale, uv_offset, tri_blend).r, pbr_params.z);
+				ao = mix(1.0, sample_terrain_texture(ao_textures, tex_idx, world_pos, uv_scale, uv_offset).r, pbr_params.z);
 			}
 			
 			// Weighted blend for non-normal properties
@@ -291,9 +256,9 @@ void fragment() {
 			final_ao += ao * weight;
 		}
 		
-		// Output (use NORMAL for world-space normal to avoid tangent-space issues)
+		// Output
 		ALBEDO = final_albedo;
-		NORMAL = normalize(final_normal_world);
+		NORMAL_MAP = normalize(final_normal);
 		ROUGHNESS = clamp(final_roughness, 0.0, 1.0);
 		METALLIC = clamp(final_metallic, 0.0, 1.0);
 		AO = clamp(final_ao, 0.0, 1.0);

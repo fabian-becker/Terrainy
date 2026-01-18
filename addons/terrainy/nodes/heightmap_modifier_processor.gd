@@ -40,6 +40,19 @@ func _load_shader() -> void:
 func is_available() -> bool:
 	return _initialized
 
+## Clean up GPU resources
+func cleanup() -> void:
+	if not _initialized or not _rd:
+		return
+	
+	if _pipeline.is_valid():
+		_rd.free_rid(_pipeline)
+	if _shader.is_valid():
+		_rd.free_rid(_shader)
+	
+	_initialized = false
+	print("[HeightmapModifierProcessor] GPU resources cleaned up")
+
 ## Apply modifiers to heightmap on GPU
 func apply_modifiers(
 	input_heightmap: Image,
@@ -72,6 +85,9 @@ func apply_modifiers(
 		input_heightmap.convert(Image.FORMAT_RF)
 	
 	var input_texture := _rd.texture_create(input_format, RDTextureView.new(), [input_heightmap.get_data()])
+	if not input_texture.is_valid():
+		push_error("[HeightmapModifierProcessor] Failed to create input texture")
+		return null
 	
 	# Create output texture
 	var output_format := RDTextureFormat.new()
@@ -81,6 +97,10 @@ func apply_modifiers(
 	output_format.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
 	
 	var output_texture := _rd.texture_create(output_format, RDTextureView.new())
+	if not output_texture.is_valid():
+		push_error("[HeightmapModifierProcessor] Failed to create output texture")
+		_rd.free_rid(input_texture)
+		return null
 	
 	# Create uniforms
 	var uniforms: Array[RDUniform] = []

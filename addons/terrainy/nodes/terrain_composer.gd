@@ -12,6 +12,13 @@ const HeightmapCompositor = preload("res://addons/terrainy/nodes/heightmap_compo
 signal terrain_updated
 signal texture_layers_changed
 
+# Constants
+const INFLUENCE_WEIGHT_THRESHOLD = 0.001
+const CACHE_KEY_POSITION_PRECISION = 0.01  # Round positions to cm
+const CACHE_KEY_FALLOFF_PRECISION = 0.01
+const MAX_TERRAIN_RESOLUTION = 1024
+const MAX_FEATURE_COUNT = 64
+
 @export var terrain_size: Vector2 = Vector2(100, 100):
 	set(value):
 		terrain_size = value
@@ -22,7 +29,7 @@ signal texture_layers_changed
 
 @export var resolution: int = 128:
 	set(value):
-		resolution = clamp(value, 16, 512)
+		resolution = clamp(value, 16, MAX_TERRAIN_RESOLUTION)
 		_heightmap_cache.clear()  # Resolution-dependent, must regenerate
 		_influence_cache.clear()  # Also depends on resolution
 		if auto_update and is_inside_tree():
@@ -143,7 +150,20 @@ func _process(_delta: float) -> void:
 
 func _exit_tree() -> void:
 	if _mesh_thread and _mesh_thread.is_alive():
-		_mesh_thread.wait_to_finish()
+		# Wait with timeout to prevent editor hang (max 5 seconds)
+		var wait_start = Time.get_ticks_msec()
+		while _mesh_thread.is_alive():
+			if Time.get_ticks_msec() - wait_start > 5000:
+				push_warning("[TerrainComposer] Mesh thread did not finish in time, forcing exit")
+				break
+			OS.delay_msec(10)
+		if not _mesh_thread.is_alive():
+			_mesh_thread.wait_to_finish()
+	
+	# Clean up GPU compositor if owned by this instance
+	if _gpu_compositor:
+		_gpu_compositor.cleanup()
+		_gpu_compositor = null
 
 func _scan_features() -> void:
 	# Disconnect old signals
@@ -162,6 +182,9 @@ func _scan_features() -> void:
 func _scan_recursive(node: Node) -> void:
 	for child in node.get_children():
 		if child is TerrainFeatureNode and child != _mesh_instance and child != _static_body:
+			if _feature_nodes.size() >= MAX_FEATURE_COUNT:
+				push_warning("[TerrainComposer] Maximum feature count (%d) reached, ignoring '%s'" % [MAX_FEATURE_COUNT, child.name])
+				break
 			_feature_nodes.append(child)
 			_scan_recursive(child)
 		elif not (child is MeshInstance3D or child is StaticBody3D or child is CollisionShape3D):
@@ -188,6 +211,10 @@ func _initialize_gpu_compositor() -> void:
 		print("[TerrainComposer] GPU compositor ready")
 
 func _on_feature_changed(feature: TerrainFeatureNode) -> void:
+	# Invalidate heightmap cache when any parameter changes
+	if _heightmap_cache.has(feature):
+		_heightmap_cache.erase(feature)
+	
 	# Only invalidate influence if influence-related properties changed
 	# (position, influence_size, influence_shape, edge_falloff)
 	var current_key = _get_influence_cache_key(feature)
@@ -202,15 +229,35 @@ func _on_feature_changed(feature: TerrainFeatureNode) -> void:
 ## Generate cache key for influence map based on properties that affect it
 func _get_influence_cache_key(feature: TerrainFeatureNode) -> String:
 	# Only include properties that affect influence calculation
-	return "%s_%s_%s_%s" % [
-		feature.global_position,
-		feature.influence_size,
-		feature.influence_shape,
-		feature.edge_falloff
+	# Round values to avoid floating-point precision issues
+	var pos_rounded = (feature.global_position / CACHE_KEY_POSITION_PRECISION).round() * CACHE_KEY_POSITION_PRECISION
+	var size_rounded = (feature.influence_size / CACHE_KEY_POSITION_PRECISION).round() * CACHE_KEY_POSITION_PRECISION
+	var falloff_rounded = snappedf(feature.edge_falloff, CACHE_KEY_FALLOFF_PRECISION)
+	return "%s_%s_%d_%f" % [
+		pos_rounded,
+		size_rounded,
+		int(feature.influence_shape),
+		falloff_rounded
 	]
 
 func _on_texture_layer_changed() -> void:
 	_update_material()
+
+## Force a complete rebuild with all caches cleared
+func force_rebuild() -> void:
+	print("[TerrainComposer] Force rebuild - clearing all caches")
+	# Clear all caches for a completely fresh rebuild
+	_heightmap_cache.clear()
+	_influence_cache.clear()
+	_influence_cache_keys.clear()
+	
+	# Mark all features as dirty
+	for feature in _feature_nodes:
+		if is_instance_valid(feature) and feature.has_method("mark_dirty"):
+			feature.mark_dirty()
+	
+	# Trigger regular rebuild
+	rebuild_terrain()
 
 ## Regenerate the entire terrain mesh
 func rebuild_terrain() -> void:
@@ -390,7 +437,7 @@ func _compose_heightmaps_cpu(resolution: Vector2i) -> Image:
 				
 				# Get influence weight
 				var weight = feature.get_influence_weight(world_pos)
-				if weight <= 0.001:
+				if weight <= INFLUENCE_WEIGHT_THRESHOLD:
 					continue
 				
 				# Get heights
@@ -434,7 +481,7 @@ func _calculate_height_at(local_pos: Vector3) -> float:
 			continue
 		
 		var weight = feature.get_influence_weight(world_pos)
-		if weight <= 0.001:
+		if weight <= INFLUENCE_WEIGHT_THRESHOLD:
 			continue
 		
 		var height = feature.get_height_at(world_pos)

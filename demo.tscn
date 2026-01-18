@@ -1,11 +1,12 @@
-[gd_scene load_steps=15 format=3 uid="uid://megrg78jfp83"]
+[gd_scene load_steps=16 format=3 uid="uid://megrg78jfp83"]
 
 [ext_resource type="Script" uid="uid://b03v1mqy58bj4" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_0bhed"]
-[ext_resource type="Script" uid="uid://dru71ftjlqkij" path="res://addons/terrainy/nodes/landscapes/mountain_range_node.gd" id="2_0bhed"]
 [ext_resource type="Script" uid="uid://ddlru3rps1tmg" path="res://addons/terrainy/resources/terrain_texture_layer.gd" id="2_kem5a"]
 [ext_resource type="Resource" uid="uid://capvahs7dnlxf" path="res://textures/rocky_terrain/rocky_terrain.tres" id="3_gxmxl"]
 [ext_resource type="Resource" uid="uid://dh8b8e3m2ucl7" path="res://textures/rock/rocky.tres" id="4_n4w22"]
 [ext_resource type="Resource" uid="uid://rnmk18jlmr5v" path="res://textures/snow/snow.tres" id="5_884kg"]
+[ext_resource type="Script" uid="uid://b06n2v4b3hlyt" path="res://addons/terrainy/nodes/primitives/mountain_node.gd" id="7_884kg"]
+[ext_resource type="Script" uid="uid://s6rd3dc1hy11" path="res://addons/terrainy/nodes/primitives/island_node.gd" id="8_d4o4o"]
 
 [sub_resource type="Gradient" id="Gradient_kem5a"]
 interpolation_mode = 2
@@ -43,15 +44,15 @@ fog_mode = 1
 fog_density = 1.0
 adjustment_enabled = true
 
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_m0rpm"]
-seed = -702277543
-frequency = 0.008
-fractal_octaves = 2
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_svejp"]
+noise_type = 3
+seed = 140149511
+frequency = 0.02
 
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_c6xj6"]
-seed = -1125165996
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_36gju"]
+seed = -200059467
 frequency = 0.05
-fractal_octaves = 4
+fractal_octaves = 3
 
 [node name="Node3D" type="Node3D"]
 
@@ -71,15 +72,24 @@ base_height = 1.0
 texture_layers = Array[ExtResource("2_kem5a")]([ExtResource("3_gxmxl"), ExtResource("4_n4w22"), ExtResource("5_884kg")])
 metadata/_custom_type_script = "uid://b03v1mqy58bj4"
 
-[node name="MountainRangeNode" type="Node3D" parent="TerrainComposer"]
-transform = Transform3D(0.99999994, 0, 0, 0, 1, 0, 0, 0, 0.99999994, 0, 0, 0)
-script = ExtResource("2_0bhed")
-peak_noise = SubResource("FastNoiseLite_m0rpm")
-detail_noise = SubResource("FastNoiseLite_c6xj6")
-height = 203.62354
-direction = Vector2(-0.52542096, -0.8508424)
-influence_size = Vector2(539.9198, 539.9198)
-edge_falloff = 0.4817233032701842
-smoothing = 3
-metadata/_custom_type_script = "uid://dru71ftjlqkij"
+[node name="MountainNode" type="Node3D" parent="TerrainComposer"]
+script = ExtResource("7_884kg")
+peak_type = 1
+noise = SubResource("FastNoiseLite_svejp")
+height = 66.80995
+influence_size = Vector2(401.9497, 401.9497)
+edge_falloff = 0.0
+metadata/_custom_type_script = "uid://b06n2v4b3hlyt"
+metadata/_gizmo_manipulating = false
+
+[node name="IslandNode" type="Node3D" parent="TerrainComposer"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -185.25888, 0, 247.54166)
+script = ExtResource("8_d4o4o")
+beach_width = 0.5
+beach_height = 2.0
+noise = SubResource("FastNoiseLite_36gju")
+height = 40.562073
+influence_size = Vector2(202.99597, 202.99597)
+edge_falloff = 0.20971829435831957
+metadata/_custom_type_script = "uid://s6rd3dc1hy11"
 metadata/_gizmo_manipulating = false

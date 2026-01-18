@@ -188,7 +188,8 @@ func _on_rebuild_pressed() -> void:
 		target = _find_terrain_composer_in_tree()
 	
 	if target and is_instance_valid(target):
-		target.rebuild_terrain()
+		# Force a complete rebuild with all caches cleared
+		target.force_rebuild()
 
 func _on_gizmo_toggle(enabled: bool) -> void:
 	if terrain_gizmo_plugin:
@@ -199,19 +200,28 @@ func _on_gizmo_toggle(enabled: bool) -> void:
 		update_overlays()
 
 func _refresh_existing_gizmos() -> void:
-	# Save the current scene path and reload it to force gizmo recreation
+	# Update gizmos without reloading the scene
 	var editor_interface = get_editor_interface()
 	var current_scene = editor_interface.get_edited_scene_root()
 	if current_scene:
-		var scene_path = current_scene.scene_file_path
-		if scene_path != "":
-			# Reload the scene - this is the most reliable way to refresh gizmos
-			editor_interface.reload_scene_from_path(scene_path)
-		else:
-			# For unsaved scenes, just update overlays
-			update_overlays()
-	else:
-		update_overlays()
+		# Update all terrain feature nodes
+		_update_gizmos_recursive(current_scene)
+	update_overlays()
+
+func _update_gizmos_recursive(node: Node) -> void:
+	if node is Node3D:
+		var script = node.get_script()
+		if script:
+			var base_script = script.get_base_script()
+			while base_script:
+				if base_script.resource_path == "res://addons/terrainy/nodes/terrain_feature_node.gd":
+					# Force gizmo update
+					node.update_gizmos()
+					break
+				base_script = base_script.get_base_script()
+	
+	for child in node.get_children():
+		_update_gizmos_recursive(child)
 
 func _clear_all_gizmos(node: Node) -> void:
 	# Recursively clear gizmos from terrain feature nodes

@@ -11,11 +11,6 @@ const TerrainFeatureNode = "res://addons/terrainy/nodes/terrain_feature_node.gd"
 		amplitude = value
 		parameters_changed.emit()
 
-@export var frequency: float = 0.05:
-	set(value):
-		frequency = value
-		parameters_changed.emit()
-
 @export var noise: FastNoiseLite:
 	set(value):
 		noise = value

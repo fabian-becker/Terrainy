@@ -15,7 +15,6 @@ func _ready() -> void:
 	if not noise:
 		noise = FastNoiseLite.new()
 		noise.seed = randi()
-		noise.frequency = frequency
 		noise.noise_type = FastNoiseLite.TYPE_CELLULAR
 		noise.cellular_distance_function = FastNoiseLite.DISTANCE_EUCLIDEAN
 		noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
@@ -43,8 +42,7 @@ func get_height_at(world_pos: Vector3) -> float:
 		3: # Cells - cell values
 			noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
 	
-	var sample_pos = world_pos * frequency
-	var voronoi_value = noise.get_noise_2d(sample_pos.x, sample_pos.z)
+	var voronoi_value = noise.get_noise_2d(world_pos.x, world_pos.z)
 	
 	# Normalize from [-1, 1] to [0, 1]
 	var height = (voronoi_value + 1.0) * 0.5 * amplitude
