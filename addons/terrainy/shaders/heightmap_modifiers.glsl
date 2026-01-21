@@ -6,8 +6,8 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 // Input/Output heightmap
-layout(r32f, set = 0, binding = 0) uniform readonly image2D input_heightmap;
-layout(r32f, set = 0, binding = 1) uniform writeonly image2D output_heightmap;
+layout(r32f, set = 0, binding = 0) uniform restrict readonly image2D input_heightmap;
+layout(r32f, set = 0, binding = 1) uniform restrict writeonly image2D output_heightmap;
 
 // Modifier parameters
 layout(std140, set = 0, binding = 2) uniform ModifierParams {
@@ -63,14 +63,14 @@ float apply_smoothing(ivec2 pixel_coords, float center_height) {
         vec2 offset = vec2(cos(angle), sin(angle)) * sample_radius;
         ivec2 sample_coords = pixel_coords + ivec2(round(offset));
         
-        float sample_height = sample_height(sample_coords);
+        float sampled_height = sample_height(sample_coords);
         
         // Weight by distance
         float dist = length(offset);
         float weight = 1.0 - (dist / (sample_radius * 1.5));
         weight = max(0.0, weight);
         
-        total_height += sample_height * weight;
+        total_height += sampled_height * weight;
         total_weight += weight;
     }
     
@@ -90,11 +90,11 @@ float apply_terracing(float height) {
     float level = floor(normalized_height * float(params.terrace_levels));
     float level_height = level / float(params.terrace_levels);
     
-    if (params.terrace_smoothness > 0.0) {
+    if (params.terrace_smoothness > 0.001) {
         // Smooth transition between levels
         float next_level_height = (level + 1.0) / float(params.terrace_levels);
         float t = (normalized_height * float(params.terrace_levels)) - level;
-        t = smoothstep(0.0, 1.0, t / params.terrace_smoothness);
+        t = smoothstep(0.0, 1.0, clamp(t / max(params.terrace_smoothness, 0.001), 0.0, 1.0));
         level_height = mix(level_height, next_level_height, t);
     }
     

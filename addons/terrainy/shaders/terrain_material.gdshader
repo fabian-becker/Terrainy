@@ -97,10 +97,12 @@ float calculate_layer_weight(int layer_idx, float world_height, float slope_angl
 	float height_max = hs_params.y;
 	float height_falloff = hs_params.z;
 	float slope_min = hs_params.w;
-	// FIX: Correct unpacking order to match terrain_composer.gd packing
-	float layer_strength = blend_params.x;  // was .z
-	float slope_max = blend_params.y;       // was .x
-	float slope_falloff = blend_params.z;   // was .y
+	// Parameter unpacking aligned with terrain_composer.gd:
+	// blend_params packing: [layer_strength, slope_max, slope_falloff, blend_mode]
+	float layer_strength = blend_params.x;
+	float slope_max = blend_params.y;
+	float slope_falloff = blend_params.z;
+	// Note: blend_mode (blend_params.w) is currently unused
 	
 	float weight = 1.0;
 	
@@ -154,12 +156,15 @@ void vertex() {
 void fragment() {
 	// Use world position from vertex shader for proper texture mapping
 	float world_height = world_pos.y + world_height_offset;
+	// Calculate slope angle (clamp handles downward-facing normals, keeping them at 90°)
 	float slope_angle = acos(clamp(NORMAL.y, 0.0, 1.0)); // In radians
 	vec2 world_xz = vec2(world_pos.x, world_pos.z);
 	
 	// OPTIMIZATION: Compute noise ONCE per fragment for all layers
-	float noise_scale = max(blend_noise_scale, 0.001);
-	float height_noise = fbm(world_xz / noise_scale) * 2.0 - 1.0;
+	float height_noise = 0.0;
+	if (blend_noise_scale > 0.001) {
+		height_noise = fbm(world_xz / blend_noise_scale) * 2.0 - 1.0;
+	}
 	
 	// Handle case when no layers exist
 	if (layer_count == 0) {
@@ -193,9 +198,9 @@ void fragment() {
 			}
 		}
 		
-		// Pass 3: Blend all layers with triplanar projection
+		// Pass 3: Blend all layers with world-space XZ projection
 		vec3 final_albedo = vec3(0.0);
-		vec3 final_normal = vec3(0.0, 0.0, 1.0);  // Start with up (no perturbation)
+		vec3 final_normal = vec3(0.0);  // Accumulate tangent-space normals additively
 		float final_roughness = 0.0;
 		float final_metallic = 0.0;
 		float final_ao = 0.0;
@@ -225,10 +230,12 @@ void fragment() {
 			if (tex_flags.y > 0.5) { // has_normal
 				vec3 layer_normal = sample_terrain_normal(normal_textures, tex_idx, world_pos, uv_scale, uv_offset);
 				
-				// Apply strength and blend
+				// Apply strength to normal intensity
 				float normal_strength = clamp(color_normal.w, 0.0, 2.0);
-				// Blend normals with weight-adjusted strength
-				final_normal = normalize(mix(final_normal, layer_normal, normal_strength * weight));
+				// Scale XY components by strength, keep Z
+				layer_normal.xy *= normal_strength;
+				// Accumulate normals additively (proper normal blending)
+				final_normal += layer_normal * weight;
 			}
 			
 			// Sample roughness with world-space mapping
@@ -258,7 +265,12 @@ void fragment() {
 		
 		// Output
 		ALBEDO = final_albedo;
-		NORMAL_MAP = normalize(final_normal);
+		// Normalize accumulated normal, or use neutral if no normals were applied
+		if (length(final_normal) > 0.001) {
+			NORMAL_MAP = normalize(final_normal);
+		} else {
+			NORMAL_MAP = vec3(0.0, 0.0, 1.0);  // Neutral tangent-space normal
+		}
 		ROUGHNESS = clamp(final_roughness, 0.0, 1.0);
 		METALLIC = clamp(final_metallic, 0.0, 1.0);
 		AO = clamp(final_ao, 0.0, 1.0);

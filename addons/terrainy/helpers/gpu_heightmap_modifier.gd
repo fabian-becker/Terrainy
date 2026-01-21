@@ -1,7 +1,8 @@
-class_name HeightmapModifierProcessor
+class_name GpuHeightmapModifier
 extends RefCounted
 
-## GPU-accelerated heightmap modifier processor (smoothing, terracing, clamping)
+## GPU-accelerated heightmap modifier using compute shaders
+## Handles smoothing, terracing, and clamping operations on heightmaps
 
 var _rd: RenderingDevice
 var _shader: RID
@@ -11,7 +12,7 @@ var _initialized: bool = false
 func _init() -> void:
 	_rd = RenderingServer.create_local_rendering_device()
 	if not _rd:
-		push_warning("[HeightmapModifierProcessor] Failed to create RenderingDevice")
+		push_warning("[GpuHeightmapModifier] Failed to create RenderingDevice")
 		return
 	
 	_load_shader()
@@ -19,23 +20,23 @@ func _init() -> void:
 func _load_shader() -> void:
 	var shader_file = load("res://addons/terrainy/shaders/heightmap_modifiers.glsl")
 	if not shader_file:
-		push_error("[HeightmapModifierProcessor] Failed to load modifier shader")
+		push_error("[GpuHeightmapModifier] Failed to load modifier shader")
 		return
 	
 	var shader_spirv: RDShaderSPIRV = shader_file.get_spirv()
 	if not shader_spirv:
-		push_error("[HeightmapModifierProcessor] Shader compilation failed")
+		push_error("[GpuHeightmapModifier] Shader compilation failed")
 		return
 	
 	var compile_error = shader_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
 	if compile_error != "":
-		push_error("[HeightmapModifierProcessor] Shader error: %s" % compile_error)
+		push_error("[GpuHeightmapModifier] Shader error: %s" % compile_error)
 		return
 	
 	_shader = _rd.shader_create_from_spirv(shader_spirv)
 	_pipeline = _rd.compute_pipeline_create(_shader)
 	_initialized = true
-	print("[HeightmapModifierProcessor] GPU modifier processor initialized")
+	print("[GpuHeightmapModifier] GPU modifier initialized")
 
 func is_available() -> bool:
 	return _initialized
@@ -51,7 +52,7 @@ func cleanup() -> void:
 		_rd.free_rid(_shader)
 	
 	_initialized = false
-	print("[HeightmapModifierProcessor] GPU resources cleaned up")
+	print("[GpuHeightmapModifier] GPU resources cleaned up")
 
 ## Apply modifiers to heightmap on GPU
 func apply_modifiers(
@@ -86,7 +87,7 @@ func apply_modifiers(
 	
 	var input_texture := _rd.texture_create(input_format, RDTextureView.new(), [input_heightmap.get_data()])
 	if not input_texture.is_valid():
-		push_error("[HeightmapModifierProcessor] Failed to create input texture")
+		push_error("[GpuHeightmapModifier] Failed to create input texture")
 		return null
 	
 	# Create output texture
@@ -170,7 +171,7 @@ func apply_modifiers(
 	_rd.free_rid(params_buffer)
 	
 	var elapsed: int = Time.get_ticks_msec() - start_time
-	print("[HeightmapModifierProcessor] Applied modifiers (%dx%d) in %d ms" % [
+	print("[GpuHeightmapModifier] Applied modifiers (%dx%d) in %d ms" % [
 		resolution.x, resolution.y, elapsed
 	])
 	

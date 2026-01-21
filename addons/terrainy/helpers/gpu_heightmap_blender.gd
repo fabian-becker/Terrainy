@@ -1,7 +1,8 @@
-class_name HeightmapCompositor
+class_name GpuHeightmapBlender
 extends RefCounted
 
-## GPU-accelerated heightmap compositor using compute shaders
+## GPU-accelerated heightmap blender using compute shaders
+## Handles composition of multiple heightmaps with influence maps on the GPU
 
 var _rd: RenderingDevice
 var _shader: RID
@@ -9,37 +10,37 @@ var _pipeline: RID
 var _initialized: bool = false
 
 func _init() -> void:
-	print("[HeightmapCompositor] Initializing GPU compositor...")
+	print("[GpuHeightmapBlender] Initializing GPU blender...")
 	_rd = RenderingServer.create_local_rendering_device()
 	if not _rd:
-		push_warning("[HeightmapCompositor] Failed to create RenderingDevice, GPU composition unavailable")
+		push_warning("[GpuHeightmapBlender] Failed to create RenderingDevice, GPU composition unavailable")
 		return
 	
-	print("[HeightmapCompositor] RenderingDevice created successfully")
+	print("[GpuHeightmapBlender] RenderingDevice created successfully")
 	_load_shader()
 
 func _load_shader() -> void:
-	print("[HeightmapCompositor] Loading compute shader...")
+	print("[GpuHeightmapBlender] Loading compute shader...")
 	var shader_file = load("res://addons/terrainy/shaders/heightmap_compositor.glsl")
 	if not shader_file:
-		push_error("[HeightmapCompositor] Failed to load compute shader file")
+		push_error("[GpuHeightmapBlender] Failed to load compute shader file")
 		return
 	
-	print("[HeightmapCompositor] Shader file loaded, compiling...")
+	print("[GpuHeightmapBlender] Shader file loaded, compiling...")
 	var shader_spirv: RDShaderSPIRV = shader_file.get_spirv()
 	if not shader_spirv:
-		push_error("[HeightmapCompositor] Shader compilation failed - could not get SPIRV")
+		push_error("[GpuHeightmapBlender] Shader compilation failed - could not get SPIRV")
 		return
 	
 	var compile_error = shader_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
 	if compile_error != "":
-		push_error("[HeightmapCompositor] Shader compilation error: %s" % compile_error)
+		push_error("[GpuHeightmapBlender] Shader compilation error: %s" % compile_error)
 		return
 	
 	_shader = _rd.shader_create_from_spirv(shader_spirv)
 	_pipeline = _rd.compute_pipeline_create(_shader)
 	_initialized = true
-	print("[HeightmapCompositor] GPU compositor initialized")
+	print("[GpuHeightmapBlender] GPU blender initialized")
 
 func is_available() -> bool:
 	return _initialized
@@ -55,7 +56,7 @@ func cleanup() -> void:
 		_rd.free_rid(_shader)
 	
 	_initialized = false
-	print("[HeightmapCompositor] GPU resources cleaned up")
+	print("[GpuHeightmapBlender] GPU resources cleaned up")
 
 ## Compose heightmaps on GPU - returns final heightmap Image
 func compose_gpu(
