@@ -2,14 +2,13 @@
 class_name TerrainFeatureNode
 extends Node3D
 
-const HeightmapModifierProcessor = preload("res://addons/terrainy/nodes/heightmap_modifier_processor.gd")
+const GpuHeightmapModifier = preload("res://addons/terrainy/helpers/gpu_heightmap_modifier.gd")
 
 ## Base class for all terrain feature nodes that can be positioned and blended
 
 signal parameters_changed
 
 # Constants
-const INFLUENCE_WEIGHT_THRESHOLD = 0.001
 const GIZMO_MANIPULATION_TIMEOUT_SEC = 5.0
 const MIN_INFLUENCE_SIZE = 0.01
 
@@ -128,7 +127,7 @@ var _smoothing_cache: Dictionary = {}
 var _heightmap_dirty: bool = true
 
 # GPU modifier processor (shared across all features)
-static var _gpu_modifier_processor: HeightmapModifierProcessor = null
+static var _gpu_modifier_processor: GpuHeightmapModifier = null
 static var _feature_reference_count: int = 0
 
 func _notification(what: int) -> void:
@@ -140,13 +139,17 @@ func _notification(what: int) -> void:
 				_gpu_modifier_processor.cleanup()
 			_gpu_modifier_processor = null
 			_feature_reference_count = 0
+	elif what == NOTIFICATION_TRANSFORM_CHANGED:
+		# Notify parent TerrainComposer when position/rotation/scale changes
+		_commit_parameter_change()
 
 func _ready() -> void:
 	_feature_reference_count += 1
+	set_notify_transform(true)
 
-static func _get_gpu_modifier_processor() -> HeightmapModifierProcessor:
+static func _get_gpu_modifier_processor() -> GpuHeightmapModifier:
 	if not _gpu_modifier_processor:
-		_gpu_modifier_processor = HeightmapModifierProcessor.new()
+		_gpu_modifier_processor = GpuHeightmapModifier.new()
 		if not _gpu_modifier_processor.is_available():
 			push_warning("[TerrainFeatureNode] GPU modifiers unavailable, will use CPU fallback")
 	return _gpu_modifier_processor
@@ -285,7 +288,6 @@ func get_influence_weight(world_pos: Vector3) -> float:
 		
 		InfluenceShape.ELLIPSE:
 			# Ellipse distance formula
-			# Protect against division by zero
 			var safe_size_x = max(influence_size.x, MIN_INFLUENCE_SIZE)
 			var safe_size_y = max(influence_size.y, MIN_INFLUENCE_SIZE)
 			var normalized = Vector2(
@@ -464,8 +466,6 @@ func _commit_parameter_change() -> void:
 	_heightmap_dirty = true
 	if not _is_gizmo_manipulating():
 		parameters_changed.emit()
-		if Engine.is_editor_hint():
-			print("[%s] parameters_changed emitted" % name)
 
 ## Validate node configuration
 func validate_configuration() -> bool:
