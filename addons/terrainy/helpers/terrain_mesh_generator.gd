@@ -25,6 +25,16 @@ static func generate_from_heightmap(
 	vertices.resize(total_vertices)
 	uvs.resize(total_vertices)
 	
+	# Pre-extract all height values from heightmap
+	var heights := PackedFloat32Array()
+	heights.resize(total_vertices)
+	var heightmap_data = heightmap.get_data()
+	var bytes_per_pixel = 4  # FORMAT_RF = 4 bytes (float32)
+	
+	for i in range(total_vertices):
+		var offset = i * bytes_per_pixel
+		heights[i] = heightmap_data.decode_float(offset)
+	
 	# Generate vertices from heightmap
 	var vertex_index = 0
 	for z in range(resolution.y + 1):
@@ -32,8 +42,8 @@ static func generate_from_heightmap(
 			var local_x = (x * step.x) - half_size.x
 			var local_z = (z * step.y) - half_size.y
 			
-			# Sample heightmap
-			var height = heightmap.get_pixel(x, z).r
+			# Get pre-decoded height
+			var height = heights[vertex_index]
 			
 			vertices[vertex_index] = Vector3(local_x, height, local_z)
 			uvs[vertex_index] = Vector2(x / float(resolution.x), z / float(resolution.y))
