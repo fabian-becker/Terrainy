@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://5vorc0xw3sfg"
+path="res://.godot/imported/influence_generator.glsl-e81c806b663e27f5c068848612759139.res"
+
+[deps]
+
+source_file="res://addons/terrainy/shaders/influence_generator.glsl"
+dest_files=["res://.godot/imported/influence_generator.glsl-e81c806b663e27f5c068848612759139.res"]
+
+[params]
+

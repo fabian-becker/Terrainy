@@ -101,6 +101,10 @@ func _compose_gpu(
 	var blend_modes := PackedInt32Array()
 	var strengths := PackedFloat32Array()
 	
+	var influence_gen_time = 0
+	var influence_generated_count = 0
+	var influence_cached_count = 0
+	
 	# Collect valid features
 	for feature in features:
 		if not _heightmap_cache.has(feature):
@@ -118,8 +122,18 @@ func _compose_gpu(
 		
 		if _influence_cache.has(feature) and _influence_cache_keys.get(feature) == cache_key:
 			influence_map = _influence_cache[feature]
+			influence_cached_count += 1
 		else:
-			influence_map = _generate_influence_map(feature, resolution, terrain_bounds)
+			var inf_start = Time.get_ticks_msec()
+			# Use GPU to generate influence map for better performance
+			if _gpu_compositor and _gpu_compositor.is_available():
+				influence_map = _gpu_compositor.generate_influence_map_gpu(feature, resolution, terrain_bounds)
+				print("[TerrainHeightmapBuilder] Generated influence map for '%s' on GPU in %d ms" % [feature.name, Time.get_ticks_msec() - inf_start])
+			else:
+				influence_map = _generate_influence_map(feature, resolution, terrain_bounds)
+				print("[TerrainHeightmapBuilder] Generated influence map for '%s' on CPU in %d ms" % [feature.name, Time.get_ticks_msec() - inf_start])
+			influence_gen_time += Time.get_ticks_msec() - inf_start
+			influence_generated_count += 1
 			_influence_cache[feature] = influence_map
 			_influence_cache_keys[feature] = cache_key
 		
@@ -145,9 +159,14 @@ func _compose_gpu(
 	)
 	
 	var elapsed = Time.get_ticks_msec() - start_time
-	print("[TerrainHeightmapBuilder] GPU composed %d features in %d ms" % [
-		feature_heightmaps.size(), elapsed
-	])
+	if influence_gen_time > 0:
+		print("[TerrainHeightmapBuilder] GPU composed %d features in %d ms (%d generated, %d cached, %d ms influence generation)" % [
+			feature_heightmaps.size(), elapsed, influence_generated_count, influence_cached_count, influence_gen_time
+		])
+	else:
+		print("[TerrainHeightmapBuilder] GPU composed %d features in %d ms (all %d influence maps cached)" % [
+			feature_heightmaps.size(), elapsed, influence_cached_count
+		])
 	
 	return result
 
@@ -200,63 +219,28 @@ func _compose_cpu(
 		print("[TerrainHeightmapBuilder] CPU composed 0 features in %d ms" % elapsed)
 		return final_map
 	
-	# Step 2: Get shared data buffer for all threads to work on
-	var final_data = final_map.get_data()
+	# Step 2: Blend using optimized byte array operations
+	# Note: GDScript PackedByteArray cannot be safely shared across threads,
+	# so we use single-threaded processing with optimized byte operations
+	_blend_all_features(final_map, blend_data, resolution)
 	
-	# Step 3: Determine threading strategy
-	var num_threads = mini(OS.get_processor_count(), resolution.y)
-	var use_threading = resolution.y >= 256 and num_threads > 1
-	
-	if use_threading:
-		# Multithreaded composition
-		var threads: Array[Thread] = []
-		var chunk_height = ceili(float(resolution.y) / num_threads)
-		
-		for i in range(num_threads):
-			var start_y = i * chunk_height
-			var end_y = mini((i + 1) * chunk_height, resolution.y)
-			
-			if start_y >= resolution.y:
-				break
-			
-			var thread = Thread.new()
-			thread.start(_blend_chunk.bind(final_data, blend_data, start_y, end_y, resolution.x))
-			threads.append(thread)
-		
-		# Wait for all threads to complete
-		for thread in threads:
-			thread.wait_to_finish()
-		
-		# Update image with modified data
-		final_map.set_data(resolution.x, resolution.y, false, Image.FORMAT_RF, final_data)
-		
-		var elapsed = Time.get_ticks_msec() - start_time
-		print("[TerrainHeightmapBuilder] CPU composed %d features in %d ms (%d threads)" % [
-			blend_data.size(), elapsed, threads.size()
-		])
-	else:
-		# Single-threaded composition for small resolutions
-		_blend_chunk(final_data, blend_data, 0, resolution.y, resolution.x)
-		
-		# Update image with modified data
-		final_map.set_data(resolution.x, resolution.y, false, Image.FORMAT_RF, final_data)
-		
-		var elapsed = Time.get_ticks_msec() - start_time
-		print("[TerrainHeightmapBuilder] CPU composed %d features in %d ms (single-threaded)" % [
-			blend_data.size(), elapsed
-		])
+	var elapsed = Time.get_ticks_msec() - start_time
+	print("[TerrainHeightmapBuilder] CPU composed %d features in %d ms" % [
+		blend_data.size(), elapsed
+	])
 	
 	return final_map
 
-## Blend a chunk of the heightmap (thread-safe)
-func _blend_chunk(
-	final_data: PackedByteArray,
+## Blend all features into final map using optimized byte array operations
+func _blend_all_features(
+	final_map: Image,
 	blend_data: Array,
-	start_y: int,
-	end_y: int,
-	width: int
+	resolution: Vector2i
 ) -> void:
+	var final_data = final_map.get_data()
 	var bytes_per_pixel = 4  # FORMAT_RF = 4 bytes (float32)
+	var width = resolution.x
+	var height = resolution.y
 	
 	# Process each feature
 	for data in blend_data:
@@ -269,8 +253,8 @@ func _blend_chunk(
 		var feature_data = feature_map.get_data()
 		var influence_data = influence_map.get_data()
 		
-		# Process chunk row by row
-		for y in range(start_y, end_y):
+		# Process all pixels
+		for y in range(height):
 			for x in range(width):
 				var pixel_index = y * width + x
 				var offset = pixel_index * bytes_per_pixel
@@ -303,8 +287,11 @@ func _blend_chunk(
 					_:
 						new_height = current_height + weighted_height
 				
-				# Write new height to shared buffer
+				# Write new height
 				final_data.encode_float(offset, new_height)
+	
+	# Update image with modified data
+	final_map.set_data(width, height, false, Image.FORMAT_RF, final_data)
 
 ## Generate influence map for a feature
 func _generate_influence_map(
@@ -313,6 +300,8 @@ func _generate_influence_map(
 	terrain_bounds: Rect2
 ) -> Image:
 	var influence_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
+	var influence_data = influence_map.get_data()
+	var bytes_per_pixel = 4  # FORMAT_RF = 4 bytes (float32)
 	
 	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
 	
@@ -323,7 +312,12 @@ func _generate_influence_map(
 			var world_pos = Vector3(world_x, 0, world_z)
 			
 			var weight = feature.get_influence_weight(world_pos)
-			influence_map.set_pixel(x, y, Color(weight, 0, 0, 1))
+			var pixel_index = y * resolution.x + x
+			var offset = pixel_index * bytes_per_pixel
+			influence_data.encode_float(offset, weight)
+	
+	# Update image with computed data
+	influence_map.set_data(resolution.x, resolution.y, false, Image.FORMAT_RF, influence_data)
 	
 	return influence_map
 
