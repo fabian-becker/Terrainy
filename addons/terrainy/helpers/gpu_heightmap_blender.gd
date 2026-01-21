@@ -248,40 +248,30 @@ func compose_gpu(
 		return null
 	
 	# Clamp to 32 layers max (shader limitation)
-	var layer_count = mini(feature_heightmaps.size(), 32)
+	var layer_count := mini(feature_heightmaps.size(), 32)
 	if feature_heightmaps.size() > 32:
 		push_warning("[HeightmapCompositor] Too many layers (%d), clamping to 32" % feature_heightmaps.size())
 	
-	# Flatten heightmap data into single buffer
-	var total_pixels = resolution.x * resolution.y
+	# Flatten heightmap data into single buffer using native array append
+	var total_pixels := resolution.x * resolution.y
 	var heightmap_buffer_data := PackedFloat32Array()
 	heightmap_buffer_data.resize(total_pixels * layer_count)
 	
-	for layer_idx in range(layer_count):
-		var img = feature_heightmaps[layer_idx]
-		var img_data = img.get_data()
-		var bytes_per_pixel = 4  # FORMAT_RF = 4 bytes (float32)
-		
-		for pixel_idx in range(total_pixels):
-			var offset = pixel_idx * bytes_per_pixel
-			var height = img_data.decode_float(offset)
-			var buffer_index = layer_idx * total_pixels + pixel_idx
-			heightmap_buffer_data[buffer_index] = height
+	for layer_idx in layer_count:
+		var layer_heights := feature_heightmaps[layer_idx].get_data().to_float32_array()
+		var buffer_offset := layer_idx * total_pixels
+		for i in total_pixels:
+			heightmap_buffer_data[buffer_offset + i] = layer_heights[i]
 	
 	# Flatten influence data into single buffer
 	var influence_buffer_data := PackedFloat32Array()
 	influence_buffer_data.resize(total_pixels * layer_count)
 	
-	for layer_idx in range(layer_count):
-		var img = influence_maps[layer_idx]
-		var img_data = img.get_data()
-		var bytes_per_pixel = 4  # FORMAT_RF = 4 bytes (float32)
-		
-		for pixel_idx in range(total_pixels):
-			var offset = pixel_idx * bytes_per_pixel
-			var influence = img_data.decode_float(offset)
-			var buffer_index = layer_idx * total_pixels + pixel_idx
-			influence_buffer_data[buffer_index] = influence
+	for layer_idx in layer_count:
+		var layer_influence := influence_maps[layer_idx].get_data().to_float32_array()
+		var buffer_offset := layer_idx * total_pixels
+		for i in total_pixels:
+			influence_buffer_data[buffer_offset + i] = layer_influence[i]
 	
 	# Create storage buffers
 	var heightmap_buffer := _rd.storage_buffer_create(heightmap_buffer_data.size() * 4, heightmap_buffer_data.to_byte_array())

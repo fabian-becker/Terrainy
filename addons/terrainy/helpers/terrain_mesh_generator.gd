@@ -9,82 +9,134 @@ static func generate_from_heightmap(
 	heightmap: Image,
 	terrain_size: Vector2
 ) -> ArrayMesh:
-	var start_time = Time.get_ticks_msec()
+	var start_time := Time.get_ticks_msec()
 	
-	var resolution = Vector2i(heightmap.get_width() - 1, heightmap.get_height() - 1)
-	var vertices: PackedVector3Array = []
-	var normals: PackedVector3Array = []
-	var uvs: PackedVector2Array = []
-	var indices: PackedInt32Array = []
+	var width := heightmap.get_width()
+	var height := heightmap.get_height()
+	var res_x := width - 1
+	var res_y := height - 1
 	
-	var step = terrain_size / Vector2(resolution)
-	var half_size = terrain_size / 2.0
-	var total_vertices = (resolution.x + 1) * (resolution.y + 1)
+	var step_x := terrain_size.x / float(res_x)
+	var step_y := terrain_size.y / float(res_y)
+	var half_x := terrain_size.x * 0.5
+	var half_y := terrain_size.y * 0.5
+	var total_vertices := width * height
 	
-	# Pre-allocate arrays
+	# Pre-allocate all arrays upfront
+	var vertices := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	
 	vertices.resize(total_vertices)
+	normals.resize(total_vertices)
 	uvs.resize(total_vertices)
 	
-	# Pre-extract all height values from heightmap
-	var heights := PackedFloat32Array()
-	heights.resize(total_vertices)
-	var heightmap_data = heightmap.get_data()
-	var bytes_per_pixel = 4  # FORMAT_RF = 4 bytes (float32)
+	# Pre-allocate indices: 2 triangles * 3 indices per quad
+	indices.resize(res_x * res_y * 6)
 	
-	for i in range(total_vertices):
-		var offset = i * bytes_per_pixel
-		heights[i] = heightmap_data.decode_float(offset)
+	# Pre-extract all height values from heightmap using to_float32_array (native, fast)
+	var heights := heightmap.get_data().to_float32_array()
 	
-	# Generate vertices from heightmap
-	var vertex_index = 0
-	for z in range(resolution.y + 1):
-		for x in range(resolution.x + 1):
-			var local_x = (x * step.x) - half_size.x
-			var local_z = (z * step.y) - half_size.y
-			
-			# Get pre-decoded height
-			var height = heights[vertex_index]
-			
-			vertices[vertex_index] = Vector3(local_x, height, local_z)
-			uvs[vertex_index] = Vector2(x / float(resolution.x), z / float(resolution.y))
-			vertex_index += 1
+	# Precompute scale factors
+	var uv_scale_x := 1.0 / float(res_x)
+	var uv_scale_z := 1.0 / float(res_y)
+	var norm_scale_x := 0.5 / step_x
+	var norm_scale_z := 0.5 / step_y
 	
-	# Generate indices
-	for z in range(resolution.y):
-		for x in range(resolution.x):
-			var i = z * (resolution.x + 1) + x
-			
-			# Two triangles per quad
-			indices.append(i)
-			indices.append(i + 1)
-			indices.append(i + resolution.x + 1)
-			
-			indices.append(i + 1)
-			indices.append(i + resolution.x + 2)
-			indices.append(i + resolution.x + 1)
+	# Generate vertices and UVs for interior (bulk of data, no edge checks)
+	# Process row by row, handle edges separately
+	var vi := 0
 	
-	# Calculate normals
-	normals.resize(vertices.size())
-	for i in range(normals.size()):
-		normals[i] = Vector3.ZERO
-	
-	# Accumulate face normals
-	for i in range(0, indices.size(), 3):
-		var i0 = indices[i]
-		var i1 = indices[i + 1]
-		var i2 = indices[i + 2]
+	# First row (z = 0)
+	var uv_z := 0.0
+	var local_z := -half_y
+	for x in width:
+		var h := heights[vi]
+		vertices[vi] = Vector3(x * step_x - half_x, h, local_z)
+		uvs[vi] = Vector2(x * uv_scale_x, uv_z)
 		
-		var edge1 = vertices[i1] - vertices[i0]
-		var edge2 = vertices[i2] - vertices[i0]
-		var normal = edge1.cross(edge2)
-		
-		normals[i0] += normal
-		normals[i1] += normal
-		normals[i2] += normal
+		var h_left := heights[vi - 1] if x > 0 else h
+		var h_right := heights[vi + 1] if x < res_x else h
+		var h_down := heights[vi + width]
+		var dx := (h_right - h_left) * norm_scale_x
+		var dz := (h_down - h) * norm_scale_z
+		normals[vi] = Vector3(-dx, 1.0, -dz).normalized()
+		vi += 1
 	
-	# Normalize
-	for i in range(normals.size()):
-		normals[i] = normals[i].normalized()
+	# Interior rows (z = 1 to res_y - 1) - no vertical edge checks needed
+	for z in range(1, res_y):
+		local_z = z * step_y - half_y
+		uv_z = z * uv_scale_z
+		
+		# Left edge (x = 0)
+		var h := heights[vi]
+		vertices[vi] = Vector3(-half_x, h, local_z)
+		uvs[vi] = Vector2(0.0, uv_z)
+		var h_right := heights[vi + 1]
+		var h_up := heights[vi - width]
+		var h_down := heights[vi + width]
+		var dx := (h_right - h) * norm_scale_x
+		var dz := (h_down - h_up) * norm_scale_z
+		normals[vi] = Vector3(-dx, 1.0, -dz).normalized()
+		vi += 1
+		
+		# Interior (x = 1 to res_x - 1) - no edge checks
+		for x in range(1, res_x):
+			h = heights[vi]
+			vertices[vi] = Vector3(x * step_x - half_x, h, local_z)
+			uvs[vi] = Vector2(x * uv_scale_x, uv_z)
+			
+			dx = (heights[vi + 1] - heights[vi - 1]) * norm_scale_x
+			dz = (heights[vi + width] - heights[vi - width]) * norm_scale_z
+			normals[vi] = Vector3(-dx, 1.0, -dz).normalized()
+			vi += 1
+		
+		# Right edge (x = res_x)
+		h = heights[vi]
+		vertices[vi] = Vector3(res_x * step_x - half_x, h, local_z)
+		uvs[vi] = Vector2(1.0, uv_z)
+		var h_left := heights[vi - 1]
+		h_up = heights[vi - width]
+		h_down = heights[vi + width]
+		dx = (h - h_left) * norm_scale_x
+		dz = (h_down - h_up) * norm_scale_z
+		normals[vi] = Vector3(-dx, 1.0, -dz).normalized()
+		vi += 1
+	
+	# Last row (z = res_y)
+	local_z = res_y * step_y - half_y
+	uv_z = 1.0
+	for x in width:
+		var h := heights[vi]
+		vertices[vi] = Vector3(x * step_x - half_x, h, local_z)
+		uvs[vi] = Vector2(x * uv_scale_x, uv_z)
+		
+		var h_left := heights[vi - 1] if x > 0 else h
+		var h_right := heights[vi + 1] if x < res_x else h
+		var h_up := heights[vi - width]
+		var dx := (h_right - h_left) * norm_scale_x
+		var dz := (h - h_up) * norm_scale_z
+		normals[vi] = Vector3(-dx, 1.0, -dz).normalized()
+		vi += 1
+	
+	# Generate indices with direct indexing - single loop
+	var idx := 0
+	for z in res_y:
+		var row_base := z * width
+		@warning_ignore("integer_division")
+		for x in res_x:
+			var i := row_base + x
+			var i_next_row := i + width
+			
+			indices[idx] = i
+			indices[idx + 1] = i + 1
+			indices[idx + 2] = i_next_row
+			indices[idx + 3] = i + 1
+			indices[idx + 4] = i_next_row + 1
+			indices[idx + 5] = i_next_row
+			
+			idx += 6
 	
 	# Create mesh
 	var arrays = []
@@ -99,7 +151,7 @@ static func generate_from_heightmap(
 	
 	var elapsed = Time.get_ticks_msec() - start_time
 	print("[TerrainMeshGenerator] Generated %dx%d terrain (%d verts, %d tris) from heightmap in %d ms" % [
-		resolution.x, resolution.y, vertices.size(), indices.size() / 3, elapsed
+		width, height, vertices.size(), indices.size() / 3, elapsed
 	])
 	
 	return array_mesh

@@ -40,5 +40,3 @@ func get_height_at(world_pos: Vector3) -> float:
 			t = 1.0 - (1.0 - t) * (1.0 - t)
 	
 	return lerp(start_height, end_height, t)
-	
-	return lerp(start_height, end_height, t)
