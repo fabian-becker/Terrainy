@@ -164,10 +164,8 @@ func _compose_cpu(
 	var final_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
 	final_map.fill(Color(base_height, 0, 0, 1))
 	
-	# Hoist step calculation outside loops
-	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
-	
-	# Blend each feature's heightmap
+	# Step 1: Pre-compute all influence maps on main thread (avoids to_local() issues in threads)
+	var blend_data = []
 	for feature in features:
 		if not _heightmap_cache.has(feature):
 			continue
@@ -179,27 +177,117 @@ func _compose_cpu(
 			push_warning("[TerrainHeightmapBuilder] Feature '%s' heightmap size mismatch, skipping" % feature.name)
 			continue
 		
-		# Blend feature into final heightmap
-		for y in range(resolution.y):
-			var world_z = terrain_bounds.position.y + (y * step.y)
-			for x in range(resolution.x):
-				# Calculate world position for influence weight
-				var world_x = terrain_bounds.position.x + (x * step.x)
-				var world_pos = Vector3(world_x, 0, world_z)
+		# Get or generate cached influence map
+		var influence_map: Image
+		var cache_key = _get_influence_cache_key(feature)
+		
+		if _influence_cache.has(feature) and _influence_cache_keys.get(feature) == cache_key:
+			influence_map = _influence_cache[feature]
+		else:
+			influence_map = _generate_influence_map(feature, resolution, terrain_bounds)
+			_influence_cache[feature] = influence_map
+			_influence_cache_keys[feature] = cache_key
+		
+		blend_data.append({
+			"heightmap": feature_map,
+			"influence": influence_map,
+			"blend_mode": feature.blend_mode,
+			"strength": feature.strength
+		})
+	
+	if blend_data.is_empty():
+		var elapsed = Time.get_ticks_msec() - start_time
+		print("[TerrainHeightmapBuilder] CPU composed 0 features in %d ms" % elapsed)
+		return final_map
+	
+	# Step 2: Get shared data buffer for all threads to work on
+	var final_data = final_map.get_data()
+	
+	# Step 3: Determine threading strategy
+	var num_threads = mini(OS.get_processor_count(), resolution.y)
+	var use_threading = resolution.y >= 256 and num_threads > 1
+	
+	if use_threading:
+		# Multithreaded composition
+		var threads: Array[Thread] = []
+		var chunk_height = ceili(float(resolution.y) / num_threads)
+		
+		for i in range(num_threads):
+			var start_y = i * chunk_height
+			var end_y = mini((i + 1) * chunk_height, resolution.y)
+			
+			if start_y >= resolution.y:
+				break
+			
+			var thread = Thread.new()
+			thread.start(_blend_chunk.bind(final_data, blend_data, start_y, end_y, resolution.x))
+			threads.append(thread)
+		
+		# Wait for all threads to complete
+		for thread in threads:
+			thread.wait_to_finish()
+		
+		# Update image with modified data
+		final_map.set_data(resolution.x, resolution.y, false, Image.FORMAT_RF, final_data)
+		
+		var elapsed = Time.get_ticks_msec() - start_time
+		print("[TerrainHeightmapBuilder] CPU composed %d features in %d ms (%d threads)" % [
+			blend_data.size(), elapsed, threads.size()
+		])
+	else:
+		# Single-threaded composition for small resolutions
+		_blend_chunk(final_data, blend_data, 0, resolution.y, resolution.x)
+		
+		# Update image with modified data
+		final_map.set_data(resolution.x, resolution.y, false, Image.FORMAT_RF, final_data)
+		
+		var elapsed = Time.get_ticks_msec() - start_time
+		print("[TerrainHeightmapBuilder] CPU composed %d features in %d ms (single-threaded)" % [
+			blend_data.size(), elapsed
+		])
+	
+	return final_map
+
+## Blend a chunk of the heightmap (thread-safe)
+func _blend_chunk(
+	final_data: PackedByteArray,
+	blend_data: Array,
+	start_y: int,
+	end_y: int,
+	width: int
+) -> void:
+	var bytes_per_pixel = 4  # FORMAT_RF = 4 bytes (float32)
+	
+	# Process each feature
+	for data in blend_data:
+		var feature_map: Image = data["heightmap"]
+		var influence_map: Image = data["influence"]
+		var blend_mode: int = data["blend_mode"]
+		var strength: float = data["strength"]
+		
+		# Get byte buffers for feature and influence
+		var feature_data = feature_map.get_data()
+		var influence_data = influence_map.get_data()
+		
+		# Process chunk row by row
+		for y in range(start_y, end_y):
+			for x in range(width):
+				var pixel_index = y * width + x
+				var offset = pixel_index * bytes_per_pixel
 				
-				# Get influence weight
-				var weight = feature.get_influence_weight(world_pos)
+				# Read influence weight
+				var weight = influence_data.decode_float(offset)
 				if weight <= INFLUENCE_WEIGHT_THRESHOLD:
 					continue
 				
-				# Get heights
-				var current_height = final_map.get_pixel(x, y).r
-				var feature_height = feature_map.get_pixel(x, y).r
-				var weighted_height = feature_height * weight * feature.strength
+				# Read heights
+				var current_height = final_data.decode_float(offset)
+				var feature_height = feature_data.decode_float(offset)
+				var weighted_height = feature_height * weight * strength
 				
 				# Apply blend mode
 				var new_height: float
-				match feature.blend_mode:
+				match blend_mode:
 					TerrainFeatureNode.BlendMode.ADD:
 						new_height = current_height + weighted_height
 					TerrainFeatureNode.BlendMode.SUBTRACT:
@@ -215,12 +303,8 @@ func _compose_cpu(
 					_:
 						new_height = current_height + weighted_height
 				
-				final_map.set_pixel(x, y, Color(new_height, 0, 0, 1))
-	
-	var elapsed = Time.get_ticks_msec() - start_time
-	print("[TerrainHeightmapBuilder] CPU composed %d feature heightmaps in %d ms" % [_heightmap_cache.size(), elapsed])
-	
-	return final_map
+				# Write new height to shared buffer
+				final_data.encode_float(offset, new_height)
 
 ## Generate influence map for a feature
 func _generate_influence_map(
