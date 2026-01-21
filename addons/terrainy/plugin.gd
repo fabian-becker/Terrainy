@@ -2,7 +2,7 @@
 extends EditorPlugin
 
 var rebuild_button: Button
-var gizmo_toggle_button: CheckButton
+# var gizmo_toggle_button: CheckButton
 var current_terrain_composer: Node3D
 var terrain_gizmo_plugin: EditorNode3DGizmoPlugin
 
@@ -67,17 +67,17 @@ func _enter_tree() -> void:
 	rebuild_button.pressed.connect(_on_rebuild_pressed)
 	add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, rebuild_button)
 	
-	gizmo_toggle_button = CheckButton.new()
-	gizmo_toggle_button.text = "Show Gizmos"
-	# Restore previous state from plugin settings
-	var saved_state = get_editor_interface().get_editor_settings().get_setting("terrainy/show_gizmos")
-	if saved_state != null:
-		gizmo_toggle_button.button_pressed = saved_state
-		terrain_gizmo_plugin.show_gizmos = saved_state
-	else:
-		gizmo_toggle_button.button_pressed = true
-	gizmo_toggle_button.toggled.connect(_on_gizmo_toggle)
-	add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, gizmo_toggle_button)
+	# gizmo_toggle_button = CheckButton.new()
+	# gizmo_toggle_button.text = "Show Gizmos"
+	# # Restore previous state from plugin settings
+	# var saved_state = get_editor_interface().get_editor_settings().get_setting("terrainy/show_gizmos")
+	# if saved_state != null:
+	# 	gizmo_toggle_button.button_pressed = saved_state
+	# 	terrain_gizmo_plugin.show_gizmos = saved_state
+	# else:
+	# 	gizmo_toggle_button.button_pressed = true
+	# gizmo_toggle_button.toggled.connect(_on_gizmo_toggle)
+	# add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, gizmo_toggle_button)
 	
 	# Check for terrain composers periodically
 	get_tree().node_added.connect(_on_node_changed)
@@ -95,9 +95,9 @@ func _exit_tree() -> void:
 		remove_control_from_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, rebuild_button)
 		rebuild_button.queue_free()
 	
-	if gizmo_toggle_button:
-		remove_control_from_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, gizmo_toggle_button)
-		gizmo_toggle_button.queue_free()
+	# if gizmo_toggle_button:
+	# 	remove_control_from_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, gizmo_toggle_button)
+	# 	gizmo_toggle_button.queue_free()
 	
 	if terrain_gizmo_plugin:
 		remove_node_3d_gizmo_plugin(terrain_gizmo_plugin)

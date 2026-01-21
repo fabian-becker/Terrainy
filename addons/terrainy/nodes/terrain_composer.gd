@@ -94,6 +94,10 @@ var _pending_heightmap: Image = null
 var _final_heightmap: Image
 var _terrain_bounds: Rect2
 
+# Rebuild timing
+var _rebuild_start_msec: int = 0
+var _rebuild_id: int = 0
+
 # Rebuild debouncing
 var _rebuild_timer: Timer = null
 var _pending_rebuild: bool = false
@@ -142,6 +146,9 @@ func _process(_delta: float) -> void:
 			_update_material()
 			_update_collision(_pending_heightmap)
 			terrain_updated.emit()
+			if _rebuild_start_msec > 0:
+				var total_elapsed = Time.get_ticks_msec() - _rebuild_start_msec
+				print("[TerrainComposer] Rebuild #%d total time: %d ms" % [_rebuild_id, total_elapsed])
 			_pending_mesh = null
 			_pending_heightmap = null
 		
@@ -254,6 +261,8 @@ func rebuild_terrain() -> void:
 		return
 	
 	_is_generating = true
+	_rebuild_id += 1
+	_rebuild_start_msec = Time.get_ticks_msec()
 	
 	# Calculate terrain bounds
 	_terrain_bounds = Rect2(
@@ -265,6 +274,7 @@ func rebuild_terrain() -> void:
 	var heightmap_resolution = Vector2i(resolution + 1, resolution + 1)
 	
 	# Compose heightmaps using helper
+	var compose_start = Time.get_ticks_msec()
 	_final_heightmap = _heightmap_composer.compose(
 		_feature_nodes,
 		heightmap_resolution,
@@ -272,6 +282,8 @@ func rebuild_terrain() -> void:
 		base_height,
 		use_gpu_composition
 	)
+	var compose_elapsed = Time.get_ticks_msec() - compose_start
+	print("[TerrainComposer] Rebuild #%d compose time: %d ms" % [_rebuild_id, compose_elapsed])
 	
 	# Step 3: Generate mesh from final heightmap in background thread
 	if _mesh_thread and _mesh_thread.is_alive():
@@ -282,7 +294,9 @@ func rebuild_terrain() -> void:
 		"heightmap": _final_heightmap,
 		"terrain_size": terrain_size
 	}
+	var mesh_start = Time.get_ticks_msec()
 	_mesh_thread.start(_generate_mesh_threaded.bind(thread_data))
+	print("[TerrainComposer] Rebuild #%d mesh thread start: %d ms" % [_rebuild_id, Time.get_ticks_msec() - mesh_start])
 	
 	# Check for completion in process
 	set_process(true)

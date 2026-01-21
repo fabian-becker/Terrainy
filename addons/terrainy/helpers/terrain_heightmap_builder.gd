@@ -49,6 +49,7 @@ func compose(
 	base_height: float,
 	use_gpu_composition: bool
 ) -> Image:
+	var total_start = Time.get_ticks_msec()
 	# Check if resolution or bounds changed (invalidate influence cache)
 	if _cached_resolution != resolution or _cached_bounds != terrain_bounds:
 		_influence_cache.clear()
@@ -56,6 +57,9 @@ func compose(
 		_cached_bounds = terrain_bounds
 	
 	# Step 1: Generate/update heightmaps for dirty features
+	var feature_gen_start = Time.get_ticks_msec()
+	var generated_count := 0
+	var reused_count := 0
 	for feature in features:
 		if not is_instance_valid(feature) or not feature.is_inside_tree() or not feature.visible:
 			if _heightmap_cache.has(feature):
@@ -65,16 +69,26 @@ func compose(
 		# Check if we need to regenerate this feature's heightmap
 		if not _heightmap_cache.has(feature) or feature.is_dirty():
 			_heightmap_cache[feature] = feature.generate_heightmap(resolution, terrain_bounds)
+			generated_count += 1
+		else:
+			reused_count += 1
+	var feature_gen_elapsed = Time.get_ticks_msec() - feature_gen_start
+	print("[TerrainHeightmapBuilder] Feature heightmaps: %d generated, %d cached in %d ms" % [generated_count, reused_count, feature_gen_elapsed])
 	
 	# Step 2: Compose all heightmaps
 	if _should_use_gpu(use_gpu_composition):
 		var result = _compose_gpu(features, resolution, terrain_bounds, base_height)
 		if result:
+			var total_elapsed = Time.get_ticks_msec() - total_start
+			print("[TerrainHeightmapBuilder] Compose total time: %d ms" % total_elapsed)
 			return result
 		# GPU failed, fall back to CPU
 		push_warning("[TerrainHeightmapBuilder] GPU composition failed, falling back to CPU")
 	
-	return _compose_cpu(features, resolution, terrain_bounds, base_height)
+	var cpu_result = _compose_cpu(features, resolution, terrain_bounds, base_height)
+	var total_elapsed = Time.get_ticks_msec() - total_start
+	print("[TerrainHeightmapBuilder] Compose total time: %d ms" % total_elapsed)
+	return cpu_result
 
 ## Check if GPU composition should be used
 func _should_use_gpu(user_wants_gpu: bool) -> bool:

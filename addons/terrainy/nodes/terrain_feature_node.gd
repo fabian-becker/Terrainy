@@ -164,24 +164,31 @@ func get_height_at(world_pos: Vector3) -> float:
 func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:
 	var start_time = Time.get_ticks_msec()
 	
-	# Create heightmap image (RF = single channel float)
-	var heightmap = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
-	
 	# Calculate step size
-	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
+	var step_x := terrain_bounds.size.x / float(resolution.x - 1)
+	var step_y := terrain_bounds.size.y / float(resolution.y - 1)
+	var origin_x := terrain_bounds.position.x
+	var origin_z := terrain_bounds.position.y
 	
-	# Generate RAW heightmap (no modifiers)
-	for y in range(resolution.y):
-		for x in range(resolution.x):
-			var world_x = terrain_bounds.position.x + (x * step.x)
-			var world_z = terrain_bounds.position.y + (y * step.y)
-			var world_pos = Vector3(world_x, 0, world_z)
+	# Pre-allocate height data array
+	var total_pixels := resolution.x * resolution.y
+	var height_data := PackedFloat32Array()
+	height_data.resize(total_pixels)
+	
+	# Generate RAW heightmap (no modifiers) - direct array access
+	var idx := 0
+	for y in resolution.y:
+		var world_z := origin_z + (y * step_y)
+		for x in resolution.x:
+			var world_x := origin_x + (x * step_x)
+			var world_pos := Vector3(world_x, 0, world_z)
 			
 			# Get raw height (no modifiers yet)
-			var height = get_height_at(world_pos)
-			
-			# Store in heightmap
-			heightmap.set_pixel(x, y, Color(height, 0, 0, 1))
+			height_data[idx] = get_height_at(world_pos)
+			idx += 1
+	
+	# Create heightmap image from packed array
+	var heightmap := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, height_data.to_byte_array())
 	
 	# Apply modifiers (GPU if available, CPU fallback)
 	if _has_any_modifiers():
@@ -226,18 +233,28 @@ func _has_any_modifiers() -> bool:
 
 ## Apply modifiers on CPU (fallback)
 func _apply_modifiers_cpu(heightmap: Image, terrain_bounds: Rect2) -> void:
-	var resolution = Vector2i(heightmap.get_width(), heightmap.get_height())
-	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
+	var resolution := Vector2i(heightmap.get_width(), heightmap.get_height())
+	var step_x := terrain_bounds.size.x / float(resolution.x - 1)
+	var step_y := terrain_bounds.size.y / float(resolution.y - 1)
+	var origin_x := terrain_bounds.position.x
+	var origin_z := terrain_bounds.position.y
 	
-	for y in range(resolution.y):
-		for x in range(resolution.x):
-			var world_x = terrain_bounds.position.x + (x * step.x)
-			var world_z = terrain_bounds.position.y + (y * step.y)
-			var world_pos = Vector3(world_x, 0, world_z)
+	# Read all heights at once
+	var height_data := heightmap.get_data().to_float32_array()
+	
+	var idx := 0
+	for y in resolution.y:
+		var world_z := origin_z + (y * step_y)
+		for x in resolution.x:
+			var world_x := origin_x + (x * step_x)
+			var world_pos := Vector3(world_x, 0, world_z)
 			
-			var height = heightmap.get_pixel(x, y).r
-			height = _apply_modifiers(world_pos, height)
-			heightmap.set_pixel(x, y, Color(height, 0, 0, 1))
+			height_data[idx] = _apply_modifiers(world_pos, height_data[idx])
+			idx += 1
+	
+	# Create new image from modified data
+	var modified := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, height_data.to_byte_array())
+	heightmap.copy_from(modified)
 
 ## Mark heightmap as dirty (needs regeneration)
 func mark_dirty() -> void:
