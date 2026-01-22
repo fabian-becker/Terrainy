@@ -132,10 +132,12 @@ var _terrain_bounds: Rect2
 var _rebuild_start_msec: int = 0
 var _rebuild_id: int = 0
 var _coordinator_rebuild_pending: bool = false
+var _heightmap_dirty_pending: bool = false
 
 # Rebuild debouncing
 var _rebuild_timer: Timer = null
 var _pending_rebuild: bool = false
+var _rebuild_after_current: bool = false
 
 func _ready() -> void:
 	set_process(false)  # Only enable when mesh generation is running
@@ -179,10 +181,14 @@ func _process(_delta: float) -> void:
 			_coordinator_rebuild_pending = false
 		terrain_updated.emit()
 
+		if _rebuild_after_current:
+			_rebuild_after_current = false
+			call_deferred("rebuild_terrain")
+
 	# Update LODs if enabled
 	if enable_lod and _chunks.size() > 0:
 		_update_chunk_lod()
-		if _has_dirty_chunks() and not _is_generating:
+		if not _heightmap_dirty_pending and _has_dirty_chunks() and not _is_generating:
 			_rebuild_chunks(false)
 
 	if not _chunk_thread and not enable_lod:
@@ -262,6 +268,10 @@ func _setup_rebuild_debounce_timer() -> void:
 		add_child(_rebuild_timer)
 
 func _request_rebuild() -> void:
+	if _is_generating:
+		_rebuild_after_current = true
+		return
+	
 	_pending_rebuild = true
 	if _rebuild_timer:
 		_rebuild_timer.start()
@@ -271,6 +281,10 @@ func _request_rebuild() -> void:
 
 func _on_rebuild_timer_timeout() -> void:
 	if _pending_rebuild:
+		if _is_generating:
+			_rebuild_after_current = true
+			_pending_rebuild = false
+			return
 		_pending_rebuild = false
 		rebuild_terrain()
 
@@ -289,6 +303,7 @@ func _on_feature_changed(feature: TerrainFeatureNode) -> void:
 		_mark_chunks_dirty_for_bounds(previous_bounds)
 	_mark_chunks_dirty_for_bounds(current_bounds)
 	_feature_bounds_cache[feature] = current_bounds
+	_heightmap_dirty_pending = true
 	
 	if auto_update:
 		_request_rebuild()
@@ -314,6 +329,7 @@ func force_rebuild() -> void:
 ## Regenerate the entire terrain mesh
 func rebuild_terrain() -> void:
 	if _is_generating:
+		_rebuild_after_current = true
 		return
 	
 	# Check with rebuild coordinator if we can start
@@ -365,6 +381,7 @@ func rebuild_terrain() -> void:
 	var grid_changed = _calculate_chunk_grid()
 	if grid_changed:
 		_mark_all_chunks_dirty()
+	_heightmap_dirty_pending = false
 	
 	_rebuild_chunks(grid_changed)
 	
