@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-01-22
+
+### Added
+- Chunked terrain rendering with per-chunk mesh instances
+- LOD controls for chunked terrains (distance thresholds and scale factors)
+- Terrain rebuild coordinator autoload for queued rebuilds
+- Evaluation context helpers for primitives, gradients, landscapes, noise, and shapes
+- GPU influence map generation shader and GPU heightmap blender helper
+- Terrain heightmap/material builder helpers
+- Slow mesh generation logging to surface performance hotspots
+- Compatibility check to disable GPU composition on non-GPU renderers
+
+### Changed
+- Refactored terrain mesh generation for improved performance and memory usage
+- Reworked terrain collision handling for chunked meshes
+- Improved terrain material updates and caching
+- Terrain feature nodes now evaluate via thread-safe contexts
+- GPU heightmap blending now uses influence map generation and updated shader management
+- Demo scene updated and renamed to terrainy_demo.tscn
+- Version bumped to 0.3.0
+
+### Fixed
+- Rebuild scheduling to handle pending changes safely during chunk generation
+
+### Performance
+- Multithreaded CPU heightmap composition with precomputed influence maps
+- Optimized GPU heightmap blending pipeline
+- Chunked mesh generation and LOD for large terrain scalability
+
+### Removed
+- Constant terrain node
+
 ## [0.2.0] - 2026-01-18
 
 ### Added
@@ -93,5 +125,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom terrain shader with multi-layer support
 - PBR material workflow compatibility
 
+[0.3.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.3.0
 [0.2.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.2.0
 [0.1.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.1.0

@@ -2,14 +2,14 @@
 class_name TerrainFeatureNode
 extends Node3D
 
-const HeightmapModifierProcessor = preload("res://addons/terrainy/nodes/heightmap_modifier_processor.gd")
+const GpuHeightmapModifier = preload("res://addons/terrainy/helpers/gpu_heightmap_modifier.gd")
+const EvaluationContext = preload("res://addons/terrainy/helpers/evaluation_context.gd")
 
 ## Base class for all terrain feature nodes that can be positioned and blended
 
 signal parameters_changed
 
 # Constants
-const INFLUENCE_WEIGHT_THRESHOLD = 0.001
 const GIZMO_MANIPULATION_TIMEOUT_SEC = 5.0
 const MIN_INFLUENCE_SIZE = 0.01
 
@@ -126,9 +126,12 @@ var _smoothing_cache: Dictionary = {}
 
 # Internal cache for heightmap generation
 var _heightmap_dirty: bool = true
+var _cached_heightmap: Image = null
+var _cached_resolution: Vector2i = Vector2i.ZERO
+var _cached_bounds: Rect2 = Rect2()
 
 # GPU modifier processor (shared across all features)
-static var _gpu_modifier_processor: HeightmapModifierProcessor = null
+static var _gpu_modifier_processor: GpuHeightmapModifier = null
 static var _feature_reference_count: int = 0
 
 func _notification(what: int) -> void:
@@ -140,45 +143,80 @@ func _notification(what: int) -> void:
 				_gpu_modifier_processor.cleanup()
 			_gpu_modifier_processor = null
 			_feature_reference_count = 0
+	elif what == NOTIFICATION_TRANSFORM_CHANGED:
+		# Notify parent TerrainComposer when position/rotation/scale changes
+		_commit_parameter_change()
 
 func _ready() -> void:
 	_feature_reference_count += 1
+	set_notify_transform(true)
 
-static func _get_gpu_modifier_processor() -> HeightmapModifierProcessor:
+static func _get_gpu_modifier_processor() -> GpuHeightmapModifier:
+	if not RenderingServer.get_rendering_device():
+		return null
 	if not _gpu_modifier_processor:
-		_gpu_modifier_processor = HeightmapModifierProcessor.new()
+		_gpu_modifier_processor = GpuHeightmapModifier.new()
 		if not _gpu_modifier_processor.is_available():
 			push_warning("[TerrainFeatureNode] GPU modifiers unavailable, will use CPU fallback")
 	return _gpu_modifier_processor
 
-## Generate height value at a given world position
-## Override this in derived classes
-func get_height_at(world_pos: Vector3) -> float:
+## Prepare an immutable evaluation context for thread-safe evaluation.
+## Override this in derived classes to capture additional parameters.
+func prepare_evaluation_context() -> EvaluationContext:
+	return EvaluationContext.from_feature(self)
+
+## Generate height value at a given world position using pre-computed context.
+## This avoids calling to_local() or accessing scene tree in worker threads.
+## Override this in derived classes - REQUIRED for all terrain features.
+func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
+	push_error("[%s] get_height_at_safe() must be overridden by derived classes" % get_class())
 	return 0.0
+
+## Get influence weight using pre-computed context.
+## This avoids calling to_local() or accessing scene tree in worker threads.
+func get_influence_weight_safe(world_pos: Vector3, context: EvaluationContext) -> float:
+	return context.get_influence_weight(world_pos)
 
 ## Generate a heightmap for this feature
 ## This is the new primary method for terrain generation
 func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:
+	# Check cache validity
+	if not _heightmap_dirty and \
+	   _cached_heightmap != null and \
+	   _cached_resolution == resolution and \
+	   _cached_bounds == terrain_bounds:
+		return _cached_heightmap
+	
 	var start_time = Time.get_ticks_msec()
 	
-	# Create heightmap image (RF = single channel float)
-	var heightmap = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
-	
 	# Calculate step size
-	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
+	var step_x := terrain_bounds.size.x / float(resolution.x - 1)
+	var step_y := terrain_bounds.size.y / float(resolution.y - 1)
+	var origin_x := terrain_bounds.position.x
+	var origin_z := terrain_bounds.position.y
 	
-	# Generate RAW heightmap (no modifiers)
-	for y in range(resolution.y):
-		for x in range(resolution.x):
-			var world_x = terrain_bounds.position.x + (x * step.x)
-			var world_z = terrain_bounds.position.y + (y * step.y)
-			var world_pos = Vector3(world_x, 0, world_z)
+	# Pre-allocate height data array
+	var total_pixels := resolution.x * resolution.y
+	var height_data := PackedFloat32Array()
+	height_data.resize(total_pixels)
+	
+	# Prepare context for this feature
+	var context = prepare_evaluation_context()
+	
+	# Generate RAW heightmap using context (thread-safe)
+	var idx := 0
+	for y in resolution.y:
+		var world_z := origin_z + (y * step_y)
+		for x in resolution.x:
+			var world_x := origin_x + (x * step_x)
+			var world_pos := Vector3(world_x, 0, world_z)
 			
-			# Get raw height (no modifiers yet)
-			var height = get_height_at(world_pos)
-			
-			# Store in heightmap
-			heightmap.set_pixel(x, y, Color(height, 0, 0, 1))
+			# Get raw height using context (no modifiers yet)
+			height_data[idx] = get_height_at_safe(world_pos, context)
+			idx += 1
+	
+	# Create heightmap image from packed array
+	var heightmap := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, height_data.to_byte_array())
 	
 	# Apply modifiers (GPU if available, CPU fallback)
 	if _has_any_modifiers():
@@ -206,11 +244,56 @@ func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:
 			# No GPU, use CPU
 			_apply_modifiers_cpu(heightmap, terrain_bounds)
 	
+	# Update cache
+	_cached_heightmap = heightmap
+	_cached_resolution = resolution
+	_cached_bounds = terrain_bounds
 	_heightmap_dirty = false
 	
 	var elapsed = Time.get_ticks_msec() - start_time
 	if Engine.is_editor_hint():
 		print("[%s] Generated %dx%d heightmap in %d ms" % [name, resolution.x, resolution.y, elapsed])
+	
+	return heightmap
+
+## Generate a heightmap using a pre-computed context (thread-safe).
+## This version can be called from worker threads without scene tree access.
+func generate_heightmap_with_context(resolution: Vector2i, terrain_bounds: Rect2, context: EvaluationContext) -> Image:
+	# Cache is only valid on main thread, so skip caching for context-based generation
+	var start_time = Time.get_ticks_msec()
+	
+	# Calculate step size
+	var step_x := terrain_bounds.size.x / float(resolution.x - 1)
+	var step_y := terrain_bounds.size.y / float(resolution.y - 1)
+	var origin_x := terrain_bounds.position.x
+	var origin_z := terrain_bounds.position.y
+	
+	# Pre-allocate height data array
+	var total_pixels := resolution.x * resolution.y
+	var height_data := PackedFloat32Array()
+	height_data.resize(total_pixels)
+	
+	# Generate RAW heightmap using thread-safe context
+	var idx := 0
+	for y in resolution.y:
+		var world_z := origin_z + (y * step_y)
+		for x in resolution.x:
+			var world_x := origin_x + (x * step_x)
+			var world_pos := Vector3(world_x, 0, world_z)
+			
+			# Use thread-safe method with context
+			height_data[idx] = get_height_at_safe(world_pos, context)
+			idx += 1
+	
+	# Create heightmap image from packed array
+	var heightmap := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, height_data.to_byte_array())
+	
+	# Note: Modifiers are not applied in context-based generation
+	# They should be applied separately if needed
+	
+	if Engine.is_editor_hint():
+		var elapsed = Time.get_ticks_msec() - start_time
+		print("[%s] Generated %dx%d heightmap (context) in %d ms" % [name, resolution.x, resolution.y, elapsed])
 	
 	return heightmap
 
@@ -223,122 +306,59 @@ func _has_any_modifiers() -> bool:
 
 ## Apply modifiers on CPU (fallback)
 func _apply_modifiers_cpu(heightmap: Image, terrain_bounds: Rect2) -> void:
-	var resolution = Vector2i(heightmap.get_width(), heightmap.get_height())
-	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
+	var resolution := Vector2i(heightmap.get_width(), heightmap.get_height())
+	var step_x := terrain_bounds.size.x / float(resolution.x - 1)
+	var step_y := terrain_bounds.size.y / float(resolution.y - 1)
+	var origin_x := terrain_bounds.position.x
+	var origin_z := terrain_bounds.position.y
 	
-	for y in range(resolution.y):
-		for x in range(resolution.x):
-			var world_x = terrain_bounds.position.x + (x * step.x)
-			var world_z = terrain_bounds.position.y + (y * step.y)
-			var world_pos = Vector3(world_x, 0, world_z)
+	# Prepare context once for all pixels
+	var context = prepare_evaluation_context()
+	
+	# Read all heights at once
+	var height_data := heightmap.get_data().to_float32_array()
+	
+	var idx := 0
+	for y in resolution.y:
+		var world_z := origin_z + (y * step_y)
+		for x in resolution.x:
+			var world_x := origin_x + (x * step_x)
+			var world_pos := Vector3(world_x, 0, world_z)
 			
-			var height = heightmap.get_pixel(x, y).r
-			height = _apply_modifiers(world_pos, height)
-			heightmap.set_pixel(x, y, Color(height, 0, 0, 1))
+			height_data[idx] = _apply_modifiers(world_pos, height_data[idx], context)
+			idx += 1
+	
+	# Create new image from modified data
+	var modified := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, height_data.to_byte_array())
+	heightmap.copy_from(modified)
 
 ## Mark heightmap as dirty (needs regeneration)
 func mark_dirty() -> void:
 	_heightmap_dirty = true
+	_cached_heightmap = null
 
 ## Check if heightmap needs regeneration
 func is_dirty() -> bool:
 	return _heightmap_dirty
 
-## Thread-safe version: Generate height from pre-computed local AND world position
-## This avoids calling to_local() which requires main thread
-## Override this in derived classes for thread-safe parallel processing
-func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
-	# Default: just call regular version (derived classes should override)
-	return get_height_at(world_pos)
-
-## Get the influence weight at a given world position (0.0 to 1.0)
-## Based on distance from center and falloff settings
-func get_influence_weight(world_pos: Vector3) -> float:
-	if not is_inside_tree():
-		return 0.0
-	
-	var local_pos = to_local(world_pos)
-	var local_pos_2d = Vector2(local_pos.x, local_pos.z)
-	
-	var distance: float
-	var max_distance: float
-	
-	match influence_shape:
-		InfluenceShape.CIRCLE:
-			# Use X component as radius for circular shape
-			distance = local_pos_2d.length()
-			max_distance = max(influence_size.x, MIN_INFLUENCE_SIZE)
-		
-		InfluenceShape.RECTANGLE:
-			# Check if inside rectangle bounds
-			var half_size = influence_size * 0.5
-			# Protect against zero size
-			half_size = half_size.max(Vector2(MIN_INFLUENCE_SIZE, MIN_INFLUENCE_SIZE))
-			if abs(local_pos_2d.x) > half_size.x or abs(local_pos_2d.y) > half_size.y:
-				return 0.0
-			
-			# Distance to nearest edge
-			var dist_x = half_size.x - abs(local_pos_2d.x)
-			var dist_y = half_size.y - abs(local_pos_2d.y)
-			distance = min(dist_x, dist_y)
-			max_distance = min(half_size.x, half_size.y)
-		
-		InfluenceShape.ELLIPSE:
-			# Ellipse distance formula
-			# Protect against division by zero
-			var safe_size_x = max(influence_size.x, MIN_INFLUENCE_SIZE)
-			var safe_size_y = max(influence_size.y, MIN_INFLUENCE_SIZE)
-			var normalized = Vector2(
-				local_pos_2d.x / safe_size_x,
-				local_pos_2d.y / safe_size_y
-			)
-			distance = normalized.length()
-			max_distance = 1.0
-			
-			if distance >= max_distance:
-				return 0.0
-	
-	if influence_shape == InfluenceShape.CIRCLE or influence_shape == InfluenceShape.ELLIPSE:
-		if distance >= max_distance:
-			return 0.0
-	
-	if edge_falloff <= 0.0:
-		return 1.0
-	
-	# Calculate falloff
-	var falloff_distance: float
-	if influence_shape == InfluenceShape.RECTANGLE:
-		# For rectangle, distance is already the distance to edge
-		falloff_distance = max_distance * edge_falloff
-		if distance > falloff_distance:
-			return 1.0
-		var t = distance / falloff_distance
-		return smoothstep(0.0, 1.0, t)
-	else:
-		# For circle and ellipse
-		var falloff_start = max_distance * (1.0 - edge_falloff)
-		if distance < falloff_start:
-			return 1.0
-		var t = (distance - falloff_start) / (max_distance - falloff_start)
-		return 1.0 - smoothstep(0.0, 1.0, t)
-
-## Get the final blended height contribution at a position
+## Get the final blended height contribution at a position (for editor/gizmos)
 func get_blended_height_at(world_pos: Vector3) -> float:
-	var height = get_height_at(world_pos)
+	var context = prepare_evaluation_context()
+	var height = get_height_at_safe(world_pos, context)
 	
 	# Apply modifiers
-	height = _apply_modifiers(world_pos, height)
+	height = _apply_modifiers(world_pos, height, context)
 	
-	var weight = get_influence_weight(world_pos)
+	var weight = get_influence_weight_safe(world_pos, context)
 	return height * weight * strength
 
 ## Apply all enabled modifiers to the height value
-func _apply_modifiers(world_pos: Vector3, base_height: float) -> float:
+func _apply_modifiers(world_pos: Vector3, base_height: float, context: EvaluationContext) -> float:
 	var height = base_height
 	
 	# Apply smoothing
 	if smoothing != SmoothingMode.NONE:
-		height = _apply_smoothing(world_pos, height)
+		height = _apply_smoothing(world_pos, height, context)
 	
 	# Apply terracing
 	if enable_terracing:
@@ -353,7 +373,7 @@ func _apply_modifiers(world_pos: Vector3, base_height: float) -> float:
 	return height
 
 ## Apply smoothing to the height value
-func _apply_smoothing(world_pos: Vector3, center_height: float) -> float:
+func _apply_smoothing(world_pos: Vector3, center_height: float, context: EvaluationContext) -> float:
 	# Cache key based on position (rounded to improve cache hits)
 	var grid_size = smoothing_radius * 0.5
 	var cache_key = Vector3i(
@@ -395,7 +415,7 @@ func _apply_smoothing(world_pos: Vector3, center_height: float) -> float:
 		var sample_pos = world_pos + offset
 		
 		# Get raw height without smoothing to avoid infinite recursion
-		var sample_height = get_height_at(sample_pos)
+		var sample_height = get_height_at_safe(sample_pos, context)
 		
 		# Weight samples by distance (closer = more weight)
 		var weight = 1.0 - (offset.length() / (sample_radius * 1.5))
@@ -462,10 +482,9 @@ func _is_gizmo_manipulating() -> bool:
 ## Helper to emit parameters_changed signal only when not manipulating via gizmo
 func _commit_parameter_change() -> void:
 	_heightmap_dirty = true
+	_cached_heightmap = null
 	if not _is_gizmo_manipulating():
 		parameters_changed.emit()
-		if Engine.is_editor_hint():
-			print("[%s] parameters_changed emitted" % name)
 
 ## Validate node configuration
 func validate_configuration() -> bool:

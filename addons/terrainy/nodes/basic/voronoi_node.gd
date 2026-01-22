@@ -9,6 +9,7 @@ const NoiseNode = preload("res://addons/terrainy/nodes/basic/noise_node.gd")
 @export_enum("F1", "F2", "F2 - F1", "Cells") var distance_mode: int = 0:
 	set(value):
 		distance_mode = value
+		_update_cellular_return_type()
 		parameters_changed.emit()
 
 func _ready() -> void:
@@ -17,7 +18,21 @@ func _ready() -> void:
 		noise.seed = randi()
 		noise.noise_type = FastNoiseLite.TYPE_CELLULAR
 		noise.cellular_distance_function = FastNoiseLite.DISTANCE_EUCLIDEAN
-		noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
+	_update_cellular_return_type()
+
+func _update_cellular_return_type() -> void:
+	if not noise:
+		return
+	
+	match distance_mode:
+		0: # F1 - closest cell
+			noise.cellular_return_type = FastNoiseLite.RETURN_DISTANCE
+		1: # F2 - second closest
+			noise.cellular_return_type = FastNoiseLite.RETURN_DISTANCE2
+		2: # F2 - F1 - cell borders
+			noise.cellular_return_type = FastNoiseLite.RETURN_DISTANCE2_ADD
+		3: # Cells - cell values
+			noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
 
 func get_height_at(world_pos: Vector3) -> float:
 	var local_pos = to_local(world_pos)
@@ -30,17 +45,6 @@ func get_height_at(world_pos: Vector3) -> float:
 	
 	if not noise:
 		return 0.0
-	
-	# Set cellular return type based on distance mode
-	match distance_mode:
-		0: # F1 - closest cell
-			noise.cellular_return_type = FastNoiseLite.RETURN_DISTANCE
-		1: # F2 - second closest
-			noise.cellular_return_type = FastNoiseLite.RETURN_DISTANCE2
-		2: # F2 - F1 - cell borders
-			noise.cellular_return_type = FastNoiseLite.RETURN_DISTANCE2_ADD
-		3: # Cells - cell values
-			noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
 	
 	var voronoi_value = noise.get_noise_2d(world_pos.x, world_pos.z)
 	

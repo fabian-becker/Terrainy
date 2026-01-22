@@ -3,6 +3,7 @@ class_name MountainRangeNode
 extends LandscapeNode
 
 const LandscapeNode = preload("res://addons/terrainy/nodes/landscapes/landscape_node.gd")
+const LandscapeEvaluationContext = preload("res://addons/terrainy/helpers/landscape_evaluation_context.gd")
 
 ## A mountain range terrain feature
 ##
@@ -43,40 +44,46 @@ func _ready() -> void:
 		detail_noise.frequency = 0.05
 		detail_noise.fractal_octaves = 4
 
-func get_height_at(world_pos: Vector3) -> float:
-	var local_pos = to_local(world_pos)
-	return get_height_at_safe(world_pos, local_pos)
+func prepare_evaluation_context() -> LandscapeEvaluationContext:
+	var ctx = LandscapeEvaluationContext.from_landscape_feature(self, height, direction)
+	ctx.primary_noise = peak_noise
+	ctx.detail_noise = detail_noise
+	return ctx
 
-## Thread-safe version using pre-computed local position
-func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
-	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
+func get_height_at(world_pos: Vector3) -> float:
+	var ctx = prepare_evaluation_context()
+	return get_height_at_safe(world_pos, ctx)
+
+## Thread-safe version using pre-computed context
+func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
+	var ctx = context as LandscapeEvaluationContext
+	var local_pos = ctx.to_local(world_pos)
 	
-	var radius = influence_size.x
+	var radius = ctx.influence_radius
+	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
 	
 	if distance_2d >= radius:
 		return 0.0
 	
 	# Distance perpendicular to ridge
-	var perpendicular = Vector2(-direction.y, direction.x)
-	var lateral_distance = abs(Vector2(local_pos.x, local_pos.z).dot(perpendicular))
+	var lateral_distance = abs(ctx.get_lateral_distance(local_pos))
 	
 	# Along ridge for peak variation
-	var along_ridge = Vector2(local_pos.x, local_pos.z).dot(direction)
+	var along_ridge = ctx.get_distance_along(local_pos)
 	
 	# Base ridge height profile
-	var ridge_falloff = 1.0 - pow(lateral_distance / radius, ridge_sharpness)
+	var ridge_falloff = 1.0 - pow(lateral_distance / radius, ctx.ridge_sharpness)
 	ridge_falloff = max(0.0, ridge_falloff)
 	
-	var result_height = height * ridge_falloff
+	var result_height = ctx.height * ridge_falloff
 	
 	# Vary height along ridge
-	if peak_noise:
-		var peak_variation = peak_noise.get_noise_1d(along_ridge)
-		result_height *= 0.7 + peak_variation * 0.3
+	var peak_variation = ctx.get_primary_noise(Vector3(along_ridge, 0, 0))
+	result_height *= 0.7 + peak_variation * 0.3
 	
-	# Add detail using world coordinates (FastNoiseLite is thread-safe)
-	if detail_noise:
-		var detail = detail_noise.get_noise_2d(world_pos.x, world_pos.z)
+	# Add detail using world coordinates
+	var detail = ctx.get_detail_noise(world_pos)
+	if detail != 0.0:
 		result_height += result_height * detail * 0.2
 	
 	return result_height

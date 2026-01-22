@@ -1,19 +1,19 @@
 #[compute]
 #version 450
 
-// Simplified heightmap compositor - avoids texture arrays for stability
+// Simplified heightmap compositor
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 // Output heightmap (r32f for 4x bandwidth reduction)
-layout(r32f, set = 0, binding = 0) uniform writeonly image2D output_heightmap;
+layout(r32f, set = 0, binding = 0) uniform restrict writeonly image2D output_heightmap;
 
 // Input data as storage buffers (simpler and more compatible)
-layout(std430, set = 0, binding = 1) readonly buffer HeightmapData {
+layout(std430, set = 0, binding = 1) restrict readonly buffer HeightmapData {
     float heightmap_data[];  // Flattened heightmap data
 };
 
-layout(std430, set = 0, binding = 2) readonly buffer InfluenceData {
+layout(std430, set = 0, binding = 2) restrict readonly buffer InfluenceData {
     float influence_data[];  // Flattened influence weight data
 };
 
@@ -52,7 +52,7 @@ float apply_blend_mode(float current_height, float feature_height, float weight,
     } else if (blend_mode == BLEND_MIN) {
         return min(current_height, feature_height * weight);
     } else if (blend_mode == BLEND_AVERAGE) {
-        return (current_height + weighted_height) * 0.5;
+        return mix(current_height, feature_height * weight, strength * 0.5);
     }
     return current_height + weighted_height;
 }

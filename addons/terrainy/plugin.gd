@@ -2,11 +2,15 @@
 extends EditorPlugin
 
 var rebuild_button: Button
-var gizmo_toggle_button: CheckButton
+# var gizmo_toggle_button: CheckButton
 var current_terrain_composer: Node3D
 var terrain_gizmo_plugin: EditorNode3DGizmoPlugin
+var _editor_selection: EditorSelection
 
 func _enter_tree() -> void:
+	# Add rebuild coordinator autoload
+	add_autoload_singleton("TerrainRebuildCoordinator", "res://addons/terrainy/helpers/terrain_rebuild_coordinator.gd")
+	
 	# Add custom node types
 	add_custom_type(
 		"TerrainComposer",
@@ -50,7 +54,6 @@ func _enter_tree() -> void:
 	add_custom_type("VoronoiNode", "Node3D", preload("res://addons/terrainy/nodes/basic/voronoi_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	
 	# Utility nodes
-	add_custom_type("ConstantNode", "Node3D", preload("res://addons/terrainy/nodes/constant_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	add_custom_type("ShapeNode", "Node3D", preload("res://addons/terrainy/nodes/basic/shape_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	
 	# Add gizmo plugin
@@ -60,6 +63,11 @@ func _enter_tree() -> void:
 	
 	# Refresh gizmos for existing nodes after a short delay
 	call_deferred("_refresh_existing_gizmos")
+
+	# Track editor selection changes to prevent stuck gizmo states
+	_editor_selection = get_editor_interface().get_selection()
+	if _editor_selection and not _editor_selection.selection_changed.is_connected(_on_selection_changed):
+		_editor_selection.selection_changed.connect(_on_selection_changed)
 	
 	# Create toolbar buttons
 	rebuild_button = Button.new()
@@ -67,17 +75,17 @@ func _enter_tree() -> void:
 	rebuild_button.pressed.connect(_on_rebuild_pressed)
 	add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, rebuild_button)
 	
-	gizmo_toggle_button = CheckButton.new()
-	gizmo_toggle_button.text = "Show Gizmos"
-	# Restore previous state from plugin settings
-	var saved_state = get_editor_interface().get_editor_settings().get_setting("terrainy/show_gizmos")
-	if saved_state != null:
-		gizmo_toggle_button.button_pressed = saved_state
-		terrain_gizmo_plugin.show_gizmos = saved_state
-	else:
-		gizmo_toggle_button.button_pressed = true
-	gizmo_toggle_button.toggled.connect(_on_gizmo_toggle)
-	add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, gizmo_toggle_button)
+	# gizmo_toggle_button = CheckButton.new()
+	# gizmo_toggle_button.text = "Show Gizmos"
+	# # Restore previous state from plugin settings
+	# var saved_state = get_editor_interface().get_editor_settings().get_setting("terrainy/show_gizmos")
+	# if saved_state != null:
+	# 	gizmo_toggle_button.button_pressed = saved_state
+	# 	terrain_gizmo_plugin.show_gizmos = saved_state
+	# else:
+	# 	gizmo_toggle_button.button_pressed = true
+	# gizmo_toggle_button.toggled.connect(_on_gizmo_toggle)
+	# add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, gizmo_toggle_button)
 	
 	# Check for terrain composers periodically
 	get_tree().node_added.connect(_on_node_changed)
@@ -85,6 +93,9 @@ func _enter_tree() -> void:
 	_update_button_visibility()
 
 func _exit_tree() -> void:
+	# Remove autoload singleton
+	remove_autoload_singleton("TerrainRebuildCoordinator")
+	
 	# Clear gizmos from all nodes before removing the plugin
 	var edited_scene_root = get_tree().edited_scene_root
 	if edited_scene_root:
@@ -95,12 +106,15 @@ func _exit_tree() -> void:
 		remove_control_from_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, rebuild_button)
 		rebuild_button.queue_free()
 	
-	if gizmo_toggle_button:
-		remove_control_from_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, gizmo_toggle_button)
-		gizmo_toggle_button.queue_free()
+	# if gizmo_toggle_button:
+	# 	remove_control_from_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, gizmo_toggle_button)
+	# 	gizmo_toggle_button.queue_free()
 	
 	if terrain_gizmo_plugin:
 		remove_node_3d_gizmo_plugin(terrain_gizmo_plugin)
+
+	if _editor_selection and _editor_selection.selection_changed.is_connected(_on_selection_changed):
+		_editor_selection.selection_changed.disconnect(_on_selection_changed)
 	
 	if get_tree().node_added.is_connected(_on_node_changed):
 		get_tree().node_added.disconnect(_on_node_changed)
@@ -140,7 +154,6 @@ func _exit_tree() -> void:
 	remove_custom_type("VoronoiNode")
 	
 	# Utility
-	remove_custom_type("ConstantNode")
 	remove_custom_type("ShapeNode")
 
 func _handles(object: Object) -> bool:
@@ -182,7 +195,14 @@ func _find_terrain_composer_recursive(node: Node) -> Node3D:
 
 func _on_rebuild_pressed() -> void:
 	print("[Terrainy] Rebuild Terrain button pressed")
-	# Rebuild the selected terrain composer, or find one in the tree
+	
+	# Check if Shift is held - if so, rebuild ALL terrain composers
+	var input = Input
+	if input.is_key_pressed(KEY_SHIFT):
+		_rebuild_all_terrain_composers()
+		return
+	
+	# Otherwise, rebuild the selected terrain composer, or find one in the tree
 	var target = current_terrain_composer
 	if not target or not is_instance_valid(target):
 		target = _find_terrain_composer_in_tree()
@@ -191,12 +211,44 @@ func _on_rebuild_pressed() -> void:
 		# Force a complete rebuild with all caches cleared
 		target.force_rebuild()
 
+func _rebuild_all_terrain_composers() -> void:
+	var edited_scene_root = get_tree().edited_scene_root
+	if not edited_scene_root:
+		return
+	
+	var composers: Array[Node] = []
+	_find_all_terrain_composers(edited_scene_root, composers)
+	
+	if composers.is_empty():
+		print("[Terrainy] No TerrainComposers found in scene")
+		return
+	
+	print("[Terrainy] Rebuilding %d TerrainComposer(s)..." % composers.size())
+	for composer in composers:
+		if is_instance_valid(composer):
+			composer.force_rebuild()
+
+func _find_all_terrain_composers(node: Node, result: Array[Node]) -> void:
+	if _handles(node):
+		result.append(node)
+	
+	for child in node.get_children():
+		_find_all_terrain_composers(child, result)
+
 func _on_gizmo_toggle(enabled: bool) -> void:
 	if terrain_gizmo_plugin:
 		terrain_gizmo_plugin.show_gizmos = enabled
 		# Save state to editor settings
 		get_editor_interface().get_editor_settings().set_setting("terrainy/show_gizmos", enabled)
 		# Force redraw of all gizmos
+		update_overlays()
+
+func _on_selection_changed() -> void:
+	var edited_scene_root = get_tree().edited_scene_root
+	if not edited_scene_root:
+		return
+	var changed = _clear_stuck_gizmo_flags(edited_scene_root)
+	if changed:
 		update_overlays()
 
 func _refresh_existing_gizmos() -> void:
@@ -209,19 +261,43 @@ func _refresh_existing_gizmos() -> void:
 	update_overlays()
 
 func _update_gizmos_recursive(node: Node) -> void:
-	if node is Node3D:
-		var script = node.get_script()
-		if script:
-			var base_script = script.get_base_script()
-			while base_script:
-				if base_script.resource_path == "res://addons/terrainy/nodes/terrain_feature_node.gd":
-					# Force gizmo update
-					node.update_gizmos()
-					break
-				base_script = base_script.get_base_script()
+	if _is_terrain_feature_node(node):
+		# Force gizmo update
+		node.update_gizmos()
 	
 	for child in node.get_children():
 		_update_gizmos_recursive(child)
+
+func _clear_stuck_gizmo_flags(node: Node) -> bool:
+	var changed = false
+	if _is_terrain_feature_node(node):
+		if node.get_meta("_gizmo_manipulating", false):
+			node.set_meta("_gizmo_manipulating", false)
+			node.remove_meta("_gizmo_manipulation_time")
+			if node.has_signal("parameters_changed"):
+				node.parameters_changed.emit()
+			node.update_gizmos()
+			changed = true
+
+	for child in node.get_children():
+		if _clear_stuck_gizmo_flags(child):
+			changed = true
+
+	return changed
+
+func _is_terrain_feature_node(node: Node) -> bool:
+	if not (node is Node3D):
+		return false
+	var script = node.get_script()
+	if not script:
+		return false
+	var base_script = script.get_base_script()
+	while base_script:
+		if base_script.resource_path == "res://addons/terrainy/nodes/terrain_feature_node.gd":
+			return true
+		base_script = base_script.get_base_script()
+	# Also check if the script itself is TerrainFeatureNode
+	return script.resource_path == "res://addons/terrainy/nodes/terrain_feature_node.gd"
 
 func _clear_all_gizmos(node: Node) -> void:
 	# Recursively clear gizmos from terrain feature nodes
