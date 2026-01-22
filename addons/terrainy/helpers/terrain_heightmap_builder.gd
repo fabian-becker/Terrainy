@@ -44,6 +44,7 @@ func _initialize_gpu_compositor() -> void:
 ## Compose heightmaps from features
 func compose(
 	features: Array[TerrainFeatureNode],
+	contexts: Dictionary,
 	resolution: Vector2i,
 	terrain_bounds: Rect2,
 	base_height: float,
@@ -56,10 +57,14 @@ func compose(
 		_cached_resolution = resolution
 		_cached_bounds = terrain_bounds
 	
-	# Step 1: Generate/update heightmaps for dirty features
+	# Step 1: Generate/update heightmaps for dirty features using contexts (PARALLEL)
 	var feature_gen_start = Time.get_ticks_msec()
 	var generated_count := 0
 	var reused_count := 0
+	var parallel_tasks := []
+	var task_results := {}  # Shared dictionary for worker results
+	
+	# Separate features into: need generation vs cached
 	for feature in features:
 		if not is_instance_valid(feature) or not feature.is_inside_tree() or not feature.visible:
 			if _heightmap_cache.has(feature):
@@ -68,16 +73,42 @@ func compose(
 		
 		# Check if we need to regenerate this feature's heightmap
 		if not _heightmap_cache.has(feature) or feature.is_dirty():
-			_heightmap_cache[feature] = feature.generate_heightmap(resolution, terrain_bounds)
+			# Launch parallel generation task
+			var ctx = contexts.get(feature)
+			if ctx:
+				var task_id = WorkerThreadPool.add_task(
+					_generate_heightmap_worker.bind(feature, resolution, terrain_bounds, ctx, task_results)
+				)
+				parallel_tasks.append({"feature": feature, "task_id": task_id})
+			else:
+				# Fallback: generate on main thread (shouldn't happen in Phase 4+)
+				push_warning("[TerrainHeightmapBuilder] No context for feature '%s', generating on main thread" % feature.name)
+				_heightmap_cache[feature] = feature.generate_heightmap(resolution, terrain_bounds)
 			generated_count += 1
 		else:
 			reused_count += 1
+	
+	# Wait for all parallel tasks to complete
+	for task in parallel_tasks:
+		WorkerThreadPool.wait_for_task_completion(task.task_id)
+	
+	# Retrieve results from shared dictionary and cache them
+	for task in parallel_tasks:
+		var feature = task.feature
+		if task_results.has(feature):
+			_heightmap_cache[feature] = task_results[feature]
+		else:
+			push_error("[TerrainHeightmapBuilder] Failed to generate heightmap for feature '%s'" % feature.name)
+	
 	var feature_gen_elapsed = Time.get_ticks_msec() - feature_gen_start
-	print("[TerrainHeightmapBuilder] Feature heightmaps: %d generated, %d cached in %d ms" % [generated_count, reused_count, feature_gen_elapsed])
+	if generated_count > 0:
+		print("[TerrainHeightmapBuilder] Feature heightmaps: %d generated in parallel, %d cached in %d ms" % [generated_count, reused_count, feature_gen_elapsed])
+	else:
+		print("[TerrainHeightmapBuilder] Feature heightmaps: all %d cached (0 generated)" % reused_count)
 	
 	# Step 2: Compose all heightmaps
 	if _should_use_gpu(use_gpu_composition):
-		var result = _compose_gpu(features, resolution, terrain_bounds, base_height)
+		var result = _compose_gpu(features, contexts, resolution, terrain_bounds, base_height)
 		if result:
 			var total_elapsed = Time.get_ticks_msec() - total_start
 			print("[TerrainHeightmapBuilder] Compose total time: %d ms" % total_elapsed)
@@ -85,7 +116,7 @@ func compose(
 		# GPU failed, fall back to CPU
 		push_warning("[TerrainHeightmapBuilder] GPU composition failed, falling back to CPU")
 	
-	var cpu_result = _compose_cpu(features, resolution, terrain_bounds, base_height)
+	var cpu_result = _compose_cpu(features, contexts, resolution, terrain_bounds, base_height)
 	var total_elapsed = Time.get_ticks_msec() - total_start
 	print("[TerrainHeightmapBuilder] Compose total time: %d ms" % total_elapsed)
 	return cpu_result
@@ -103,6 +134,7 @@ func _should_use_gpu(user_wants_gpu: bool) -> bool:
 ## Compose final heightmap using GPU
 func _compose_gpu(
 	features: Array[TerrainFeatureNode],
+	contexts: Dictionary,
 	resolution: Vector2i,
 	terrain_bounds: Rect2,
 	base_height: float
@@ -144,7 +176,13 @@ func _compose_gpu(
 				influence_map = _gpu_compositor.generate_influence_map_gpu(feature, resolution, terrain_bounds)
 				print("[TerrainHeightmapBuilder] Generated influence map for '%s' on GPU in %d ms" % [feature.name, Time.get_ticks_msec() - inf_start])
 			else:
-				influence_map = _generate_influence_map(feature, resolution, terrain_bounds)
+				# Get context for thread-safe influence calculation
+				var ctx = contexts.get(feature)
+				if ctx:
+					influence_map = _generate_influence_map(feature, ctx, resolution, terrain_bounds)
+				else:
+					push_warning("[TerrainHeightmapBuilder] No context for feature '%s', using fallback" % feature.name)
+					influence_map = _generate_influence_map(feature, null, resolution, terrain_bounds)
 				print("[TerrainHeightmapBuilder] Generated influence map for '%s' on CPU in %d ms" % [feature.name, Time.get_ticks_msec() - inf_start])
 			influence_gen_time += Time.get_ticks_msec() - inf_start
 			influence_generated_count += 1
@@ -187,6 +225,7 @@ func _compose_gpu(
 ## Compose final heightmap using CPU
 func _compose_cpu(
 	features: Array[TerrainFeatureNode],
+	contexts: Dictionary,
 	resolution: Vector2i,
 	terrain_bounds: Rect2,
 	base_height: float
@@ -217,7 +256,13 @@ func _compose_cpu(
 		if _influence_cache.has(feature) and _influence_cache_keys.get(feature) == cache_key:
 			influence_map = _influence_cache[feature]
 		else:
-			influence_map = _generate_influence_map(feature, resolution, terrain_bounds)
+			# Get context for thread-safe influence calculation
+			var ctx = contexts.get(feature)
+			if ctx:
+				influence_map = _generate_influence_map(feature, ctx, resolution, terrain_bounds)
+			else:
+				push_warning("[TerrainHeightmapBuilder] No context for feature '%s', using fallback" % feature.name)
+				influence_map = _generate_influence_map(feature, null, resolution, terrain_bounds)
 			_influence_cache[feature] = influence_map
 			_influence_cache_keys[feature] = cache_key
 		
@@ -307,9 +352,10 @@ func _blend_all_features(
 	# Update image with modified data
 	final_map.set_data(width, height, false, Image.FORMAT_RF, final_data)
 
-## Generate influence map for a feature
+## Generate influence map for a feature using context (thread-safe)
 func _generate_influence_map(
 	feature: TerrainFeatureNode,
+	context,
 	resolution: Vector2i,
 	terrain_bounds: Rect2
 ) -> Image:
@@ -325,7 +371,8 @@ func _generate_influence_map(
 			var world_x = terrain_bounds.position.x + (x * step.x)
 			var world_pos = Vector3(world_x, 0, world_z)
 			
-			var weight = feature.get_influence_weight(world_pos)
+			# Use thread-safe context-based influence calculation
+			var weight = feature.get_influence_weight_safe(world_pos, context)
 			var pixel_index = y * resolution.x + x
 			var offset = pixel_index * bytes_per_pixel
 			influence_data.encode_float(offset, weight)
@@ -365,6 +412,18 @@ func clear_all_caches() -> void:
 	_heightmap_cache.clear()
 	_influence_cache.clear()
 	_influence_cache_keys.clear()
+
+## Worker thread function for parallel heightmap generation
+## Writes result to shared dictionary instead of returning (WorkerThreadPool limitation with complex objects)
+func _generate_heightmap_worker(
+	feature: TerrainFeatureNode,
+	resolution: Vector2i,
+	terrain_bounds: Rect2,
+	context,
+	results: Dictionary
+) -> void:
+	var heightmap = feature.generate_heightmap_with_context(resolution, terrain_bounds, context)
+	results[feature] = heightmap
 
 ## Cleanup GPU resources
 func cleanup() -> void:

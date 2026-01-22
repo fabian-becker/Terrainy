@@ -82,6 +82,7 @@ metadata/_custom_type_script = "uid://ck4gtrjpc6yu2"
 metadata/_gizmo_manipulating = false
 
 [node name="MountainNode" type="Node3D" parent="TerrainComposer"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -191.70137, -3.0517578e-05, 62.3049)
 script = ExtResource("6_h176a")
 noise = SubResource("FastNoiseLite_svejp")
 height = 180.0

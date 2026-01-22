@@ -3,6 +3,7 @@ class_name IslandNode
 extends PrimitiveNode
 
 const PrimitiveNode = preload("res://addons/terrainy/nodes/primitives/primitive_node.gd")
+const PrimitiveEvaluationContext = preload("res://addons/terrainy/helpers/primitive_evaluation_context.gd")
 
 ## An island terrain feature with beaches and elevation
 
@@ -38,15 +39,23 @@ func _ready() -> void:
 func _on_noise_changed() -> void:
 	parameters_changed.emit()
 
-func get_height_at(world_pos: Vector3) -> float:
-	var local_pos = to_local(world_pos)
-	return get_height_at_safe(world_pos, local_pos)
+func prepare_evaluation_context() -> PrimitiveEvaluationContext:
+	var ctx = PrimitiveEvaluationContext.from_primitive_feature(self, height, 0)
+	ctx.island_beach_width = beach_width
+	ctx.island_beach_height = beach_height
+	return ctx
 
-## Thread-safe version using pre-computed local position
-func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
+func get_height_at(world_pos: Vector3) -> float:
+	var ctx = prepare_evaluation_context()
+	return get_height_at_safe(world_pos, ctx)
+
+## Thread-safe version using pre-computed context
+func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
+	var ctx = context as PrimitiveEvaluationContext
+	var local_pos = ctx.to_local(world_pos)
 	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
 	
-	var radius = influence_size.x
+	var radius = ctx.influence_radius
 	
 	if distance_2d >= radius:
 		return 0.0
@@ -55,16 +64,16 @@ func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
 	var result_height = 0.0
 	
 	# Beach zone at the outer edge
-	if normalized_distance > (1.0 - beach_width):
-		result_height = beach_height
+	if normalized_distance > (1.0 - ctx.island_beach_width):
+		result_height = ctx.island_beach_height
 	else:
 		# Rising from beach toward center - center is highest
-		var inland_t = normalized_distance / (1.0 - beach_width)
-		result_height = height - (height - beach_height) * inland_t
+		var inland_t = normalized_distance / (1.0 - ctx.island_beach_width)
+		result_height = ctx.height - (ctx.height - ctx.island_beach_height) * inland_t
 	
 	# Add noise variation
-	if noise:
-		var noise_value = noise.get_noise_2d(world_pos.x, world_pos.z)
-		result_height += result_height * noise_value * noise_strength
+	var noise_detail = ctx.get_noise_detail(world_pos)
+	if noise_detail != 0.0:
+		result_height += result_height * noise_detail
 	
 	return max(0.0, result_height)

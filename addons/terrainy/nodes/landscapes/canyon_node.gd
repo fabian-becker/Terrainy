@@ -3,6 +3,7 @@ class_name CanyonNode
 extends LandscapeNode
 
 const LandscapeNode = preload("res://addons/terrainy/nodes/landscapes/landscape_node.gd")
+const LandscapeEvaluationContext = preload("res://addons/terrainy/helpers/landscape_evaluation_context.gd")
 
 ## A canyon/valley terrain feature
 
@@ -27,32 +28,34 @@ func _ready() -> void:
 		noise.seed = randi()
 		noise.frequency = 0.01
 
-func get_height_at(world_pos: Vector3) -> float:
-	var local_pos = to_local(world_pos)
-	return get_height_at_safe(world_pos, local_pos)
+func prepare_evaluation_context() -> LandscapeEvaluationContext:
+	return LandscapeEvaluationContext.from_landscape_feature(self, height, direction)
 
-## Thread-safe version using pre-computed local position
-func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
+func get_height_at(world_pos: Vector3) -> float:
+	var ctx = prepare_evaluation_context()
+	return get_height_at_safe(world_pos, ctx)
+
+## Thread-safe version using pre-computed context
+func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
+	var ctx = context as LandscapeEvaluationContext
+	var local_pos = ctx.to_local(world_pos)
 	# Calculate distance perpendicular to canyon direction
-	var perpendicular = Vector2(-direction.y, direction.x)
-	var lateral_distance = abs(Vector2(local_pos.x, local_pos.z).dot(perpendicular))
+	var lateral_distance = abs(ctx.get_lateral_distance(local_pos))
 	
 	# Add meandering using noise along the canyon
-	if noise:
-		var along_canyon = Vector2(local_pos.x, local_pos.z).dot(direction)
-		var meander = noise.get_noise_1d(along_canyon) * canyon_width * meander_strength
-		lateral_distance += meander
+	var meander = ctx.get_primary_noise(world_pos) * ctx.canyon_width * ctx.canyon_meander_strength
+	lateral_distance += meander
 	
-	var half_width = canyon_width * 0.5
+	var half_width = ctx.canyon_width * 0.5
 	
 	if lateral_distance < half_width:
 		# Inside canyon floor
-		return -height
-	elif lateral_distance < half_width + height / wall_slope:
+		return -ctx.height
+	elif lateral_distance < half_width + ctx.height / ctx.canyon_wall_slope:
 		# On canyon walls
 		var wall_dist = lateral_distance - half_width
-		var wall_height = wall_dist * wall_slope
-		return -height + wall_height
+		var wall_height = wall_dist * ctx.canyon_wall_slope
+		return -ctx.height + wall_height
 	else:
 		# Outside canyon influence
 		return 0.0
