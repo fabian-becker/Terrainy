@@ -122,6 +122,7 @@ var _material_builder: TerrainMaterialBuilder = null
 var _chunk_thread: Thread = null
 var _pending_chunk_results: Array = []
 var _pending_chunk_rebuild_id: int = 0
+const CHUNK_LOG_THRESHOLD_MS = 10
 
 # Terrain state
 var _final_heightmap: Image
@@ -649,12 +650,14 @@ func _update_chunk_collision(chunk: TerrainChunk) -> void:
 			-chunk.world_bounds.size.y * 0.5
 		)
 		var elapsed = Time.get_ticks_msec() - start_time
-		print("[TerrainComposer] Generated chunk collision (%dx%d) in %d ms" % [width, depth, elapsed])
+		if elapsed >= CHUNK_LOG_THRESHOLD_MS:
+			push_warning("[TerrainComposer] Slow chunk collision: %dx%d in %d ms" % [width, depth, elapsed])
 	elif generate_collision and chunk.mesh_instance.mesh:
 		chunk.static_body.visible = true
 		chunk.collision_shape.shape = chunk.mesh_instance.mesh.create_trimesh_shape()
 		var elapsed = Time.get_ticks_msec() - start_time
-		print("[TerrainComposer] Generated chunk trimesh collision in %d ms" % elapsed)
+		if elapsed >= CHUNK_LOG_THRESHOLD_MS:
+			push_warning("[TerrainComposer] Slow chunk trimesh collision: %d ms" % elapsed)
 	else:
 		chunk.static_body.visible = false
 		chunk.collision_shape.shape = null
