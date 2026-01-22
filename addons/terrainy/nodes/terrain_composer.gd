@@ -50,6 +50,24 @@ const REBUILD_DEBOUNCE_SEC = 0.3  # Debounce rapid changes (e.g., gizmo manipula
 		if is_inside_tree() and auto_update:
 			rebuild_terrain()
 
+@export_group("Chunking")
+@export var chunk_size: int = 512:
+	set(value):
+		chunk_size = max(1, value)
+		_mark_all_chunks_dirty()
+		if auto_update and is_inside_tree():
+			rebuild_terrain()
+
+@export_group("LOD")
+@export var enable_lod: bool = true:
+	set(value):
+		enable_lod = value
+		if auto_update and is_inside_tree():
+			_request_rebuild()
+
+@export var lod_distances: Array[float] = [500.0, 1000.0, 2000.0]
+@export var lod_scale_factors: Array[float] = [1.0, 0.5, 0.25, 0.125]
+
 @export_group("Material")
 @export var terrain_material: Material
 
@@ -73,23 +91,37 @@ const REBUILD_DEBOUNCE_SEC = 0.3  # Debounce rapid changes (e.g., gizmo manipula
 @export var generate_collision: bool = true:
 	set(value):
 		generate_collision = value
-		_update_collision()
+		_update_all_chunk_collisions()
+
+class TerrainChunk:
+	var position: Vector2i
+	var world_bounds: Rect2
+	var root: Node3D
+	var mesh_instance: MeshInstance3D
+	var static_body: StaticBody3D
+	var collision_shape: CollisionShape3D
+	var lod_level: int = 0
+	var is_dirty: bool = true
+	var heightmap: Image = null
 
 # Internal
-var _mesh_instance: MeshInstance3D
-var _static_body: StaticBody3D
-var _collision_shape: CollisionShape3D
 var _feature_nodes: Array[TerrainFeatureNode] = []
 var _is_generating: bool = false
+
+# Chunking
+var _chunks: Dictionary = {}  # Vector2i -> TerrainChunk
+var _chunk_grid_size: Vector2i = Vector2i.ZERO
+var _chunk_root: Node3D = null
+var _feature_bounds_cache: Dictionary = {}  # feature -> Rect2
 
 # Helpers
 var _heightmap_composer: TerrainHeightmapBuilder = null
 var _material_builder: TerrainMaterialBuilder = null
 
 # Threading
-var _mesh_thread: Thread = null
-var _pending_mesh: ArrayMesh = null
-var _pending_heightmap: Image = null
+var _chunk_thread: Thread = null
+var _pending_chunk_results: Array = []
+var _pending_chunk_rebuild_id: int = 0
 
 # Terrain state
 var _final_heightmap: Image
@@ -98,6 +130,7 @@ var _terrain_bounds: Rect2
 # Rebuild timing
 var _rebuild_start_msec: int = 0
 var _rebuild_id: int = 0
+var _coordinator_rebuild_pending: bool = false
 
 # Rebuild debouncing
 var _rebuild_timer: Timer = null
@@ -110,24 +143,11 @@ func _ready() -> void:
 	_heightmap_composer = TerrainHeightmapBuilder.new()
 	_material_builder = TerrainMaterialBuilder.new()
 	
-	# Setup mesh instance
-	if not _mesh_instance:
-		_mesh_instance = MeshInstance3D.new()
-		_mesh_instance.name = "TerrainMesh"
-		add_child(_mesh_instance, false, Node.INTERNAL_MODE_BACK)
-		_mesh_instance.visible = true
-		_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	
-	# Setup collision
-	if not _static_body:
-		_static_body = StaticBody3D.new()
-		add_child(_static_body, false, Node.INTERNAL_MODE_BACK)
-		_static_body.name = "CollisionBody"
-	
-	if not _collision_shape:
-		_collision_shape = CollisionShape3D.new()
-		_static_body.add_child(_collision_shape, false, Node.INTERNAL_MODE_BACK)
-		_collision_shape.name = "CollisionShape"
+	# Setup chunk root
+	if not _chunk_root:
+		_chunk_root = Node3D.new()
+		_chunk_root.name = "TerrainChunks"
+		add_child(_chunk_root, false, Node.INTERNAL_MODE_BACK)
 	
 	# Watch for child changes in editor
 	if Engine.is_editor_hint():
@@ -140,65 +160,59 @@ func _ready() -> void:
 	rebuild_terrain()
 
 func _process(_delta: float) -> void:
-	# Check if mesh generation thread completed
-	if _mesh_thread and not _mesh_thread.is_alive():
-		_mesh_thread.wait_to_finish()
-		_mesh_thread = null
-		
-		if _pending_mesh and _mesh_instance:
-			_mesh_instance.mesh = _pending_mesh
-			_mesh_instance.visible = true
-			var vertex_count = 0
-			var aabb = AABB()
-			if _pending_mesh.get_surface_count() > 0:
-				var arrays = _pending_mesh.surface_get_arrays(0)
-				if arrays[Mesh.ARRAY_VERTEX]:
-					vertex_count = arrays[Mesh.ARRAY_VERTEX].size()
-				aabb = _pending_mesh.get_aabb()
-			print("[TerrainComposer:%s] Mesh applied: %d vertices, AABB: %s, position: %s" % [
-				name, 
-				vertex_count,
-				aabb,
-				global_position
-			])
-			_update_material()
-			_update_collision(_pending_heightmap)
-			terrain_updated.emit()
-			if _rebuild_start_msec > 0:
-				var total_elapsed = Time.get_ticks_msec() - _rebuild_start_msec
-				print("[TerrainComposer:%s] Rebuild #%d completed in %d ms" % [name, _rebuild_id, total_elapsed])
-			_pending_mesh = null
-			_pending_heightmap = null
-		elif _pending_mesh and not _mesh_instance:
-			push_error("[TerrainComposer:%s] Mesh generated but _mesh_instance is null!" % name)
-		
+	# Check if chunk generation thread completed
+	if _chunk_thread and not _chunk_thread.is_alive():
+		_chunk_thread.wait_to_finish()
+		_chunk_thread = null
+		_apply_pending_chunk_results()
 		_is_generating = false
-		set_process(false)
+		
+		if _rebuild_start_msec > 0:
+			var total_elapsed = Time.get_ticks_msec() - _rebuild_start_msec
+			print("[TerrainComposer:%s] Rebuild #%d completed in %d ms" % [name, _rebuild_id, total_elapsed])
+			_rebuild_start_msec = 0
 		
 		# Signal rebuild completion to coordinator
-		if Engine.has_singleton("TerrainRebuildCoordinator"):
+		if _coordinator_rebuild_pending and Engine.has_singleton("TerrainRebuildCoordinator"):
 			TerrainRebuildCoordinator.rebuild_completed(self)
+			_coordinator_rebuild_pending = false
+		terrain_updated.emit()
+
+	# Update LODs if enabled
+	if enable_lod and _chunks.size() > 0:
+		_update_chunk_lod()
+		if _has_dirty_chunks() and not _is_generating:
+			_rebuild_chunks(false)
+
+	if not _chunk_thread and not enable_lod:
+		set_process(false)
 
 func _exit_tree() -> void:
 	# Cancel any queued rebuild
 	if Engine.has_singleton("TerrainRebuildCoordinator"):
 		TerrainRebuildCoordinator.cancel_rebuild(self)
 	
-	if _mesh_thread and _mesh_thread.is_alive():
+	if _chunk_thread and _chunk_thread.is_alive():
 		# Wait with timeout to prevent editor hang (max 5 seconds)
 		var wait_start = Time.get_ticks_msec()
-		while _mesh_thread.is_alive():
+		while _chunk_thread.is_alive():
 			if Time.get_ticks_msec() - wait_start > 5000:
 				push_warning("[TerrainComposer] Mesh thread did not finish in time, forcing exit")
 				break
 			OS.delay_msec(10)
-		if not _mesh_thread.is_alive():
-			_mesh_thread.wait_to_finish()
+		if not _chunk_thread.is_alive():
+			_chunk_thread.wait_to_finish()
 	
 	# Clean up helpers
 	if _heightmap_composer:
 		_heightmap_composer.cleanup()
 		_heightmap_composer = null
+	
+	# Clean up chunks
+	for chunk in _chunks.values():
+		_free_chunk(chunk)
+	_chunks.clear()
+	_feature_bounds_cache.clear()
 
 func _scan_features() -> void:
 	# Disconnect old signals
@@ -209,6 +223,11 @@ func _scan_features() -> void:
 	_feature_nodes.clear()
 	_scan_recursive(self)
 	
+	# Drop cached bounds for removed features
+	for cached_feature in _feature_bounds_cache.keys():
+		if not _feature_nodes.has(cached_feature):
+			_feature_bounds_cache.erase(cached_feature)
+	
 	# Connect new signals
 	for feature in _feature_nodes:
 		if is_instance_valid(feature):
@@ -216,7 +235,7 @@ func _scan_features() -> void:
 
 func _scan_recursive(node: Node) -> void:
 	for child in node.get_children():
-		if child is TerrainFeatureNode and child != _mesh_instance and child != _static_body:
+		if child is TerrainFeatureNode:
 			if _feature_nodes.size() >= MAX_FEATURE_COUNT:
 				push_warning("[TerrainComposer] Maximum feature count (%d) reached, ignoring '%s'" % [MAX_FEATURE_COUNT, child.name])
 				break
@@ -262,6 +281,14 @@ func _on_feature_changed(feature: TerrainFeatureNode) -> void:
 		# Only invalidate influence if influence-related properties changed
 		_heightmap_composer.invalidate_influence(feature)
 	
+	# Mark affected chunks dirty (both previous and current bounds)
+	var previous_bounds: Rect2 = _feature_bounds_cache.get(feature, Rect2())
+	var current_bounds: Rect2 = _get_feature_world_bounds(feature)
+	if previous_bounds != Rect2():
+		_mark_chunks_dirty_for_bounds(previous_bounds)
+	_mark_chunks_dirty_for_bounds(current_bounds)
+	_feature_bounds_cache[feature] = current_bounds
+	
 	if auto_update:
 		_request_rebuild()
 
@@ -288,15 +315,11 @@ func rebuild_terrain() -> void:
 	if _is_generating:
 		return
 	
-	# Ensure mesh instance exists
-	if not _mesh_instance:
-		push_error("[TerrainComposer:%s] Cannot rebuild - _mesh_instance is null. Was _ready() called?" % name)
-		return
-	
 	# Check with rebuild coordinator if we can start
 	if Engine.has_singleton("TerrainRebuildCoordinator"):
 		if not TerrainRebuildCoordinator.request_rebuild(self):
 			return  # Queued, will be called again when ready
+		_coordinator_rebuild_pending = true
 	
 	_is_generating = true
 	_rebuild_id += 1
@@ -337,82 +360,331 @@ func rebuild_terrain() -> void:
 	var compose_elapsed = Time.get_ticks_msec() - compose_start
 	print("[TerrainComposer] Rebuild #%d compose time: %d ms" % [_rebuild_id, compose_elapsed])
 	
-	# Step 3: Generate mesh from final heightmap in background thread
-	if _mesh_thread and _mesh_thread.is_alive():
-		_mesh_thread.wait_to_finish()
+	# Step 3: Generate chunk meshes from final heightmap
+	var grid_changed = _calculate_chunk_grid()
+	if grid_changed:
+		_mark_all_chunks_dirty()
 	
-	_mesh_thread = Thread.new()
-	var thread_data = {
-		"heightmap": _final_heightmap,
-		"terrain_size": terrain_size
-	}
-	var mesh_start = Time.get_ticks_msec()
-	_mesh_thread.start(_generate_mesh_threaded.bind(thread_data))
-	print("[TerrainComposer] Rebuild #%d mesh thread start: %d ms" % [_rebuild_id, Time.get_ticks_msec() - mesh_start])
+	_rebuild_chunks(grid_changed)
 	
 	# Check for completion in process
 	set_process(true)
 
-## Thread worker function for mesh generation
-func _generate_mesh_threaded(data: Dictionary) -> void:
-	var mesh = TerrainMeshGenerator.generate_from_heightmap(
-		data["heightmap"],
-		data["terrain_size"]
-	)
-	
-	# Store results for main thread to pick up
-	_pending_mesh = mesh
-	_pending_heightmap = data["heightmap"]
 
-func _update_collision(heightmap: Image = null) -> void:
-	if not _collision_shape or not _mesh_instance:
+func _update_material() -> void:
+	if _material_builder:
+		var shared_material: Material = null
+		for chunk in _chunks.values():
+			if not chunk.mesh_instance:
+				continue
+			if not shared_material:
+				_material_builder.update_material(chunk.mesh_instance, texture_layers, terrain_material)
+				shared_material = chunk.mesh_instance.material_override
+			else:
+				chunk.mesh_instance.material_override = shared_material
+
+func _calculate_chunk_grid() -> bool:
+	if chunk_size <= 0:
+		return false
+	
+	var new_grid = Vector2i(
+		ceili(terrain_size.x / float(chunk_size)),
+		ceili(terrain_size.y / float(chunk_size))
+	)
+	var grid_changed = new_grid != _chunk_grid_size
+	_chunk_grid_size = new_grid
+	
+	var new_chunks: Dictionary = {}
+	for y in range(_chunk_grid_size.y):
+		for x in range(_chunk_grid_size.x):
+			var chunk_pos = Vector2i(x, y)
+			var chunk: TerrainChunk = _chunks.get(chunk_pos)
+			if not chunk:
+				chunk = _create_chunk(chunk_pos)
+				grid_changed = true
+			else:
+				_update_chunk_bounds(chunk)
+			new_chunks[chunk_pos] = chunk
+	
+	# Remove chunks no longer in grid
+	for key in _chunks.keys():
+		if not new_chunks.has(key):
+			_free_chunk(_chunks[key])
+			grid_changed = true
+	
+	_chunks = new_chunks
+	return grid_changed
+
+func _create_chunk(chunk_pos: Vector2i) -> TerrainChunk:
+	var chunk = TerrainChunk.new()
+	chunk.position = chunk_pos
+	chunk.root = Node3D.new()
+	chunk.root.name = "Chunk_%d_%d" % [chunk_pos.x, chunk_pos.y]
+	if _chunk_root:
+		_chunk_root.add_child(chunk.root, false, Node.INTERNAL_MODE_BACK)
+	
+	chunk.mesh_instance = MeshInstance3D.new()
+	chunk.mesh_instance.name = "Mesh"
+	chunk.mesh_instance.visible = true
+	chunk.mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	chunk.root.add_child(chunk.mesh_instance, false, Node.INTERNAL_MODE_BACK)
+	
+	chunk.static_body = StaticBody3D.new()
+	chunk.static_body.name = "CollisionBody"
+	chunk.root.add_child(chunk.static_body, false, Node.INTERNAL_MODE_BACK)
+	
+	chunk.collision_shape = CollisionShape3D.new()
+	chunk.collision_shape.name = "CollisionShape"
+	chunk.static_body.add_child(chunk.collision_shape, false, Node.INTERNAL_MODE_BACK)
+	
+	_update_chunk_bounds(chunk)
+	return chunk
+
+func _free_chunk(chunk: TerrainChunk) -> void:
+	if chunk and chunk.root and is_instance_valid(chunk.root):
+		chunk.root.queue_free()
+
+func _update_chunk_bounds(chunk: TerrainChunk) -> void:
+	var origin = _get_terrain_origin_world()
+	var chunk_world_pos = Vector2(
+		origin.x + chunk.position.x * float(chunk_size),
+		origin.y + chunk.position.y * float(chunk_size)
+	)
+	var size_x = min(chunk_size, terrain_size.x - chunk.position.x * chunk_size)
+	var size_y = min(chunk_size, terrain_size.y - chunk.position.y * chunk_size)
+	chunk.world_bounds = Rect2(chunk_world_pos, Vector2(size_x, size_y))
+	
+	# Position chunk root at center in local space
+	var chunk_center = Vector3(
+		chunk.world_bounds.position.x + chunk.world_bounds.size.x * 0.5,
+		0,
+		chunk.world_bounds.position.y + chunk.world_bounds.size.y * 0.5
+	)
+	chunk.root.position = Vector3(
+		chunk_center.x - global_position.x,
+		0,
+		chunk_center.z - global_position.z
+	)
+
+func _get_terrain_origin_world() -> Vector2:
+	return Vector2(
+		global_position.x - terrain_size.x * 0.5,
+		global_position.z - terrain_size.y * 0.5
+	)
+
+func _extract_chunk_heightmap(chunk: TerrainChunk, lod_level: int) -> Image:
+	if not _final_heightmap:
+		return null
+	
+	var res_x = resolution
+	var res_y = resolution
+	var pixels_per_unit_x = res_x / terrain_size.x
+	var pixels_per_unit_y = res_y / terrain_size.y
+	
+	var start_x = int(round((chunk.world_bounds.position.x - _terrain_bounds.position.x) * pixels_per_unit_x))
+	var start_y = int(round((chunk.world_bounds.position.y - _terrain_bounds.position.y) * pixels_per_unit_y))
+	var end_x = int(round((chunk.world_bounds.position.x + chunk.world_bounds.size.x - _terrain_bounds.position.x) * pixels_per_unit_x))
+	var end_y = int(round((chunk.world_bounds.position.y + chunk.world_bounds.size.y - _terrain_bounds.position.y) * pixels_per_unit_y))
+	
+	start_x = clampi(start_x, 0, res_x)
+	start_y = clampi(start_y, 0, res_y)
+	end_x = clampi(end_x, 0, res_x)
+	end_y = clampi(end_y, 0, res_y)
+	
+	var width = max(2, end_x - start_x + 1)
+	var height = max(2, end_y - start_y + 1)
+	
+	var chunk_heightmap = Image.create(width, height, false, Image.FORMAT_RF)
+	chunk_heightmap.blit_rect(_final_heightmap, Rect2i(start_x, start_y, width, height), Vector2i.ZERO)
+	
+	if lod_level > 0 and lod_level < lod_scale_factors.size():
+		var scale = lod_scale_factors[lod_level]
+		var target_w = max(2, int(round((width - 1) * scale)) + 1)
+		var target_h = max(2, int(round((height - 1) * scale)) + 1)
+		if target_w != width or target_h != height:
+			chunk_heightmap.resize(target_w, target_h, Image.INTERPOLATE_BILINEAR)
+	
+	return chunk_heightmap
+
+func _get_feature_world_bounds(feature: TerrainFeatureNode) -> Rect2:
+	var center = Vector2(feature.global_position.x, feature.global_position.z)
+	var half_size: Vector2
+	match feature.influence_shape:
+		TerrainFeatureNode.InfluenceShape.CIRCLE:
+			var radius = max(feature.influence_size.x, feature.influence_size.y)
+			half_size = Vector2(radius, radius)
+		_:
+			half_size = feature.influence_size * 0.5
+	return Rect2(center - half_size, half_size * 2.0)
+
+func _get_chunks_affected_by_feature(feature: TerrainFeatureNode) -> Array[TerrainChunk]:
+	var bounds = _get_feature_world_bounds(feature)
+	return _get_chunks_affected_by_bounds(bounds)
+
+func _get_chunks_affected_by_bounds(bounds: Rect2) -> Array[TerrainChunk]:
+	var affected: Array[TerrainChunk] = []
+	for chunk in _chunks.values():
+		if chunk.world_bounds.intersects(bounds):
+			affected.append(chunk)
+	return affected
+
+func _mark_chunks_dirty_for_bounds(bounds: Rect2) -> void:
+	for chunk in _get_chunks_affected_by_bounds(bounds):
+		chunk.is_dirty = true
+
+func _mark_all_chunks_dirty() -> void:
+	for chunk in _chunks.values():
+		chunk.is_dirty = true
+
+func _has_dirty_chunks() -> bool:
+	for chunk in _chunks.values():
+		if chunk.is_dirty:
+			return true
+	return false
+
+func _rebuild_chunks(full_rebuild: bool) -> void:
+	if _chunk_thread and _chunk_thread.is_alive():
+		_chunk_thread.wait_to_finish()
+	
+	var dirty_chunks: Array = []
+	for chunk in _chunks.values():
+		if full_rebuild or chunk.is_dirty:
+			dirty_chunks.append(chunk)
+	
+	if dirty_chunks.is_empty():
+		_is_generating = false
+		_rebuild_start_msec = 0
+		if _coordinator_rebuild_pending and Engine.has_singleton("TerrainRebuildCoordinator"):
+			TerrainRebuildCoordinator.rebuild_completed(self)
+			_coordinator_rebuild_pending = false
+		terrain_updated.emit()
+		return
+
+	_is_generating = true
+	
+	var jobs: Array = []
+	for chunk in dirty_chunks:
+		var heightmap = _extract_chunk_heightmap(chunk, chunk.lod_level)
+		if not heightmap:
+			continue
+		jobs.append({
+			"key": chunk.position,
+			"heightmap": heightmap,
+			"size": Vector2(chunk.world_bounds.size.x, chunk.world_bounds.size.y),
+			"lod_level": chunk.lod_level
+		})
+	
+	_pending_chunk_results.clear()
+	_pending_chunk_rebuild_id = _rebuild_id
+	
+	var thread_data = {
+		"jobs": jobs,
+		"rebuild_id": _rebuild_id
+	}
+	_chunk_thread = Thread.new()
+	_chunk_thread.start(_generate_chunk_meshes_threaded.bind(thread_data))
+
+func _generate_chunk_meshes_threaded(data: Dictionary) -> void:
+	var results: Array = []
+	for job in data["jobs"]:
+		var heightmap: Image = job["heightmap"]
+		var mesh = TerrainMeshGenerator.generate_from_heightmap(heightmap, job["size"])
+		results.append({
+			"key": job["key"],
+			"mesh": mesh,
+			"heightmap": heightmap,
+			"lod_level": job["lod_level"]
+		})
+	_pending_chunk_results = results
+	_pending_chunk_rebuild_id = data["rebuild_id"]
+
+func _apply_pending_chunk_results() -> void:
+	if _pending_chunk_results.is_empty():
+		return
+	
+	for result in _pending_chunk_results:
+		var key: Vector2i = result["key"]
+		var chunk: TerrainChunk = _chunks.get(key)
+		if not chunk:
+			continue
+		chunk.mesh_instance.mesh = result["mesh"]
+		chunk.mesh_instance.visible = true
+		chunk.heightmap = result["heightmap"]
+		chunk.lod_level = result["lod_level"]
+		chunk.is_dirty = false
+		_update_chunk_collision(chunk)
+	
+	_update_material()
+	_pending_chunk_results.clear()
+
+func _update_chunk_collision(chunk: TerrainChunk) -> void:
+	if not chunk or not chunk.collision_shape:
 		return
 	
 	var start_time = Time.get_ticks_msec()
-	if generate_collision and heightmap:
-		_static_body.visible = true
-		
-		# Use HeightMapShape3D for much better performance than trimesh
+	if generate_collision and chunk.heightmap:
+		chunk.static_body.visible = true
 		var height_shape = HeightMapShape3D.new()
-		var width = heightmap.get_width()
-		var depth = heightmap.get_height()
+		var width = chunk.heightmap.get_width()
+		var depth = chunk.heightmap.get_height()
 		height_shape.map_width = width
 		height_shape.map_depth = depth
 		
-		# Convert heightmap to float array
 		var map_data: PackedFloat32Array = PackedFloat32Array()
 		map_data.resize(width * depth)
 		for z in range(depth):
 			for x in range(width):
-				map_data[z * width + x] = heightmap.get_pixel(x, z).r
-		
+				map_data[z * width + x] = chunk.heightmap.get_pixel(x, z).r
 		height_shape.map_data = map_data
-		_collision_shape.shape = height_shape
+		chunk.collision_shape.shape = height_shape
 		
-		# Scale collision to match terrain size
-		_collision_shape.scale = Vector3(
-			terrain_size.x / (width - 1),
+		chunk.collision_shape.scale = Vector3(
+			chunk.world_bounds.size.x / (width - 1),
 			1.0,
-			terrain_size.y / (depth - 1)
+			chunk.world_bounds.size.y / (depth - 1)
 		)
-		# Center the collision shape
-		_collision_shape.position = Vector3(-terrain_size.x / 2.0, 0, -terrain_size.y / 2.0)
-		
+		chunk.collision_shape.position = Vector3(
+			-chunk.world_bounds.size.x * 0.5,
+			0,
+			-chunk.world_bounds.size.y * 0.5
+		)
 		var elapsed = Time.get_ticks_msec() - start_time
-		print("[TerrainComposer] Generated heightmap collision shape (%dx%d) in %d ms" % [width, depth, elapsed])
-	elif generate_collision and _mesh_instance.mesh:
-		# Fallback to trimesh if no heightmap is provided (legacy support)
-		_static_body.visible = true
-		_collision_shape.shape = _mesh_instance.mesh.create_trimesh_shape()
+		print("[TerrainComposer] Generated chunk collision (%dx%d) in %d ms" % [width, depth, elapsed])
+	elif generate_collision and chunk.mesh_instance.mesh:
+		chunk.static_body.visible = true
+		chunk.collision_shape.shape = chunk.mesh_instance.mesh.create_trimesh_shape()
 		var elapsed = Time.get_ticks_msec() - start_time
-		print("[TerrainComposer] Generated trimesh collision shape in %d ms" % elapsed)
+		print("[TerrainComposer] Generated chunk trimesh collision in %d ms" % elapsed)
 	else:
-		_static_body.visible = false
-		_collision_shape.shape = null
-		var elapsed = Time.get_ticks_msec() - start_time
-		print("[TerrainComposer] Disabled collision in %d ms" % elapsed)
+		chunk.static_body.visible = false
+		chunk.collision_shape.shape = null
 
+func _update_all_chunk_collisions() -> void:
+	for chunk in _chunks.values():
+		_update_chunk_collision(chunk)
 
-func _update_material() -> void:
-	if _material_builder:
-		_material_builder.update_material(_mesh_instance, texture_layers, terrain_material)
+func _update_chunk_lod() -> void:
+	var camera = get_viewport().get_camera_3d()
+	if not camera:
+		return
+	
+	var camera_pos = camera.global_position
+	for chunk in _chunks.values():
+		var center = Vector3(
+			chunk.world_bounds.position.x + chunk.world_bounds.size.x * 0.5,
+			0,
+			chunk.world_bounds.position.y + chunk.world_bounds.size.y * 0.5
+		)
+		var distance = camera_pos.distance_to(center)
+		var new_lod = _calculate_lod_level(distance)
+		if new_lod != chunk.lod_level:
+			chunk.lod_level = new_lod
+			chunk.is_dirty = true
+
+func _calculate_lod_level(distance: float) -> int:
+	if lod_distances.is_empty() or lod_scale_factors.is_empty():
+		return 0
+	for i in range(lod_distances.size()):
+		if distance < lod_distances[i]:
+			return i
+	return clampi(lod_distances.size(), 0, lod_scale_factors.size() - 1)

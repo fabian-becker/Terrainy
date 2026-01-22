@@ -165,6 +165,11 @@ func _build_texture_arrays(texture_layers: Array[TerrainTextureLayer]) -> void:
 func _get_or_create_image(texture: Texture2D, size: Vector2i, default_color: Color) -> Image:
 	if texture:
 		var img = texture.get_image()
+		if not img:
+			var fallback = Image.create(size.x, size.y, true, Image.FORMAT_RGBA8)
+			fallback.fill(default_color)
+			fallback.generate_mipmaps()
+			return fallback
 		if img.get_size() != size:
 			img.resize(size.x, size.y, Image.INTERPOLATE_LANCZOS)
 		if img.get_format() != Image.FORMAT_RGBA8:
