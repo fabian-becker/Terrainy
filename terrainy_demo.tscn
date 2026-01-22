@@ -83,7 +83,8 @@ metadata/_gizmo_manipulating = false
 [node name="MountainNode" type="Node3D" parent="TerrainComposer"]
 script = ExtResource("6_h176a")
 noise = SubResource("FastNoiseLite_svejp")
-height = 100.0
+height = 300.0
 influence_size = Vector2(539.1464, 539.1464)
+edge_falloff = 0.32784898184442524
 metadata/_custom_type_script = "uid://b06n2v4b3hlyt"
 metadata/_gizmo_manipulating = false
