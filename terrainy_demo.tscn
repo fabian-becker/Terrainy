@@ -87,28 +87,3 @@ height = 291.8966
 influence_size = Vector2(539.1464, 539.1464)
 metadata/_custom_type_script = "uid://b06n2v4b3hlyt"
 metadata/_gizmo_manipulating = false
-
-[node name="TerrainComposer2" type="Node3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 4096)
-script = ExtResource("1_s0usi")
-terrain_size = Vector2(4096, 4096)
-base_height = 1.0
-texture_layers = Array[ExtResource("2_50dxj")]([ExtResource("3_v4gbn"), ExtResource("4_7tomh"), ExtResource("5_3hu61")])
-metadata/_custom_type_script = "uid://b03v1mqy58bj4"
-
-[node name="PerlinNoiseNode" type="Node3D" parent="TerrainComposer2"]
-script = ExtResource("7_s0usi")
-amplitude = 16.0
-noise = SubResource("FastNoiseLite_50dxj")
-influence_size = Vector2(450, 450)
-edge_falloff = 0.4
-metadata/_custom_type_script = "uid://ck4gtrjpc6yu2"
-metadata/_gizmo_manipulating = false
-
-[node name="MountainNode" type="Node3D" parent="TerrainComposer2"]
-script = ExtResource("6_h176a")
-noise = SubResource("FastNoiseLite_svejp")
-height = 291.8966
-influence_size = Vector2(539.1464, 539.1464)
-metadata/_custom_type_script = "uid://b06n2v4b3hlyt"
-metadata/_gizmo_manipulating = false
