@@ -3,6 +3,7 @@ class_name MountainNode
 extends PrimitiveNode
 
 const PrimitiveNode = preload("res://addons/terrainy/nodes/primitives/primitive_node.gd")
+const PrimitiveEvaluationContext = preload("res://addons/terrainy/helpers/primitive_evaluation_context.gd")
 
 ## A mountain terrain feature with various peak types and noise detail
 
@@ -33,9 +34,14 @@ func _ready() -> void:
 func _on_noise_changed() -> void:
 	parameters_changed.emit()
 
+func prepare_evaluation_context() -> PrimitiveEvaluationContext:
+	var ctx = PrimitiveEvaluationContext.from_primitive_feature(self, height, peak_type)
+	ctx.mountain_peak_type = peak_type
+	return ctx
+
 func get_height_at(world_pos: Vector3) -> float:
-	var local_pos = to_local(world_pos)
-	return get_height_at_safe(world_pos, local_pos)
+	var ctx = prepare_evaluation_context()
+	return get_height_at_safe(world_pos, ctx)
 
 ## Optimized heightmap generation (avoids per-pixel to_local)
 func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:
@@ -129,11 +135,13 @@ func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:
 
 	return heightmap
 
-## Thread-safe version using pre-computed local position
-func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
+## Thread-safe version using pre-computed context
+func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
+	var ctx = context as PrimitiveEvaluationContext
+	var local_pos = ctx.to_local(world_pos)
 	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
 	
-	var radius = influence_size.x
+	var radius = ctx.influence_radius
 	
 	if distance_2d >= radius:
 		return 0.0
@@ -141,7 +149,7 @@ func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
 	var normalized_distance = distance_2d / radius
 	var height_multiplier = 0.0
 	
-	match peak_type:
+	match ctx.mountain_peak_type:
 		0: # Sharp
 			height_multiplier = pow(1.0 - normalized_distance, 1.5)
 		1: # Rounded
@@ -154,11 +162,11 @@ func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
 				var slope_t = (normalized_distance - 0.3) / 0.7
 				height_multiplier = 1.0 - smoothstep(0.0, 1.0, slope_t)
 	
-	var base_height = height * height_multiplier
+	var base_height = ctx.height * height_multiplier
 	
 	# Add noise detail
-	if noise and noise_strength > 0.0:
-		var noise_value = noise.get_noise_3d(world_pos.x, world_pos.y, world_pos.z)
-		base_height += noise_value * height * noise_strength * height_multiplier
+	var noise_detail = ctx.get_noise_detail(world_pos)
+	if noise_detail != 0.0:
+		base_height += noise_detail * ctx.height * height_multiplier
 	
 	return base_height

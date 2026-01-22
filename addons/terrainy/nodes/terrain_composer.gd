@@ -7,6 +7,7 @@ const TerrainTextureLayer = preload("res://addons/terrainy/resources/terrain_tex
 const TerrainMeshGenerator = preload("res://addons/terrainy/helpers/terrain_mesh_generator.gd")
 const TerrainHeightmapBuilder = preload("res://addons/terrainy/helpers/terrain_heightmap_builder.gd")
 const TerrainMaterialBuilder = preload("res://addons/terrainy/helpers/terrain_material_builder.gd")
+const EvaluationContext = preload("res://addons/terrainy/helpers/evaluation_context.gd")
 
 ## Simple terrain composer - generates mesh from TerrainFeatureNodes
 
@@ -273,10 +274,20 @@ func rebuild_terrain() -> void:
 	# Resolution for heightmaps
 	var heightmap_resolution = Vector2i(resolution + 1, resolution + 1)
 	
-	# Compose heightmaps using helper
+	# Phase 4: Prepare all evaluation contexts on main thread
+	var context_start = Time.get_ticks_msec()
+	var feature_contexts = {}
+	for feature in _feature_nodes:
+		if is_instance_valid(feature) and feature.is_inside_tree() and feature.visible:
+			feature_contexts[feature] = feature.prepare_evaluation_context()
+	var context_elapsed = Time.get_ticks_msec() - context_start
+	print("[TerrainComposer] Rebuild #%d prepared %d contexts in %d ms" % [_rebuild_id, feature_contexts.size(), context_elapsed])
+	
+	# Compose heightmaps using helper with contexts
 	var compose_start = Time.get_ticks_msec()
 	_final_heightmap = _heightmap_composer.compose(
 		_feature_nodes,
+		feature_contexts,
 		heightmap_resolution,
 		_terrain_bounds,
 		base_height,

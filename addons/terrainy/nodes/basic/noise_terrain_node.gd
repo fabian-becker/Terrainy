@@ -3,6 +3,7 @@ class_name PerlinNoiseNode
 extends NoiseNode
 
 const NoiseNode = preload("res://addons/terrainy/nodes/basic/noise_node.gd")
+const NoiseEvaluationContext = preload("res://addons/terrainy/helpers/noise_evaluation_context.gd")
 
 ## Terrain feature using Perlin noise for organic variation
 ##
@@ -17,13 +18,14 @@ func _ready() -> void:
 		noise.frequency = 0.01  # Set a reasonable default
 		noise.noise_type = FastNoiseLite.TYPE_PERLIN
 
-func get_height_at(world_pos: Vector3) -> float:
-	if not noise:
-		return 0.0
-	
-	var noise_value = noise.get_noise_2d(world_pos.x, world_pos.z)
-	return (noise_value + 1.0) * 0.5 * amplitude
+func prepare_evaluation_context() -> NoiseEvaluationContext:
+	return NoiseEvaluationContext.from_noise_feature(self, noise, amplitude)
 
-## Thread-safe version (noise already uses world coords, so it's thread-safe)
-func get_height_at_safe(world_pos: Vector3, local_pos: Vector3) -> float:
-	return get_height_at(world_pos)
+func get_height_at(world_pos: Vector3) -> float:
+	var ctx = prepare_evaluation_context()
+	return get_height_at_safe(world_pos, ctx)
+
+## Thread-safe version using context
+func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
+	var ctx = context as NoiseEvaluationContext
+	return ctx.get_noise_normalized(world_pos) * ctx.amplitude
