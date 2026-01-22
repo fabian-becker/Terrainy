@@ -4,6 +4,8 @@ extends RefCounted
 ## Helper class for generating terrain meshes from heightmaps
 ## Generates ArrayMesh from heightmap images
 
+const LOG_THRESHOLD_MS = 10
+
 ## Generate terrain mesh from heightmap
 static func generate_from_heightmap(
 	heightmap: Image,
@@ -150,8 +152,9 @@ static func generate_from_heightmap(
 	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	
 	var elapsed = Time.get_ticks_msec() - start_time
-	print("[TerrainMeshGenerator] Generated %dx%d terrain (%d verts, %d tris) from heightmap in %d ms" % [
-		width, height, vertices.size(), indices.size() / 3, elapsed
-	])
+	if elapsed >= LOG_THRESHOLD_MS:
+		push_warning("[TerrainMeshGenerator] Slow mesh build: %dx%d (%d verts, %d tris) in %d ms" % [
+			width, height, vertices.size(), indices.size() / 3, elapsed
+		])
 	
 	return array_mesh
