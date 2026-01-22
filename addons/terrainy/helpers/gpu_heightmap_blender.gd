@@ -15,6 +15,9 @@ const TerrainFeatureNode = preload("res://addons/terrainy/nodes/terrain_feature_
 
 func _init() -> void:
 	print("[GpuHeightmapBlender] Initializing GPU blender...")
+	if not RenderingServer.get_rendering_device():
+		push_warning("[GpuHeightmapBlender] Compatibility renderer detected, GPU composition disabled")
+		return
 	_rd = RenderingServer.create_local_rendering_device()
 	if not _rd:
 		push_warning("[GpuHeightmapBlender] Failed to create RenderingDevice, GPU composition unavailable")

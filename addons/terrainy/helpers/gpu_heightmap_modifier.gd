@@ -10,6 +10,9 @@ var _pipeline: RID
 var _initialized: bool = false
 
 func _init() -> void:
+	if not RenderingServer.get_rendering_device():
+		push_warning("[GpuHeightmapModifier] Compatibility renderer detected, GPU modifiers disabled")
+		return
 	_rd = RenderingServer.create_local_rendering_device()
 	if not _rd:
 		push_warning("[GpuHeightmapModifier] Failed to create RenderingDevice")
