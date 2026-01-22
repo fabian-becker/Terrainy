@@ -122,6 +122,8 @@ var _material_builder: TerrainMaterialBuilder = null
 var _chunk_thread: Thread = null
 var _pending_chunk_results: Array = []
 var _pending_chunk_rebuild_id: int = 0
+var _chunk_thread_started: bool = false
+var _chunk_thread_seen_alive: bool = false
 const CHUNK_LOG_THRESHOLD_MS = 10
 
 # Terrain state
@@ -146,6 +148,12 @@ func _ready() -> void:
 	_heightmap_composer = TerrainHeightmapBuilder.new()
 	_material_builder = TerrainMaterialBuilder.new()
 	
+	# Compatibility renderer guard: disable GPU composition to avoid editor freezes
+	if not RenderingServer.get_rendering_device():
+		if use_gpu_composition:
+			push_warning("[TerrainComposer] Compatibility renderer detected, disabling GPU composition")
+		use_gpu_composition = false
+	
 	# Setup chunk root
 	if not _chunk_root:
 		_chunk_root = Node3D.new()
@@ -164,26 +172,19 @@ func _ready() -> void:
 
 func _process(_delta: float) -> void:
 	# Check if chunk generation thread completed
-	if _chunk_thread and not _chunk_thread.is_alive():
-		_chunk_thread.wait_to_finish()
-		_chunk_thread = null
-		_apply_pending_chunk_results()
-		_is_generating = false
-		
-		if _rebuild_start_msec > 0:
-			var total_elapsed = Time.get_ticks_msec() - _rebuild_start_msec
-			print("[TerrainComposer:%s] Rebuild #%d completed in %d ms" % [name, _rebuild_id, total_elapsed])
-			_rebuild_start_msec = 0
-		
-		# Signal rebuild completion to coordinator
-		if _coordinator_rebuild_pending and Engine.has_singleton("TerrainRebuildCoordinator"):
-			TerrainRebuildCoordinator.rebuild_completed(self)
-			_coordinator_rebuild_pending = false
-		terrain_updated.emit()
-
-		if _rebuild_after_current:
-			_rebuild_after_current = false
-			call_deferred("rebuild_terrain")
+	if _chunk_thread:
+		if _chunk_thread.is_alive():
+			_chunk_thread_seen_alive = true
+		elif _chunk_thread_started:
+			if _chunk_thread_seen_alive or not _pending_chunk_results.is_empty():
+				_chunk_thread.wait_to_finish()
+				_chunk_thread = null
+				_chunk_thread_started = false
+				_chunk_thread_seen_alive = false
+				_on_chunk_generation_completed()
+		elif not _chunk_thread_started:
+			# Defensive cleanup if thread was never started
+			_chunk_thread = null
 
 	# Update LODs if enabled
 	if enable_lod and _chunks.size() > 0:
@@ -199,7 +200,7 @@ func _exit_tree() -> void:
 	if Engine.has_singleton("TerrainRebuildCoordinator"):
 		TerrainRebuildCoordinator.cancel_rebuild(self)
 	
-	if _chunk_thread and _chunk_thread.is_alive():
+	if _chunk_thread and _chunk_thread_started and _chunk_thread.is_alive():
 		# Wait with timeout to prevent editor hang (max 5 seconds)
 		var wait_start = Time.get_ticks_msec()
 		while _chunk_thread.is_alive():
@@ -207,7 +208,7 @@ func _exit_tree() -> void:
 				push_warning("[TerrainComposer] Mesh thread did not finish in time, forcing exit")
 				break
 			OS.delay_msec(10)
-		if not _chunk_thread.is_alive():
+		if not _chunk_thread.is_alive() and _chunk_thread_seen_alive:
 			_chunk_thread.wait_to_finish()
 	
 	# Clean up helpers
@@ -331,6 +332,12 @@ func rebuild_terrain() -> void:
 	if _is_generating:
 		_rebuild_after_current = true
 		return
+
+	# Ensure helpers exist (tool scripts can reload and clear references)
+	if not _heightmap_composer:
+		_heightmap_composer = TerrainHeightmapBuilder.new()
+	if not _material_builder:
+		_material_builder = TerrainMaterialBuilder.new()
 	
 	# Check with rebuild coordinator if we can start
 	if Engine.has_singleton("TerrainRebuildCoordinator"):
@@ -561,7 +568,7 @@ func _has_dirty_chunks() -> bool:
 	return false
 
 func _rebuild_chunks(full_rebuild: bool) -> void:
-	if _chunk_thread and _chunk_thread.is_alive():
+	if _chunk_thread and _chunk_thread_started and _chunk_thread.is_alive():
 		_chunk_thread.wait_to_finish()
 	
 	var dirty_chunks: Array = []
@@ -600,7 +607,17 @@ func _rebuild_chunks(full_rebuild: bool) -> void:
 		"rebuild_id": _rebuild_id
 	}
 	_chunk_thread = Thread.new()
-	_chunk_thread.start(_generate_chunk_meshes_threaded.bind(thread_data))
+	var start_error = _chunk_thread.start(_generate_chunk_meshes_threaded.bind(thread_data))
+	if start_error == OK:
+		_chunk_thread_started = true
+		_chunk_thread_seen_alive = false
+	else:
+		push_error("[TerrainComposer] Failed to start chunk thread (%d), falling back to main thread" % start_error)
+		_chunk_thread = null
+		_chunk_thread_started = false
+		_chunk_thread_seen_alive = false
+		_generate_chunk_meshes_threaded(thread_data)
+		_on_chunk_generation_completed()
 
 func _generate_chunk_meshes_threaded(data: Dictionary) -> void:
 	var results: Array = []
@@ -634,6 +651,25 @@ func _apply_pending_chunk_results() -> void:
 	
 	_update_material()
 	_pending_chunk_results.clear()
+
+func _on_chunk_generation_completed() -> void:
+	_apply_pending_chunk_results()
+	_is_generating = false
+
+	if _rebuild_start_msec > 0:
+		var total_elapsed = Time.get_ticks_msec() - _rebuild_start_msec
+		print("[TerrainComposer:%s] Rebuild #%d completed in %d ms" % [name, _rebuild_id, total_elapsed])
+		_rebuild_start_msec = 0
+
+	# Signal rebuild completion to coordinator
+	if _coordinator_rebuild_pending and Engine.has_singleton("TerrainRebuildCoordinator"):
+		TerrainRebuildCoordinator.rebuild_completed(self)
+		_coordinator_rebuild_pending = false
+	terrain_updated.emit()
+
+	if _rebuild_after_current:
+		_rebuild_after_current = false
+		call_deferred("rebuild_terrain")
 
 func _update_chunk_collision(chunk: TerrainChunk) -> void:
 	if not chunk or not chunk.collision_shape:

@@ -61,6 +61,23 @@ Smoothing is particularly useful for reducing the spikiness of procedural terrai
 3. Position and configure the features in the 3D viewport
 4. The terrain mesh will automatically update with your changes
 
+## Quickstart Tutorial (Editor Preview)
+
+1. Create a new 3D scene and add a `TerrainComposer`.
+2. Add a `HillNode` (or any feature) as a child of the composer.
+3. Move/scale the feature using the gizmos to see live updates.
+4. If updates lag during heavy edits, toggle `Auto Update` off, tweak, then press **Rebuild Terrain**.
+
+### Compatibility Renderer Note
+
+If you are using the Compatibility renderer, GPU composition/modifiers are automatically disabled and the plugin will fall back to CPU. This prevents editor freezes but may be slower.
+
+## Demo Scene (Included in Addon)
+
+The addon now includes a minimal demo scene at:
+
+- [addons/terrainy/demo/terrainy_demo.tscn](addons/terrainy/demo/terrainy_demo.tscn)
+
 ## Configuration
 
 The `TerrainComposer` node provides several options:

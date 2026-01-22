@@ -152,6 +152,8 @@ func _ready() -> void:
 	set_notify_transform(true)
 
 static func _get_gpu_modifier_processor() -> GpuHeightmapModifier:
+	if not RenderingServer.get_rendering_device():
+		return null
 	if not _gpu_modifier_processor:
 		_gpu_modifier_processor = GpuHeightmapModifier.new()
 		if not _gpu_modifier_processor.is_available():
