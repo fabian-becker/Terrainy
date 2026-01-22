@@ -14,6 +14,10 @@ config/name="Terrainy"
 config/features=PackedStringArray("4.5", "Forward Plus")
 config/icon="res://icon.svg"
 
+[autoload]
+
+TerrainRebuildCoordinator="*res://addons/terrainy/helpers/terrain_rebuild_coordinator.gd"
+
 [dotnet]
 
 project/assembly_name="terrainy"

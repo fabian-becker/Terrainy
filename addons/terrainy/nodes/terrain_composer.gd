@@ -15,7 +15,7 @@ signal terrain_updated
 signal texture_layers_changed
 
 # Constants
-const MAX_TERRAIN_RESOLUTION = 1024
+const MAX_TERRAIN_RESOLUTION = 4096
 const MAX_FEATURE_COUNT = 64
 const REBUILD_DEBOUNCE_SEC = 0.3  # Debounce rapid changes (e.g., gizmo manipulation)
 
@@ -113,7 +113,10 @@ func _ready() -> void:
 	# Setup mesh instance
 	if not _mesh_instance:
 		_mesh_instance = MeshInstance3D.new()
+		_mesh_instance.name = "TerrainMesh"
 		add_child(_mesh_instance, false, Node.INTERNAL_MODE_BACK)
+		_mesh_instance.visible = true
+		_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	
 	# Setup collision
 	if not _static_body:
@@ -144,19 +147,43 @@ func _process(_delta: float) -> void:
 		
 		if _pending_mesh and _mesh_instance:
 			_mesh_instance.mesh = _pending_mesh
+			_mesh_instance.visible = true
+			var vertex_count = 0
+			var aabb = AABB()
+			if _pending_mesh.get_surface_count() > 0:
+				var arrays = _pending_mesh.surface_get_arrays(0)
+				if arrays[Mesh.ARRAY_VERTEX]:
+					vertex_count = arrays[Mesh.ARRAY_VERTEX].size()
+				aabb = _pending_mesh.get_aabb()
+			print("[TerrainComposer:%s] Mesh applied: %d vertices, AABB: %s, position: %s" % [
+				name, 
+				vertex_count,
+				aabb,
+				global_position
+			])
 			_update_material()
 			_update_collision(_pending_heightmap)
 			terrain_updated.emit()
 			if _rebuild_start_msec > 0:
 				var total_elapsed = Time.get_ticks_msec() - _rebuild_start_msec
-				print("[TerrainComposer] Rebuild #%d total time: %d ms" % [_rebuild_id, total_elapsed])
+				print("[TerrainComposer:%s] Rebuild #%d completed in %d ms" % [name, _rebuild_id, total_elapsed])
 			_pending_mesh = null
 			_pending_heightmap = null
+		elif _pending_mesh and not _mesh_instance:
+			push_error("[TerrainComposer:%s] Mesh generated but _mesh_instance is null!" % name)
 		
 		_is_generating = false
 		set_process(false)
+		
+		# Signal rebuild completion to coordinator
+		if Engine.has_singleton("TerrainRebuildCoordinator"):
+			TerrainRebuildCoordinator.rebuild_completed(self)
 
 func _exit_tree() -> void:
+	# Cancel any queued rebuild
+	if Engine.has_singleton("TerrainRebuildCoordinator"):
+		TerrainRebuildCoordinator.cancel_rebuild(self)
+	
 	if _mesh_thread and _mesh_thread.is_alive():
 		# Wait with timeout to prevent editor hang (max 5 seconds)
 		var wait_start = Time.get_ticks_msec()
@@ -261,14 +288,28 @@ func rebuild_terrain() -> void:
 	if _is_generating:
 		return
 	
+	# Ensure mesh instance exists
+	if not _mesh_instance:
+		push_error("[TerrainComposer:%s] Cannot rebuild - _mesh_instance is null. Was _ready() called?" % name)
+		return
+	
+	# Check with rebuild coordinator if we can start
+	if Engine.has_singleton("TerrainRebuildCoordinator"):
+		if not TerrainRebuildCoordinator.request_rebuild(self):
+			return  # Queued, will be called again when ready
+	
 	_is_generating = true
 	_rebuild_id += 1
 	_rebuild_start_msec = Time.get_ticks_msec()
 	
-	# Calculate terrain bounds
+	# Calculate terrain bounds in WORLD SPACE
+	# Features use global positions, so bounds must be global too
+	var local_bounds = Rect2(-terrain_size / 2.0, terrain_size)
 	_terrain_bounds = Rect2(
-		-terrain_size / 2.0,
-		terrain_size
+		global_position.x + local_bounds.position.x,
+		global_position.z + local_bounds.position.y,
+		local_bounds.size.x,
+		local_bounds.size.y
 	)
 	
 	# Resolution for heightmaps
@@ -370,6 +411,7 @@ func _update_collision(heightmap: Image = null) -> void:
 		_collision_shape.shape = null
 		var elapsed = Time.get_ticks_msec() - start_time
 		print("[TerrainComposer] Disabled collision in %d ms" % elapsed)
+
 
 func _update_material() -> void:
 	if _material_builder:

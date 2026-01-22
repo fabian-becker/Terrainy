@@ -7,6 +7,9 @@ var current_terrain_composer: Node3D
 var terrain_gizmo_plugin: EditorNode3DGizmoPlugin
 
 func _enter_tree() -> void:
+	# Add rebuild coordinator autoload
+	add_autoload_singleton("TerrainRebuildCoordinator", "res://addons/terrainy/helpers/terrain_rebuild_coordinator.gd")
+	
 	# Add custom node types
 	add_custom_type(
 		"TerrainComposer",
@@ -84,6 +87,9 @@ func _enter_tree() -> void:
 	_update_button_visibility()
 
 func _exit_tree() -> void:
+	# Remove autoload singleton
+	remove_autoload_singleton("TerrainRebuildCoordinator")
+	
 	# Clear gizmos from all nodes before removing the plugin
 	var edited_scene_root = get_tree().edited_scene_root
 	if edited_scene_root:
@@ -180,7 +186,14 @@ func _find_terrain_composer_recursive(node: Node) -> Node3D:
 
 func _on_rebuild_pressed() -> void:
 	print("[Terrainy] Rebuild Terrain button pressed")
-	# Rebuild the selected terrain composer, or find one in the tree
+	
+	# Check if Shift is held - if so, rebuild ALL terrain composers
+	var input = Input
+	if input.is_key_pressed(KEY_SHIFT):
+		_rebuild_all_terrain_composers()
+		return
+	
+	# Otherwise, rebuild the selected terrain composer, or find one in the tree
 	var target = current_terrain_composer
 	if not target or not is_instance_valid(target):
 		target = _find_terrain_composer_in_tree()
@@ -188,6 +201,30 @@ func _on_rebuild_pressed() -> void:
 	if target and is_instance_valid(target):
 		# Force a complete rebuild with all caches cleared
 		target.force_rebuild()
+
+func _rebuild_all_terrain_composers() -> void:
+	var edited_scene_root = get_tree().edited_scene_root
+	if not edited_scene_root:
+		return
+	
+	var composers: Array[Node] = []
+	_find_all_terrain_composers(edited_scene_root, composers)
+	
+	if composers.is_empty():
+		print("[Terrainy] No TerrainComposers found in scene")
+		return
+	
+	print("[Terrainy] Rebuilding %d TerrainComposer(s)..." % composers.size())
+	for composer in composers:
+		if is_instance_valid(composer):
+			composer.force_rebuild()
+
+func _find_all_terrain_composers(node: Node, result: Array[Node]) -> void:
+	if _handles(node):
+		result.append(node)
+	
+	for child in node.get_children():
+		_find_all_terrain_composers(child, result)
 
 func _on_gizmo_toggle(enabled: bool) -> void:
 	if terrain_gizmo_plugin:
