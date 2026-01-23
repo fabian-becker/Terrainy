@@ -29,7 +29,7 @@ func _enter_tree() -> void:
 	add_custom_type("PrimitiveNode", "Node3D", preload("res://addons/terrainy/nodes/primitives/primitive_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	add_custom_type("GradientNode", "Node3D", preload("res://addons/terrainy/nodes/gradients/gradient_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	add_custom_type("LandscapeNode", "Node3D", preload("res://addons/terrainy/nodes/landscapes/landscape_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
-	add_custom_type("NoiseNode", "Node3D", preload("res://addons/terrainy/nodes/basic/noise_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
+	add_custom_type("NoiseNode", "Node3D", preload("res://addons/terrainy/nodes/noise/noise_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	
 	# Gradients
 	add_custom_type("RadialGradientNode", "Node3D", preload("res://addons/terrainy/nodes/gradients/radial_gradient_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
@@ -50,11 +50,12 @@ func _enter_tree() -> void:
 	add_custom_type("DuneSeaNode", "Node3D", preload("res://addons/terrainy/nodes/landscapes/dune_sea_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	
 	# Noise
-	add_custom_type("PerlinNoiseNode", "Node3D", preload("res://addons/terrainy/nodes/basic/noise_terrain_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
-	add_custom_type("VoronoiNode", "Node3D", preload("res://addons/terrainy/nodes/basic/voronoi_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
+	add_custom_type("PerlinNoiseNode", "Node3D", preload("res://addons/terrainy/nodes/noise/perlin_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
+	add_custom_type("VoronoiNode", "Node3D", preload("res://addons/terrainy/nodes/noise/voronoi_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	
 	# Utility nodes
 	add_custom_type("ShapeNode", "Node3D", preload("res://addons/terrainy/nodes/basic/shape_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
+	add_custom_type("HeightmapNode", "Node3D", preload("res://addons/terrainy/nodes/basic/heightmap_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	
 	# Add gizmo plugin
 	terrain_gizmo_plugin = preload("res://addons/terrainy/gizmos/terrain_feature_gizmo_plugin.gd").new()
@@ -155,6 +156,7 @@ func _exit_tree() -> void:
 	
 	# Utility
 	remove_custom_type("ShapeNode")
+	remove_custom_type("HeightmapNode")
 
 func _handles(object: Object) -> bool:
 	return object is Node3D and object.get_script() == preload("res://addons/terrainy/nodes/terrain_composer.gd")

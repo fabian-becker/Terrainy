@@ -22,6 +22,9 @@ var gradient_center: Vector3  # For radial gradients
 var gradient_radius: float = 100.0  # For radial gradients
 var cone_angle: float = 45.0  # For cone gradients (in degrees)
 var cone_height: float = 100.0  # For cone gradients
+var interpolation: int = 0  # For linear gradients
+var sharpness: float = 1.0  # For cone gradients
+var flatness: float = 0.0  # For hemisphere gradients
 
 ## Create a GradientEvaluationContext from a terrain feature node.
 static func from_gradient_feature(feature: TerrainFeatureNode, start_h: float, end_h: float, falloff: int = 0) -> GradientEvaluationContext:
@@ -64,6 +67,12 @@ static func from_gradient_feature(feature: TerrainFeatureNode, start_h: float, e
 		ctx.cone_angle = feature.get("cone_angle")
 	if "cone_height" in feature:
 		ctx.cone_height = feature.get("cone_height")
+	if "interpolation" in feature:
+		ctx.interpolation = feature.get("interpolation")
+	if "sharpness" in feature:
+		ctx.sharpness = feature.get("sharpness")
+	if "flatness" in feature:
+		ctx.flatness = feature.get("flatness")
 	
 	return ctx
 

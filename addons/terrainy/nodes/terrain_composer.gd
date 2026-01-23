@@ -7,7 +7,7 @@ const TerrainTextureLayer = preload("res://addons/terrainy/resources/terrain_tex
 const TerrainMeshGenerator = preload("res://addons/terrainy/helpers/terrain_mesh_generator.gd")
 const TerrainHeightmapBuilder = preload("res://addons/terrainy/helpers/terrain_heightmap_builder.gd")
 const TerrainMaterialBuilder = preload("res://addons/terrainy/helpers/terrain_material_builder.gd")
-const EvaluationContext = preload("res://addons/terrainy/helpers/evaluation_context.gd")
+const EvaluationContext = preload("res://addons/terrainy/nodes/evaluation_context.gd")
 
 ## Simple terrain composer - generates mesh from TerrainFeatureNodes
 
@@ -32,12 +32,14 @@ const REBUILD_DEBOUNCE_SEC = 0.3  # Debounce rapid changes (e.g., gizmo manipula
 		resolution = clamp(value, 16, MAX_TERRAIN_RESOLUTION)
 		if _heightmap_composer:
 			_heightmap_composer.clear_all_caches()
+		_mark_all_chunks_dirty()
 		if auto_update and is_inside_tree():
 			rebuild_terrain()
 
 @export var base_height: float = 0.0:
 	set(value):
 		base_height = value
+		_mark_all_chunks_dirty()
 		if auto_update and is_inside_tree():
 			rebuild_terrain()
 
@@ -232,9 +234,20 @@ func _scan_features() -> void:
 	_scan_recursive(self)
 	
 	# Drop cached bounds for removed features
+	var removed_features: Array = []
 	for cached_feature in _feature_bounds_cache.keys():
 		if not _feature_nodes.has(cached_feature):
-			_feature_bounds_cache.erase(cached_feature)
+			removed_features.append(cached_feature)
+	
+	for removed_feature in removed_features:
+		var previous_bounds: Rect2 = _feature_bounds_cache.get(removed_feature, Rect2())
+		if previous_bounds != Rect2():
+			_mark_chunks_dirty_for_bounds(previous_bounds)
+		if _heightmap_composer:
+			_heightmap_composer.invalidate_heightmap(removed_feature)
+			_heightmap_composer.invalidate_influence(removed_feature)
+		_feature_bounds_cache.erase(removed_feature)
+		_heightmap_dirty_pending = true
 	
 	# Connect new signals
 	for feature in _feature_nodes:

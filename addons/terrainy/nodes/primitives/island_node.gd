@@ -3,7 +3,7 @@ class_name IslandNode
 extends PrimitiveNode
 
 const PrimitiveNode = preload("res://addons/terrainy/nodes/primitives/primitive_node.gd")
-const PrimitiveEvaluationContext = preload("res://addons/terrainy/helpers/primitive_evaluation_context.gd")
+const PrimitiveEvaluationContext = preload("res://addons/terrainy/nodes/primitives/primitive_evaluation_context.gd")
 
 ## An island terrain feature with beaches and elevation
 
@@ -31,7 +31,7 @@ const PrimitiveEvaluationContext = preload("res://addons/terrainy/helpers/primit
 
 func _ready() -> void:
 	if not noise:
-		noise = FastNoiseLite.new()
+		self.noise = FastNoiseLite.new()
 		noise.seed = randi()
 		noise.frequency = 0.05
 		noise.fractal_octaves = 3
@@ -43,6 +43,8 @@ func prepare_evaluation_context() -> PrimitiveEvaluationContext:
 	var ctx = PrimitiveEvaluationContext.from_primitive_feature(self, height, 0)
 	ctx.island_beach_width = beach_width
 	ctx.island_beach_height = beach_height
+	ctx.noise = noise
+	ctx.noise_strength = noise_strength
 	return ctx
 
 func get_height_at(world_pos: Vector3) -> float:

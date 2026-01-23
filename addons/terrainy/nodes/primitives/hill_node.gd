@@ -3,7 +3,7 @@ class_name HillNode
 extends PrimitiveNode
 
 const PrimitiveNode = preload("res://addons/terrainy/nodes/primitives/primitive_node.gd")
-const PrimitiveEvaluationContext = preload("res://addons/terrainy/helpers/primitive_evaluation_context.gd")
+const PrimitiveEvaluationContext = preload("res://addons/terrainy/nodes/primitives/primitive_evaluation_context.gd")
 
 ## A simple hill terrain feature with various shape options
 
