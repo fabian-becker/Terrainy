@@ -3,7 +3,7 @@ class_name DuneSeaNode
 extends LandscapeNode
 
 const LandscapeNode = preload("res://addons/terrainy/nodes/landscapes/landscape_node.gd")
-const LandscapeEvaluationContext = preload("res://addons/terrainy/helpers/landscape_evaluation_context.gd")
+const LandscapeEvaluationContext = preload("res://addons/terrainy/nodes/landscapes/landscape_evaluation_context.gd")
 
 ## A desert dune field terrain feature
 

@@ -17,19 +17,31 @@ const GradientNode = preload("res://addons/terrainy/nodes/gradients/gradient_nod
 		_commit_parameter_change()
 
 func get_height_at(world_pos: Vector3) -> float:
-	var local_pos = to_local(world_pos)
+	var ctx = prepare_evaluation_context()
+	return get_height_at_safe(world_pos, ctx)
+
+func prepare_evaluation_context() -> GradientEvaluationContext:
+	var ctx = GradientEvaluationContext.from_gradient_feature(self, start_height, end_height)
+	ctx.gradient_vector = direction
+	ctx.interpolation = interpolation
+	return ctx
+
+## Thread-safe version using pre-computed context
+func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
+	var ctx = context as GradientEvaluationContext
+	var local_pos = ctx.to_local(world_pos)
 	var pos_2d = Vector2(local_pos.x, local_pos.z)
 	
 	# Project position onto gradient direction
-	var projected = pos_2d.dot(direction)
+	var projected = pos_2d.dot(ctx.gradient_vector)
 	
 	# Normalize to influence radius
-	var radius = influence_size.x
+	var radius = ctx.influence_size.x
 	var t = (projected + radius) / (radius * 2.0)
 	t = clamp(t, 0.0, 1.0)
 	
 	# Apply interpolation
-	match interpolation:
+	match ctx.interpolation:
 		0: # Linear
 			pass
 		1: # Smooth
@@ -39,4 +51,4 @@ func get_height_at(world_pos: Vector3) -> float:
 		3: # Ease Out
 			t = 1.0 - (1.0 - t) * (1.0 - t)
 	
-	return lerp(start_height, end_height, t)
+	return lerp(ctx.start_height, ctx.end_height, t)

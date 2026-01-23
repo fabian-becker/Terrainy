@@ -2,7 +2,7 @@
 class_name VoronoiNode
 extends NoiseNode
 
-const NoiseNode = preload("res://addons/terrainy/nodes/basic/noise_node.gd")
+const NoiseNode = preload("res://addons/terrainy/nodes/noise/noise_node.gd")
 
 ## Voronoi/cellular pattern for rocky/cracked terrain
 

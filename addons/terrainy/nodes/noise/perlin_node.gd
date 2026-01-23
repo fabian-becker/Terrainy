@@ -2,8 +2,8 @@
 class_name PerlinNoiseNode
 extends NoiseNode
 
-const NoiseNode = preload("res://addons/terrainy/nodes/basic/noise_node.gd")
-const NoiseEvaluationContext = preload("res://addons/terrainy/helpers/noise_evaluation_context.gd")
+const NoiseNode = preload("res://addons/terrainy/nodes/noise/noise_node.gd")
+const NoiseEvaluationContext = preload("res://addons/terrainy/nodes/noise/noise_evaluation_context.gd")
 
 ## Terrain feature using Perlin noise for organic variation
 ##
