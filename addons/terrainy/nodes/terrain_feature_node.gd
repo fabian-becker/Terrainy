@@ -1,9 +1,10 @@
 @tool
+@abstract
 class_name TerrainFeatureNode
 extends Node3D
 
 const GpuHeightmapModifier = preload("res://addons/terrainy/helpers/gpu_heightmap_modifier.gd")
-const EvaluationContext = preload("res://addons/terrainy/helpers/evaluation_context.gd")
+const EvaluationContext = preload("res://addons/terrainy/nodes/evaluation_context.gd")
 
 ## Base class for all terrain feature nodes that can be positioned and blended
 
@@ -288,8 +289,9 @@ func generate_heightmap_with_context(resolution: Vector2i, terrain_bounds: Rect2
 	# Create heightmap image from packed array
 	var heightmap := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, height_data.to_byte_array())
 	
-	# Note: Modifiers are not applied in context-based generation
-	# They should be applied separately if needed
+	# Apply modifiers (CPU only for thread safety)
+	if _has_any_modifiers():
+		_apply_modifiers_cpu(heightmap, terrain_bounds, context)
 	
 	if Engine.is_editor_hint():
 		var elapsed = Time.get_ticks_msec() - start_time
@@ -305,15 +307,15 @@ func _has_any_modifiers() -> bool:
 		   enable_max_clamp
 
 ## Apply modifiers on CPU (fallback)
-func _apply_modifiers_cpu(heightmap: Image, terrain_bounds: Rect2) -> void:
+func _apply_modifiers_cpu(heightmap: Image, terrain_bounds: Rect2, context_override: EvaluationContext = null) -> void:
 	var resolution := Vector2i(heightmap.get_width(), heightmap.get_height())
 	var step_x := terrain_bounds.size.x / float(resolution.x - 1)
 	var step_y := terrain_bounds.size.y / float(resolution.y - 1)
 	var origin_x := terrain_bounds.position.x
 	var origin_z := terrain_bounds.position.y
 	
-	# Prepare context once for all pixels
-	var context = prepare_evaluation_context()
+	# Prepare context once for all pixels (use provided context when thread-safe)
+	var context = context_override if context_override != null else prepare_evaluation_context()
 	
 	# Read all heights at once
 	var height_data := heightmap.get_data().to_float32_array()

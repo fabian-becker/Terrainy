@@ -137,7 +137,7 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		var start_h = node.start_height
 		var end_h = node.end_height
 		
-		# Start height (at the back of the gradient)
+		# Start height (center for radial, back for linear)
 		var back_pos = Vector3.ZERO
 		if "direction" in node:
 			var dir = node.direction as Vector2
@@ -148,8 +148,8 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		height_lines.push_back(back_pos)
 		height_lines.push_back(back_pos + Vector3(0, start_h, 0))
 		
-		# End height (at the front of the gradient)
-		var front_pos = Vector3.ZERO
+		# End height (edge for radial, front for linear)
+		var front_pos = Vector3(size.x, 0, 0)
 		if "direction" in node:
 			var dir = node.direction as Vector2
 			var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
@@ -194,21 +194,25 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		handles.push_back(Vector3(0, height_val, 0))
 	
 	# Handle 3: Start height control (for gradients)
-	if "start_height" in node and "direction" in node:
+	if "start_height" in node:
 		var start_h = node.start_height
-		var dir = node.direction as Vector2
-		var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-		var max_size = max(size.x, size.y)
-		var back_pos = -dir_3d * max_size
+		var back_pos = Vector3.ZERO
+		if "direction" in node:
+			var dir = node.direction as Vector2
+			var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
+			var max_size = max(size.x, size.y)
+			back_pos = -dir_3d * max_size
 		handles.push_back(back_pos + Vector3(0, start_h, 0))
 	
 	# Handle 4: End height control (for gradients)
-	if "end_height" in node and "direction" in node:
+	if "end_height" in node:
 		var end_h = node.end_height
-		var dir = node.direction as Vector2
-		var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-		var max_size = max(size.x, size.y)
-		var front_pos = dir_3d * max_size
+		var front_pos = Vector3(size.x, 0, 0)
+		if "direction" in node:
+			var dir = node.direction as Vector2
+			var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
+			var max_size = max(size.x, size.y)
+			front_pos = dir_3d * max_size
 		handles.push_back(front_pos + Vector3(0, end_h, 0))
 	
 	# Handle 5: Direction control (for landscapes and gradients)
@@ -255,13 +259,13 @@ func _get_handle_name(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool)
 		handle_index += 1
 	
 	# Handle 3: Start height (for gradients)
-	if "start_height" in node and "direction" in node:
+	if "start_height" in node:
 		if handle_index == handle_id:
 			return "Start Height"
 		handle_index += 1
 	
 	# Handle 4: End height (for gradients)
-	if "end_height" in node and "direction" in node:
+	if "end_height" in node:
 		if handle_index == handle_id:
 			return "End Height"
 		handle_index += 1
@@ -311,13 +315,13 @@ func _get_handle_value(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool
 		handle_index += 1
 	
 	# Handle 3: Start height (for gradients)
-	if "start_height" in node and "direction" in node:
+	if "start_height" in node:
 		if handle_index == handle_id:
 			return node.start_height
 		handle_index += 1
 	
 	# Handle 4: End height (for gradients)
-	if "end_height" in node and "direction" in node:
+	if "end_height" in node:
 		if handle_index == handle_id:
 			return node.end_height
 		handle_index += 1
@@ -402,13 +406,16 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 		handle_index += 1
 	
 	# Handle 3: Start height (for gradients)
-	if "start_height" in node and "direction" in node:
+	if "start_height" in node:
 		if handle_index == handle_id:
-			var dir = node.direction as Vector2
-			var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-			var max_size = max(node.influence_size.x, node.influence_size.y)
-			var back_pos_global = node.to_global(-dir_3d * max_size)
-			var vertical_plane = Plane(Vector3.RIGHT.rotated(Vector3.UP, atan2(dir_3d.z, dir_3d.x)), back_pos_global)
+			var back_pos_global = node.global_position
+			var vertical_plane = Plane(Vector3.RIGHT, back_pos_global)
+			if "direction" in node:
+				var dir = node.direction as Vector2
+				var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
+				var max_size = max(node.influence_size.x, node.influence_size.y)
+				back_pos_global = node.to_global(-dir_3d * max_size)
+				vertical_plane = Plane(Vector3.RIGHT.rotated(Vector3.UP, atan2(dir_3d.z, dir_3d.x)), back_pos_global)
 			var vertical_intersection = vertical_plane.intersects_ray(ray_from, ray_dir)
 			if vertical_intersection != null:
 				var local_y = node.to_local(vertical_intersection).y
@@ -418,13 +425,16 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 		handle_index += 1
 	
 	# Handle 4: End height (for gradients)
-	if "end_height" in node and "direction" in node:
+	if "end_height" in node:
 		if handle_index == handle_id:
-			var dir = node.direction as Vector2
-			var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-			var max_size = max(node.influence_size.x, node.influence_size.y)
-			var front_pos_global = node.to_global(dir_3d * max_size)
-			var vertical_plane = Plane(Vector3.RIGHT.rotated(Vector3.UP, atan2(dir_3d.z, dir_3d.x)), front_pos_global)
+			var front_pos_global = node.to_global(Vector3(node.influence_size.x, 0, 0))
+			var vertical_plane = Plane(Vector3.RIGHT, front_pos_global)
+			if "direction" in node:
+				var dir = node.direction as Vector2
+				var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
+				var max_size = max(node.influence_size.x, node.influence_size.y)
+				front_pos_global = node.to_global(dir_3d * max_size)
+				vertical_plane = Plane(Vector3.RIGHT.rotated(Vector3.UP, atan2(dir_3d.z, dir_3d.x)), front_pos_global)
 			var vertical_intersection = vertical_plane.intersects_ray(ray_from, ray_dir)
 			if vertical_intersection != null:
 				var local_y = node.to_local(vertical_intersection).y
@@ -534,7 +544,7 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 		handle_index += 1
 	
 	# Handle 3: Start height (for gradients)
-	if "start_height" in node and "direction" in node:
+	if "start_height" in node:
 		if handle_index == handle_id:
 			if cancel:
 				node.start_height = restore
@@ -549,7 +559,7 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 		handle_index += 1
 	
 	# Handle 4: End height (for gradients)
-	if "end_height" in node and "direction" in node:
+	if "end_height" in node:
 		if handle_index == handle_id:
 			if cancel:
 				node.end_height = restore

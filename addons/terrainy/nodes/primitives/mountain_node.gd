@@ -3,7 +3,7 @@ class_name MountainNode
 extends PrimitiveNode
 
 const PrimitiveNode = preload("res://addons/terrainy/nodes/primitives/primitive_node.gd")
-const PrimitiveEvaluationContext = preload("res://addons/terrainy/helpers/primitive_evaluation_context.gd")
+const PrimitiveEvaluationContext = preload("res://addons/terrainy/nodes/primitives/primitive_evaluation_context.gd")
 
 ## A mountain terrain feature with various peak types and noise detail
 
@@ -26,7 +26,7 @@ const PrimitiveEvaluationContext = preload("res://addons/terrainy/helpers/primit
 
 func _ready() -> void:
 	if not noise:
-		noise = FastNoiseLite.new()
+		self.noise = FastNoiseLite.new()
 		noise.seed = randi()
 		noise.frequency = 0.02
 		noise.noise_type = FastNoiseLite.TYPE_PERLIN
@@ -37,6 +37,8 @@ func _on_noise_changed() -> void:
 func prepare_evaluation_context() -> PrimitiveEvaluationContext:
 	var ctx = PrimitiveEvaluationContext.from_primitive_feature(self, height, peak_type)
 	ctx.mountain_peak_type = peak_type
+	ctx.noise = noise
+	ctx.noise_strength = noise_strength
 	return ctx
 
 func get_height_at(world_pos: Vector3) -> float:

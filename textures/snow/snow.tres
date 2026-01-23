@@ -11,5 +11,5 @@ albedo_texture = ExtResource("1_k1tyh")
 normal_texture = ExtResource("2_uoaqu")
 roughness = 0.3
 uv_scale = Vector2(64, 64)
-height_min = 98.0
+height_min = 120.0
 metadata/_custom_type_script = "uid://ddlru3rps1tmg"
