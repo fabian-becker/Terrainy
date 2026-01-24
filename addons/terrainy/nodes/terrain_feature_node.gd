@@ -483,6 +483,7 @@ func _is_gizmo_manipulating() -> bool:
 
 ## Helper to emit parameters_changed signal only when not manipulating via gizmo
 func _commit_parameter_change() -> void:
+	_smoothing_cache.clear()
 	_heightmap_dirty = true
 	_cached_heightmap = null
 	if not _is_gizmo_manipulating():

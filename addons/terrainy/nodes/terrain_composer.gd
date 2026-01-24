@@ -142,9 +142,11 @@ var _heightmap_dirty_pending: bool = false
 var _rebuild_timer: Timer = null
 var _pending_rebuild: bool = false
 var _rebuild_after_current: bool = false
+var _initial_rebuild_pending: bool = true
 
 func _ready() -> void:
 	set_process(false)  # Only enable when mesh generation is running
+	_initial_rebuild_pending = true
 	
 	# Initialize helpers
 	_heightmap_composer = TerrainHeightmapBuilder.new()
@@ -170,7 +172,7 @@ func _ready() -> void:
 	
 	# Initial generation
 	_scan_features()
-	rebuild_terrain()
+	_request_rebuild()
 
 func _process(_delta: float) -> void:
 	# Check if chunk generation thread completed
@@ -266,6 +268,8 @@ func _scan_recursive(node: Node) -> void:
 			_scan_recursive(child)
 
 func _on_child_changed(_node: Node) -> void:
+	if _initial_rebuild_pending:
+		return
 	call_deferred("_rescan_and_rebuild")
 
 func _rescan_and_rebuild() -> void:
@@ -592,6 +596,7 @@ func _rebuild_chunks(full_rebuild: bool) -> void:
 	if dirty_chunks.is_empty():
 		_is_generating = false
 		_rebuild_start_msec = 0
+		_initial_rebuild_pending = false
 		if _coordinator_rebuild_pending and Engine.has_singleton("TerrainRebuildCoordinator"):
 			TerrainRebuildCoordinator.rebuild_completed(self)
 			_coordinator_rebuild_pending = false
@@ -668,6 +673,7 @@ func _apply_pending_chunk_results() -> void:
 func _on_chunk_generation_completed() -> void:
 	_apply_pending_chunk_results()
 	_is_generating = false
+	_initial_rebuild_pending = false
 
 	if _rebuild_start_msec > 0:
 		var total_elapsed = Time.get_ticks_msec() - _rebuild_start_msec

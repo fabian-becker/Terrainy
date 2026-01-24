@@ -9,7 +9,7 @@ const GradientNode = preload("res://addons/terrainy/nodes/gradients/gradient_nod
 @export_enum("Linear", "Smooth", "Spherical", "Inverse") var falloff_type: int = 1:
 	set(value):
 		falloff_type = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 func get_height_at(world_pos: Vector3) -> float:
 	var ctx = prepare_evaluation_context()
@@ -21,14 +21,17 @@ func prepare_evaluation_context() -> GradientEvaluationContext:
 ## Thread-safe version using pre-computed context
 func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
 	var ctx = context as GradientEvaluationContext
-	var local_pos = ctx.to_local(world_pos)
-	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
-	var radius = ctx.influence_size.x
-	
-	if distance_2d >= radius:
+	var radius = ctx.influence_radius
+	if radius <= 0.0:
 		return ctx.end_height
-	
+	var distance_2d = Vector2(
+		world_pos.x - ctx.world_position.x,
+		world_pos.z - ctx.world_position.z
+	).length()
 	var normalized_distance = distance_2d / radius
+	
+	if normalized_distance >= 1.0:
+		return ctx.end_height
 	var t = 0.0
 	
 	match ctx.falloff_type:

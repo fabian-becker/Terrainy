@@ -10,5 +10,5 @@ layer_name = "Grass"
 albedo_texture = ExtResource("1_vhmw2")
 normal_texture = ExtResource("2_lri2s")
 uv_scale = Vector2(64, 64)
-height_max = 10.0
+height_max = 0.0
 metadata/_custom_type_script = "uid://ddlru3rps1tmg"
