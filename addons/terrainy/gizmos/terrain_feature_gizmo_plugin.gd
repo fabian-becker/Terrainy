@@ -142,8 +142,8 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		if "direction" in node:
 			var dir = node.direction as Vector2
 			var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-			var max_size = max(size.x, size.y)
-			back_pos = -dir_3d * max_size
+			var grad_length = size.x
+			back_pos = -dir_3d * grad_length
 		
 		height_lines.push_back(back_pos)
 		height_lines.push_back(back_pos + Vector3(0, start_h, 0))
@@ -153,8 +153,8 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		if "direction" in node:
 			var dir = node.direction as Vector2
 			var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-			var max_size = max(size.x, size.y)
-			front_pos = dir_3d * max_size
+			var grad_length = size.x
+			front_pos = dir_3d * grad_length
 		
 		height_lines.push_back(front_pos)
 		height_lines.push_back(front_pos + Vector3(0, end_h, 0))
@@ -189,7 +189,7 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		handles.push_back(Vector3(falloff_size, 0, 0))
 	
 	# Handle 2: Height control (vertical, for primitives and landscapes)
-	if "height" in node and not ("start_height" in node):
+	if "height" in node:
 		var height_val = node.height
 		handles.push_back(Vector3(0, height_val, 0))
 	
@@ -200,8 +200,8 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		if "direction" in node:
 			var dir = node.direction as Vector2
 			var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-			var max_size = max(size.x, size.y)
-			back_pos = -dir_3d * max_size
+			var grad_length = size.x
+			back_pos = -dir_3d * grad_length
 		handles.push_back(back_pos + Vector3(0, start_h, 0))
 	
 	# Handle 4: End height control (for gradients)
@@ -211,8 +211,8 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		if "direction" in node:
 			var dir = node.direction as Vector2
 			var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-			var max_size = max(size.x, size.y)
-			front_pos = dir_3d * max_size
+			var grad_length = size.x
+			front_pos = dir_3d * grad_length
 		handles.push_back(front_pos + Vector3(0, end_h, 0))
 	
 	# Handle 5: Direction control (for landscapes and gradients)
@@ -283,12 +283,6 @@ func _get_handle_value(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool
 	if not node:
 		return null
 	
-	# Signal that manipulation is starting (first handle grab)
-	if not node.get_meta("_gizmo_manipulating", false):
-		node.set_meta("_gizmo_manipulating", true)
-		node.set_meta("_gizmo_manipulation_time", Time.get_ticks_msec() / 1000.0)
-		gizmo_manipulation_started.emit(node)
-	
 	var handle_index = 0
 	
 	# Handle 0: Size X (width/radius)
@@ -338,6 +332,12 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 	var node = gizmo.get_node_3d() as TerrainFeatureNode
 	if not node:
 		return
+
+	# Signal that manipulation is starting (first handle drag)
+	if not node.get_meta("_gizmo_manipulating", false):
+		node.set_meta("_gizmo_manipulating", true)
+		node.set_meta("_gizmo_manipulation_time", Time.get_ticks_msec() / 1000.0)
+		gizmo_manipulation_started.emit(node)
 	
 	if not is_instance_valid(undo_redo):
 		push_warning("TerrainFeatureGizmoPlugin: undo_redo is invalid, gizmo may not work correctly")
@@ -413,8 +413,8 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 			if "direction" in node:
 				var dir = node.direction as Vector2
 				var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-				var max_size = max(node.influence_size.x, node.influence_size.y)
-				back_pos_global = node.to_global(-dir_3d * max_size)
+				var grad_length = node.influence_size.x
+				back_pos_global = node.to_global(-dir_3d * grad_length)
 				vertical_plane = Plane(Vector3.RIGHT.rotated(Vector3.UP, atan2(dir_3d.z, dir_3d.x)), back_pos_global)
 			var vertical_intersection = vertical_plane.intersects_ray(ray_from, ray_dir)
 			if vertical_intersection != null:
@@ -432,8 +432,8 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 			if "direction" in node:
 				var dir = node.direction as Vector2
 				var dir_3d = Vector3(dir.x, 0, dir.y).normalized()
-				var max_size = max(node.influence_size.x, node.influence_size.y)
-				front_pos_global = node.to_global(dir_3d * max_size)
+				var grad_length = node.influence_size.x
+				front_pos_global = node.to_global(dir_3d * grad_length)
 				vertical_plane = Plane(Vector3.RIGHT.rotated(Vector3.UP, atan2(dir_3d.z, dir_3d.x)), front_pos_global)
 			var vertical_intersection = vertical_plane.intersects_ray(ray_from, ray_dir)
 			if vertical_intersection != null:
@@ -473,7 +473,7 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 		push_warning("TerrainFeatureGizmoPlugin: undo_redo is invalid, changes will not be undoable")
 		# Still emit the parameters_changed signal to update the terrain
 		if was_manipulating:
-			node.parameters_changed.emit()
+			node._commit_parameter_change()
 		return
 	
 	var handle_index = 0
@@ -493,7 +493,7 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 				Vector2(restore, restore) if node.influence_shape == TerrainFeatureNode.InfluenceShape.CIRCLE else Vector2(restore, node.influence_size.y))
 			undo_redo.commit_action()
 		if was_manipulating:
-			node.parameters_changed.emit()
+				node._commit_parameter_change()
 		return
 	handle_index += 1
 	
@@ -509,7 +509,7 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 				undo_redo.add_undo_property(node, "influence_size", Vector2(node.influence_size.x, restore))
 				undo_redo.commit_action()
 			if was_manipulating:
-				node.parameters_changed.emit()
+					node._commit_parameter_change()
 			return
 		handle_index += 1
 	
@@ -524,7 +524,7 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 				undo_redo.add_undo_property(node, "edge_falloff", restore)
 				undo_redo.commit_action()
 			if was_manipulating:
-				node.parameters_changed.emit()
+					node._commit_parameter_change()
 			return
 		handle_index += 1
 	
@@ -539,7 +539,7 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 				undo_redo.add_undo_property(node, "height", restore)
 				undo_redo.commit_action()
 			if was_manipulating:
-				node.parameters_changed.emit()
+					node._commit_parameter_change()
 			return
 		handle_index += 1
 	
@@ -554,7 +554,7 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 				undo_redo.add_undo_property(node, "start_height", restore)
 				undo_redo.commit_action()
 			if was_manipulating:
-				node.parameters_changed.emit()
+					node._commit_parameter_change()
 			return
 		handle_index += 1
 	
@@ -569,7 +569,7 @@ func _commit_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, r
 				undo_redo.add_undo_property(node, "end_height", restore)
 				undo_redo.commit_action()
 			if was_manipulating:
-				node.parameters_changed.emit()
+					node._commit_parameter_change()
 			return
 		handle_index += 1
 	
