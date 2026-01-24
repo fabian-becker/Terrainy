@@ -119,3 +119,20 @@ func _get_heightmap_data() -> PackedFloat32Array:
 	_cached_height_data = data
 	_cached_height_size = Vector2i(img.get_width(), img.get_height())
 	return _cached_height_data
+
+func get_gpu_param_pack() -> Dictionary:
+	var height_data = _get_heightmap_data()
+	var size = _cached_height_size
+	var extra_floats := PackedFloat32Array([height_scale, height_offset])
+	var data_offset = 19 + extra_floats.size()
+	if not height_data.is_empty():
+		extra_floats.append_array(height_data)
+	var extra_ints := PackedInt32Array([
+		int(wrap_mode),
+		1 if invert else 0,
+		size.x,
+		size.y,
+		data_offset,
+		height_data.size()
+	])
+	return _build_gpu_param_pack(FeatureType.HEIGHTMAP, extra_floats, extra_ints)

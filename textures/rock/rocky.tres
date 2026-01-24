@@ -14,4 +14,5 @@ normal_texture = ExtResource("2_0qvy0")
 roughness_texture = ExtResource("3_43dt7")
 uv_scale = Vector2(64, 64)
 height_min = 0.0
+slope_min = 12.0
 metadata/_custom_type_script = "uid://ddlru3rps1tmg"

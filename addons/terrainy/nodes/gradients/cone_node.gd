@@ -34,3 +34,7 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 	var height_factor = pow(1.0 - normalized_distance, ctx.sharpness)
 	
 	return lerp(ctx.end_height, ctx.start_height, height_factor)
+
+func get_gpu_param_pack() -> Dictionary:
+	var extra_floats := PackedFloat32Array([start_height, end_height, sharpness])
+	return _build_gpu_param_pack(FeatureType.GRADIENT_CONE, extra_floats, PackedInt32Array())

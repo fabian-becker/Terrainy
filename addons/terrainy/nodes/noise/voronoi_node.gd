@@ -52,3 +52,12 @@ func get_height_at(world_pos: Vector3) -> float:
 	var height = (voronoi_value + 1.0) * 0.5 * amplitude
 	
 	return height
+
+func get_gpu_param_pack() -> Dictionary:
+	var freq = noise.frequency if noise else 0.0
+	var seed = noise.seed if noise else 0
+	var distance_function = noise.cellular_distance_function if noise else 0
+	var return_type = noise.cellular_return_type if noise else 0
+	var extra_floats := PackedFloat32Array([amplitude, freq])
+	var extra_ints := PackedInt32Array([distance_mode, distance_function, return_type, seed])
+	return _build_gpu_param_pack(FeatureType.NOISE_VORONOI, extra_floats, extra_ints)

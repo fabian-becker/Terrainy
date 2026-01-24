@@ -126,7 +126,7 @@ var _pending_chunk_results: Array = []
 var _pending_chunk_rebuild_id: int = 0
 var _chunk_thread_started: bool = false
 var _chunk_thread_seen_alive: bool = false
-const CHUNK_LOG_THRESHOLD_MS = 10
+const CHUNK_LOG_THRESHOLD_MS = 100
 
 # Terrain state
 var _final_heightmap: Image
@@ -227,6 +227,7 @@ func _exit_tree() -> void:
 	_feature_bounds_cache.clear()
 
 func _scan_features() -> void:
+	var previous_features = _feature_nodes.duplicate()
 	# Disconnect old signals
 	for feature in _feature_nodes:
 		if is_instance_valid(feature) and feature.parameters_changed.is_connected(_on_feature_changed):
@@ -234,6 +235,15 @@ func _scan_features() -> void:
 	
 	_feature_nodes.clear()
 	_scan_recursive(self)
+
+	var features_changed = false
+	if previous_features.size() != _feature_nodes.size():
+		features_changed = true
+	else:
+		for feature in previous_features:
+			if not _feature_nodes.has(feature):
+				features_changed = true
+				break
 	
 	# Drop cached bounds for removed features
 	var removed_features: Array = []
@@ -249,6 +259,10 @@ func _scan_features() -> void:
 			_heightmap_composer.invalidate_heightmap(removed_feature)
 			_heightmap_composer.invalidate_influence(removed_feature)
 		_feature_bounds_cache.erase(removed_feature)
+		_heightmap_dirty_pending = true
+
+	if features_changed:
+		_mark_all_chunks_dirty()
 		_heightmap_dirty_pending = true
 	
 	# Connect new signals
@@ -398,6 +412,13 @@ func rebuild_terrain() -> void:
 		base_height,
 		use_gpu_composition
 	)
+	if _final_heightmap == null:
+		push_error("[TerrainComposer] Heightmap composition failed; aborting rebuild")
+		_is_generating = false
+		if _coordinator_rebuild_pending and Engine.has_singleton("TerrainRebuildCoordinator"):
+			TerrainRebuildCoordinator.rebuild_completed(self)
+			_coordinator_rebuild_pending = false
+		return
 	var compose_elapsed = Time.get_ticks_msec() - compose_start
 	print("[TerrainComposer] Rebuild #%d compose time: %d ms" % [_rebuild_id, compose_elapsed])
 	
@@ -555,9 +576,26 @@ func _get_feature_world_bounds(feature: TerrainFeatureNode) -> Rect2:
 		TerrainFeatureNode.InfluenceShape.CIRCLE:
 			var radius = max(feature.influence_size.x, feature.influence_size.y)
 			half_size = Vector2(radius, radius)
+			return Rect2(center - half_size, half_size * 2.0)
 		_:
 			half_size = feature.influence_size * 0.5
-	return Rect2(center - half_size, half_size * 2.0)
+			var corners = [
+				Vector3(-half_size.x, 0, -half_size.y),
+				Vector3(half_size.x, 0, -half_size.y),
+				Vector3(half_size.x, 0, half_size.y),
+				Vector3(-half_size.x, 0, half_size.y)
+			]
+			var min_x = INF
+			var min_z = INF
+			var max_x = -INF
+			var max_z = -INF
+			for corner in corners:
+				var world_corner = feature.global_transform * corner
+				min_x = min(min_x, world_corner.x)
+				min_z = min(min_z, world_corner.z)
+				max_x = max(max_x, world_corner.x)
+				max_z = max(max_z, world_corner.z)
+			return Rect2(Vector2(min_x, min_z), Vector2(max_x - min_x, max_z - min_z))
 
 func _get_chunks_affected_by_feature(feature: TerrainFeatureNode) -> Array[TerrainChunk]:
 	var bounds = _get_feature_world_bounds(feature)

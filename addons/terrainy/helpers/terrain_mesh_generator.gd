@@ -4,7 +4,7 @@ extends RefCounted
 ## Helper class for generating terrain meshes from heightmaps
 ## Generates ArrayMesh from heightmap images
 
-const LOG_THRESHOLD_MS = 10
+const LOG_THRESHOLD_MS = 100
 
 ## Generate terrain mesh from heightmap
 static func generate_from_heightmap(

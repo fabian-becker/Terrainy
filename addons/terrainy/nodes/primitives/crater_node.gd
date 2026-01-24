@@ -66,3 +66,7 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 			result_height = lerp(rim_height, 0.0, smoothstep(0.0, 1.0, fall_t))
 	
 	return result_height
+
+func get_gpu_param_pack() -> Dictionary:
+	var extra_floats := PackedFloat32Array([height, rim_height, rim_width, floor_radius_ratio])
+	return _build_gpu_param_pack(FeatureType.PRIMITIVE_CRATER, extra_floats, PackedInt32Array())

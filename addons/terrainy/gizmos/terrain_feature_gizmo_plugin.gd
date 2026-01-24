@@ -175,17 +175,22 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 	# Add handles
 	var handles = PackedVector3Array()
 	var handle_ids = PackedInt32Array()
+	var half_size = size * 0.5
 	
 	# Handle 0: Size control (right side for width)
-	handles.push_back(Vector3(size.x, 0, 0))
+	if node.influence_shape == TerrainFeatureNode.InfluenceShape.CIRCLE:
+		handles.push_back(Vector3(size.x, 0, 0))
+	else:
+		handles.push_back(Vector3(half_size.x, 0, 0))
 	
 	# Handle 1: Size control (depth, for rectangle and ellipse)
 	if node.influence_shape != TerrainFeatureNode.InfluenceShape.CIRCLE:
-		handles.push_back(Vector3(0, 0, size.y))
+		handles.push_back(Vector3(0, 0, half_size.y))
 	
 	# Handle 2: Falloff control (if falloff exists)
 	if node.edge_falloff > 0.0:
-		var falloff_size = size.x * (1.0 - node.edge_falloff)
+		var falloff_extent = size.x if node.influence_shape == TerrainFeatureNode.InfluenceShape.CIRCLE else half_size.x
+		var falloff_size = falloff_extent * (1.0 - node.edge_falloff)
 		handles.push_back(Vector3(falloff_size, 0, 0))
 	
 	# Handle 2: Height control (vertical, for primitives and landscapes)
@@ -355,10 +360,11 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 		var intersection = plane.intersects_ray(ray_from, ray_dir)
 		if intersection != null:
 			var local_intersection = node.to_local(intersection)
-			var new_size_x = max(1.0, abs(local_intersection.x))
 			if node.influence_shape == TerrainFeatureNode.InfluenceShape.CIRCLE:
-				node.influence_size = Vector2(new_size_x, new_size_x)
+				var new_radius = max(1.0, abs(local_intersection.x))
+				node.influence_size = Vector2(new_radius, new_radius)
 			else:
+				var new_size_x = max(1.0, abs(local_intersection.x) * 2.0)
 				node.influence_size.x = new_size_x
 		_redraw(gizmo)
 		return
@@ -371,7 +377,7 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 			var intersection = plane.intersects_ray(ray_from, ray_dir)
 			if intersection != null:
 				var local_intersection = node.to_local(intersection)
-				node.influence_size.y = max(1.0, abs(local_intersection.z))
+				node.influence_size.y = max(1.0, abs(local_intersection.z) * 2.0)
 			_redraw(gizmo)
 			return
 		handle_index += 1
@@ -385,6 +391,8 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 				var local_intersection = node.to_local(intersection)
 				var distance = Vector2(local_intersection.x, local_intersection.z).length()
 				var max_size = max(node.influence_size.x, node.influence_size.y)
+				if node.influence_shape != TerrainFeatureNode.InfluenceShape.CIRCLE:
+					max_size *= 0.5
 				var new_falloff_radius = max(0.1, distance)
 				node.edge_falloff = clamp(1.0 - (new_falloff_radius / max_size), 0.0, 1.0)
 			_redraw(gizmo)

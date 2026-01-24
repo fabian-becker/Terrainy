@@ -91,6 +91,32 @@ func get_distance_perpendicular(local_pos: Vector3) -> float:
 func get_lateral_distance(local_pos: Vector3) -> float:
 	return abs(get_distance_perpendicular(local_pos))
 
+## Get normalized distance from center based on influence shape.
+## Returns 0 at center, 1 at edge, >1 outside.
+func get_influence_normalized_distance(local_pos: Vector3) -> float:
+	match influence_shape:
+		TerrainFeatureNode.InfluenceShape.CIRCLE:
+			var radius = max(influence_radius, 0.0001)
+			return Vector2(local_pos.x, local_pos.z).length() / radius
+		TerrainFeatureNode.InfluenceShape.RECTANGLE:
+			var half_size = influence_size * 0.5
+			if half_size.x <= 0.0 or half_size.y <= 0.0:
+				return INF
+			return max(abs(local_pos.x) / half_size.x, abs(local_pos.z) / half_size.y)
+		TerrainFeatureNode.InfluenceShape.ELLIPSE:
+			var half_size = influence_size * 0.5
+			if half_size.x <= 0.0 or half_size.y <= 0.0:
+				return INF
+			var nx = local_pos.x / half_size.x
+			var nz = local_pos.z / half_size.y
+			return sqrt(nx * nx + nz * nz)
+		_:
+			return 0.0
+
+## Check if a local position is inside the influence shape.
+func is_inside_influence(local_pos: Vector3) -> bool:
+	return get_influence_normalized_distance(local_pos) < 1.0
+
 ## Get primary noise value at a world position (thread-safe).
 func get_primary_noise(world_pos: Vector3) -> float:
 	if not primary_noise:
