@@ -10,17 +10,21 @@ const TerrainFeatureNode = "res://addons/terrainy/nodes/terrain_feature_node.gd"
 @export var amplitude: float = 5.0:
 	set(value):
 		amplitude = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var noise: FastNoiseLite:
 	set(value):
 		noise = value
 		if noise and not noise.changed.is_connected(_on_noise_changed):
 			noise.changed.connect(_on_noise_changed)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 func _on_noise_changed() -> void:
-	parameters_changed.emit()
+	_commit_parameter_change()
+
+func _ready() -> void:
+	if noise and not noise.changed.is_connected(_on_noise_changed):
+		noise.changed.connect(_on_noise_changed)
 
 ## Bulk heightmap generation for noise-based nodes (FastNoiseLite)
 func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:

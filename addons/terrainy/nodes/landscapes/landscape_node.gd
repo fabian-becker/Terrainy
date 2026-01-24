@@ -22,7 +22,11 @@ const TerrainFeatureNode = "res://addons/terrainy/nodes/terrain_feature_node.gd"
 		noise = value
 		if noise and not noise.changed.is_connected(_on_noise_changed):
 			noise.changed.connect(_on_noise_changed)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 func _on_noise_changed() -> void:
-	parameters_changed.emit()
+	_commit_parameter_change()
+
+func _ready() -> void:
+	if noise and not noise.changed.is_connected(_on_noise_changed):
+		noise.changed.connect(_on_noise_changed)

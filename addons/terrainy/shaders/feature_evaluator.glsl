@@ -94,8 +94,52 @@ float mountain_multiplier(float normalized_distance, int peak_type) {
 	return 1.0 - normalized_distance;
 }
 
-float hash_noise(vec2 p, float seed) {
-	return fract(sin(dot(p, vec2(12.9898, 78.233)) + seed) * 43758.5453);
+float hash12(vec2 p, float seed) {
+	return fract(sin(dot(p, vec2(127.1, 311.7)) + seed * 0.001) * 43758.5453);
+}
+
+vec2 grad2(vec2 p, float seed) {
+	float angle = hash12(p, seed) * 6.28318530718;
+	return vec2(cos(angle), sin(angle));
+}
+
+float perlin2(vec2 p, float seed) {
+	vec2 ip = floor(p);
+	vec2 fp = fract(p);
+	vec2 u = fp * fp * (3.0 - 2.0 * fp);
+
+	float n00 = dot(grad2(ip + vec2(0.0, 0.0), seed), fp - vec2(0.0, 0.0));
+	float n10 = dot(grad2(ip + vec2(1.0, 0.0), seed), fp - vec2(1.0, 0.0));
+	float n01 = dot(grad2(ip + vec2(0.0, 1.0), seed), fp - vec2(0.0, 1.0));
+	float n11 = dot(grad2(ip + vec2(1.0, 1.0), seed), fp - vec2(1.0, 1.0));
+
+	float nx0 = mix(n00, n10, u.x);
+	float nx1 = mix(n01, n11, u.x);
+	return mix(nx0, nx1, u.y);
+}
+
+void cellular2(vec2 p, float seed, out float f1, out float f2, out float cell_value) {
+	vec2 ip = floor(p);
+	f1 = 1e9;
+	f2 = 1e9;
+	cell_value = 0.0;
+	for (int y = -1; y <= 1; y++) {
+		for (int x = -1; x <= 1; x++) {
+			vec2 cell = ip + vec2(x, y);
+			vec2 rand = vec2(hash12(cell, seed), hash12(cell + 13.37, seed));
+			vec2 diff = (cell + rand) - p;
+			float d = dot(diff, diff);
+			if (d < f1) {
+				f2 = f1;
+				f1 = d;
+				cell_value = rand.x;
+			} else if (d < f2) {
+				f2 = d;
+			}
+		}
+	}
+	f1 = sqrt(f1);
+	f2 = sqrt(f2);
 }
 
 vec2 rotate2d(vec2 p, float angle) {
@@ -229,8 +273,7 @@ void main() {
 		float multiplier = mountain_multiplier(nd, peak_type);
 		height = mountain_height * multiplier;
 		if (noise_enabled == 1 && noise_strength > 0.0) {
-			float n = hash_noise(vec2(world_x * noise_frequency, world_z * noise_frequency), float(get_int(4)));
-			float n_signed = n * 2.0 - 1.0;
+			float n_signed = perlin2(vec2(world_x * noise_frequency, world_z * noise_frequency), float(get_int(4)));
 			height += n_signed * mountain_height * noise_strength * multiplier;
 		}
 	} else if (params.feature_type == FEATURE_PRIMITIVE_CRATER) {
@@ -296,8 +339,7 @@ void main() {
 				height = island_height - (island_height - beach_height) * inland_t;
 			}
 			if (noise_enabled == 1 && noise_strength > 0.0) {
-				float n = hash_noise(vec2(world_x * noise_frequency, world_z * noise_frequency), float(get_int(3)));
-				float n_signed = n * 2.0 - 1.0;
+				float n_signed = perlin2(vec2(world_x * noise_frequency, world_z * noise_frequency), float(get_int(3)));
 				height += height * (n_signed * noise_strength);
 			}
 			height = max(0.0, height);
@@ -417,7 +459,7 @@ void main() {
 			height = 0.0;
 		} else {
 			float lateral_distance = abs(dot(local_pos.xz, perp));
-			float meander = (hash_noise(vec2(world_x * noise_frequency, world_z * noise_frequency), float(get_int(2))) * 2.0 - 1.0) * canyon_width * meander_strength;
+			float meander = perlin2(vec2(world_x * noise_frequency, world_z * noise_frequency), float(get_int(2))) * canyon_width * meander_strength;
 			lateral_distance += meander;
 			float half_width = canyon_width * 0.5;
 			if (lateral_distance < half_width) {
@@ -450,9 +492,9 @@ void main() {
 			ridge_falloff = max(0.0, ridge_falloff);
 			height = range_height * ridge_falloff;
 			float along_ridge = dot(local_pos.xz, dir);
-			float peak_var = (hash_noise(vec2(along_ridge * peak_freq, 0.0), float(get_int(2))) * 2.0 - 1.0);
+			float peak_var = perlin2(vec2(along_ridge * peak_freq, 0.0), float(get_int(2)));
 			height *= 0.7 + peak_var * 0.3;
-			float detail = (hash_noise(vec2(world_x * detail_freq, world_z * detail_freq), float(get_int(3))) * 2.0 - 1.0);
+			float detail = perlin2(vec2(world_x * detail_freq, world_z * detail_freq), float(get_int(3)));
 			height += height * detail * 0.2;
 		}
 	} else if (params.feature_type == FEATURE_LANDSCAPE_DUNE_SEA) {
@@ -467,13 +509,13 @@ void main() {
 			height = 0.0;
 		} else {
 			float across_wind = dot(local_pos.xz, perp);
-			float primary_noise = (hash_noise(vec2(world_x * primary_freq, world_z * primary_freq), float(get_int(2))) * 2.0 - 1.0);
+			float primary_noise = perlin2(vec2(world_x * primary_freq, world_z * primary_freq), float(get_int(2)));
 			float dune_pattern = sin(across_wind * dune_frequency * 10.0 + primary_noise * 3.0);
 			dune_pattern = (dune_pattern + 1.0) * 0.5;
-			float height_variation = (hash_noise(vec2(world_x * 0.5, world_z * 0.5), float(get_int(2))) * 2.0 - 1.0);
+			float height_variation = perlin2(vec2(world_x * 0.5, world_z * 0.5), float(get_int(2)));
 			dune_pattern *= (0.5 + height_variation * 0.5);
 			height = dune_height * dune_pattern;
-			float ripples = (hash_noise(vec2(world_x * detail_freq, world_z * detail_freq), float(get_int(3))) * 2.0 - 1.0);
+			float ripples = perlin2(vec2(world_x * detail_freq, world_z * detail_freq), float(get_int(3)));
 			height += ripples * 0.3;
 			float edge_fade = 1.0 - pow(normalized_distance, 2.0);
 			height *= edge_fade;
@@ -481,20 +523,23 @@ void main() {
 	} else if (params.feature_type == FEATURE_NOISE_PERLIN) {
 		float amplitude = get_float(19);
 		float frequency = get_float(20);
-		float n = hash_noise(vec2(world_x * frequency, world_z * frequency), float(get_int(3)));
-		float n_signed = n * 2.0 - 1.0;
+		float n_signed = perlin2(vec2(world_x * frequency, world_z * frequency), float(get_int(3)));
 		height = (n_signed + 1.0) * 0.5 * amplitude;
 	} else if (params.feature_type == FEATURE_NOISE_VORONOI) {
 		float amplitude = get_float(19);
 		float frequency = get_float(20);
 		int distance_mode = get_int(2);
-		float n = hash_noise(vec2(world_x * frequency, world_z * frequency), float(get_int(5)));
-		float n_signed = n * 2.0 - 1.0;
-		float h = (n_signed + 1.0) * 0.5;
-		if (distance_mode == 2) {
-			h = abs(n_signed);
+		float f1;
+		float f2;
+		float cell_val;
+		cellular2(vec2(world_x * frequency, world_z * frequency), float(get_int(5)), f1, f2, cell_val);
+		float h = f1;
+		if (distance_mode == 1) {
+			h = f2;
+		} else if (distance_mode == 2) {
+			h = f2 - f1;
 		} else if (distance_mode == 3) {
-			h = n;
+			h = cell_val;
 		}
 		height = h * amplitude;
 	}

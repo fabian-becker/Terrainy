@@ -52,17 +52,18 @@ frequency = 0.005
 fractal_type = 0
 
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_50dxj"]
-noise_type = 3
-seed = 1281261962
-frequency = 0.02
+noise_type = 2
+seed = 1281261964
+fractal_octaves = 6
+cellular_distance_function = 1
 
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_v4gbn"]
-seed = 1596524431
-fractal_octaves = 2
+seed = 130
+fractal_octaves = 8
 
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_7tomh"]
-seed = 1382240560
-frequency = 0.0035
+seed = 1382240665
+frequency = 0.1
 fractal_type = 2
 
 [node name="Node3D" type="Node3D"]
@@ -95,8 +96,7 @@ metadata/_gizmo_manipulating = false
 [node name="MountainNode" type="Node3D" parent="TerrainComposer"]
 script = ExtResource("7_s0usi")
 noise = SubResource("FastNoiseLite_50dxj")
-noise_strength = 0.2
-height = 127.37419
+height = 130.0
 influence_size = Vector2(319.3083, 319.3083)
 edge_falloff = 0.8089090569194924
 metadata/_custom_type_script = "uid://b06n2v4b3hlyt"
@@ -107,10 +107,9 @@ transform = Transform3D(-0.6437631, 0, 0.7652249, 0, 1, 0, -0.7652249, 0, -0.643
 script = ExtResource("8_50dxj")
 peak_noise = SubResource("FastNoiseLite_v4gbn")
 detail_noise = SubResource("FastNoiseLite_7tomh")
-height = 223.6429
-direction = Vector2(0.9932381, 0.11609532)
+height = 181.88158
 influence_shape = 2
-influence_size = Vector2(501.42172, 331.79688)
-edge_falloff = 0.6996719898077897
+influence_size = Vector2(473.31656, 240.008)
+edge_falloff = 0.7
 metadata/_custom_type_script = "uid://dru71ftjlqkij"
 metadata/_gizmo_manipulating = false
