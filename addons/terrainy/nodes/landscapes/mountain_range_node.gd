@@ -15,21 +15,21 @@ const LandscapeEvaluationContext = preload("res://addons/terrainy/nodes/landscap
 @export var ridge_sharpness: float = 0.5:
 	set(value):
 		ridge_sharpness = clamp(value, 0.1, 2.0)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var peak_noise: FastNoiseLite:
 	set(value):
 		peak_noise = value
 		if peak_noise and not peak_noise.changed.is_connected(_on_noise_changed):
 			peak_noise.changed.connect(_on_noise_changed)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var detail_noise: FastNoiseLite:
 	set(value):
 		detail_noise = value
 		if detail_noise and not detail_noise.changed.is_connected(_on_noise_changed):
 			detail_noise.changed.connect(_on_noise_changed)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 func _ready() -> void:
 	if not peak_noise:
@@ -43,6 +43,11 @@ func _ready() -> void:
 		detail_noise.seed = randi() + 1000
 		detail_noise.frequency = 0.05
 		detail_noise.fractal_octaves = 4
+	
+	if peak_noise and not peak_noise.changed.is_connected(_on_noise_changed):
+		peak_noise.changed.connect(_on_noise_changed)
+	if detail_noise and not detail_noise.changed.is_connected(_on_noise_changed):
+		detail_noise.changed.connect(_on_noise_changed)
 
 func prepare_evaluation_context() -> LandscapeEvaluationContext:
 	var ctx = LandscapeEvaluationContext.from_landscape_feature(self, height, direction)

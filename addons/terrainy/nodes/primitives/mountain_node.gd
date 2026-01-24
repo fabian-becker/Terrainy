@@ -10,19 +10,19 @@ const PrimitiveEvaluationContext = preload("res://addons/terrainy/nodes/primitiv
 @export_enum("Sharp", "Rounded", "Plateau") var peak_type: int = 0:
 	set(value):
 		peak_type = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var noise: FastNoiseLite:
 	set(value):
 		noise = value
 		if noise and not noise.changed.is_connected(_on_noise_changed):
 			noise.changed.connect(_on_noise_changed)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var noise_strength: float = 0.15:
 	set(value):
 		noise_strength = clamp(value, 0.0, 1.0)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 func _ready() -> void:
 	if not noise:
@@ -30,9 +30,11 @@ func _ready() -> void:
 		noise.seed = randi()
 		noise.frequency = 0.02
 		noise.noise_type = FastNoiseLite.TYPE_PERLIN
+	if noise and not noise.changed.is_connected(_on_noise_changed):
+		noise.changed.connect(_on_noise_changed)
 
 func _on_noise_changed() -> void:
-	parameters_changed.emit()
+	_commit_parameter_change()
 
 func prepare_evaluation_context() -> PrimitiveEvaluationContext:
 	var ctx = PrimitiveEvaluationContext.from_primitive_feature(self, height, peak_type)

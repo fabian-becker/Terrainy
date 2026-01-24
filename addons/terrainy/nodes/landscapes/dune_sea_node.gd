@@ -10,14 +10,14 @@ const LandscapeEvaluationContext = preload("res://addons/terrainy/nodes/landscap
 @export var dune_frequency: float = 0.015:
 	set(value):
 		dune_frequency = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var detail_noise: FastNoiseLite:
 	set(value):
 		detail_noise = value
 		if detail_noise and not detail_noise.changed.is_connected(_on_noise_changed):
 			detail_noise.changed.connect(_on_noise_changed)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 func _ready() -> void:
 	if not noise:
@@ -32,6 +32,11 @@ func _ready() -> void:
 		detail_noise.seed = randi() + 500
 		detail_noise.frequency = 0.15
 		detail_noise.fractal_octaves = 2
+	
+	if noise and not noise.changed.is_connected(_on_noise_changed):
+		noise.changed.connect(_on_noise_changed)
+	if detail_noise and not detail_noise.changed.is_connected(_on_noise_changed):
+		detail_noise.changed.connect(_on_noise_changed)
 
 func prepare_evaluation_context() -> LandscapeEvaluationContext:
 	var ctx = LandscapeEvaluationContext.from_landscape_feature(self, height, direction)

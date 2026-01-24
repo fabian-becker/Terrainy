@@ -10,17 +10,17 @@ const LandscapeEvaluationContext = preload("res://addons/terrainy/nodes/landscap
 @export var canyon_width: float = 20.0:
 	set(value):
 		canyon_width = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var wall_slope: float = 0.8:
 	set(value):
 		wall_slope = clamp(value, 0.1, 2.0)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var meander_strength: float = 0.1:
 	set(value):
 		meander_strength = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 func _ready() -> void:
 	if not noise:
