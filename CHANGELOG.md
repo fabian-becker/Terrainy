@@ -7,19 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- Heightmap node for sampling heightmap textures into world-space terrain features
+## [0.4.1] - 2026-01-24
 
 ### Changed
-- Moved evaluation context helpers into their feature folders (nodes/*) and updated node preload paths
-- Gradient and shape nodes now use thread-safe evaluation contexts for height sampling
-- Terrain feature modifiers are now applied during context-based heightmap generation (CPU-safe)
-- Terrain composer now marks chunks dirty when resolution/base height changes and when features are removed
-- Noise nodes reorganized under the noise category with updated type registrations
-- Demo scene and example texture layers updated for new height blending settings
+- Gradient gizmo handles now use the gradient length for front/back controls
+- Gizmo manipulation begins on drag and commits parameter changes on release
+- Radial gradient safe sampling now uses influence radius and world-position distance
+- Terrain composer defers rebuilds during initial setup to avoid premature rescans
+- Texture layer height thresholds adjusted for rocky and rocky_terrain examples
 
 ### Fixed
-- Cache invalidation when features are removed now triggers height/influence cache resets and chunk dirties
+- Terrain feature smoothing cache now clears on parameter commits
 
 ## [0.3.0] - 2026-01-22
 
@@ -139,6 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom terrain shader with multi-layer support
 - PBR material workflow compatibility
 
+[0.4.1]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.4.1
 [0.3.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.3.0
 [0.2.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.2.0
 [0.1.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.1.0
