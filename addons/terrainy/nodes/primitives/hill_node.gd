@@ -31,3 +31,8 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 	
 	var normalized_distance = distance_2d / radius
 	return ctx.height * ctx.get_shape_multiplier(normalized_distance)
+
+func get_gpu_param_pack() -> Dictionary:
+	var extra_floats := PackedFloat32Array([height])
+	var extra_ints := PackedInt32Array([shape])
+	return _build_gpu_param_pack(FeatureType.PRIMITIVE_HILL, extra_floats, extra_ints)

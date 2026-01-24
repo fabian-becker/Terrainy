@@ -52,3 +52,9 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 			t = 1.0 - (1.0 - t) * (1.0 - t)
 	
 	return lerp(ctx.start_height, ctx.end_height, t)
+
+func get_gpu_param_pack() -> Dictionary:
+	var dir = direction.normalized()
+	var extra_floats := PackedFloat32Array([start_height, end_height, dir.x, dir.y])
+	var extra_ints := PackedInt32Array([interpolation])
+	return _build_gpu_param_pack(FeatureType.GRADIENT_LINEAR, extra_floats, extra_ints)

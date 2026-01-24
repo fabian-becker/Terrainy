@@ -48,11 +48,8 @@ func get_height_at(world_pos: Vector3) -> float:
 func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
 	var ctx = context as LandscapeEvaluationContext
 	var local_pos = ctx.to_local(world_pos)
-	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
-	
-	var radius = ctx.influence_radius
-	
-	if distance_2d >= radius:
+	var normalized_distance = ctx.get_influence_normalized_distance(local_pos)
+	if normalized_distance >= 1.0:
 		return 0.0
 	
 	# Directional dune pattern (ridges perpendicular to wind)
@@ -78,7 +75,17 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 		result_height += ripples * 0.3
 	
 	# Fade at edges
-	var edge_fade = 1.0 - pow(distance_2d / radius, 2.0)
+	var edge_fade = 1.0 - pow(normalized_distance, 2.0)
 	result_height *= edge_fade
 	
 	return result_height
+
+func get_gpu_param_pack() -> Dictionary:
+	var dir = direction.normalized()
+	var primary_freq = noise.frequency if noise else 0.0
+	var detail_freq = detail_noise.frequency if detail_noise else 0.0
+	var primary_seed = noise.seed if noise else 0
+	var detail_seed = detail_noise.seed if detail_noise else 0
+	var extra_floats := PackedFloat32Array([height, dir.x, dir.y, dune_frequency, primary_freq, detail_freq])
+	var extra_ints := PackedInt32Array([primary_seed, detail_seed])
+	return _build_gpu_param_pack(FeatureType.LANDSCAPE_DUNE_SEA, extra_floats, extra_ints)

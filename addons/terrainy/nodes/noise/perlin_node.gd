@@ -29,3 +29,11 @@ func get_height_at(world_pos: Vector3) -> float:
 func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
 	var ctx = context as NoiseEvaluationContext
 	return ctx.get_noise_normalized(world_pos) * ctx.amplitude
+
+func get_gpu_param_pack() -> Dictionary:
+	var freq = noise.frequency if noise else 0.0
+	var seed = noise.seed if noise else 0
+	var noise_type = noise.noise_type if noise else 0
+	var extra_floats := PackedFloat32Array([amplitude, freq])
+	var extra_ints := PackedInt32Array([noise_type, seed])
+	return _build_gpu_param_pack(FeatureType.NOISE_PERLIN, extra_floats, extra_ints)

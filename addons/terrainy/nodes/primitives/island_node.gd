@@ -79,3 +79,12 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 		result_height += result_height * noise_detail
 	
 	return max(0.0, result_height)
+
+func get_gpu_param_pack() -> Dictionary:
+	var noise_enabled = 1 if noise != null else 0
+	var noise_frequency = noise.frequency if noise else 0.0
+	var noise_seed = noise.seed if noise else 0
+	var noise_type = noise.noise_type if noise else 0
+	var extra_floats := PackedFloat32Array([height, beach_width, beach_height, noise_strength, noise_frequency])
+	var extra_ints := PackedInt32Array([noise_type, noise_seed, noise_enabled])
+	return _build_gpu_param_pack(FeatureType.PRIMITIVE_ISLAND, extra_floats, extra_ints)

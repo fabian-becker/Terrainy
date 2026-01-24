@@ -59,3 +59,7 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 		result_height = ctx.height * pow(1.0 - slope_distance, ctx.volcano_slope_concavity)
 	
 	return result_height
+
+func get_gpu_param_pack() -> Dictionary:
+	var extra_floats := PackedFloat32Array([height, crater_radius_ratio, crater_depth, slope_concavity])
+	return _build_gpu_param_pack(FeatureType.PRIMITIVE_VOLCANO, extra_floats, PackedInt32Array())

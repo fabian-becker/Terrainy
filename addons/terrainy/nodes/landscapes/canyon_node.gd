@@ -39,6 +39,9 @@ func get_height_at(world_pos: Vector3) -> float:
 func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
 	var ctx = context as LandscapeEvaluationContext
 	var local_pos = ctx.to_local(world_pos)
+	var normalized_distance = ctx.get_influence_normalized_distance(local_pos)
+	if normalized_distance >= 1.0:
+		return 0.0
 	# Calculate distance perpendicular to canyon direction
 	var lateral_distance = abs(ctx.get_lateral_distance(local_pos))
 	
@@ -59,3 +62,11 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 	else:
 		# Outside canyon influence
 		return 0.0
+
+func get_gpu_param_pack() -> Dictionary:
+	var dir = direction.normalized()
+	var noise_freq = noise.frequency if noise else 0.0
+	var noise_seed = noise.seed if noise else 0
+	var extra_floats := PackedFloat32Array([height, dir.x, dir.y, canyon_width, wall_slope, meander_strength, noise_freq])
+	var extra_ints := PackedInt32Array([noise_seed])
+	return _build_gpu_param_pack(FeatureType.LANDSCAPE_CANYON, extra_floats, extra_ints)

@@ -105,3 +105,8 @@ func _calculate_shape_distance(pos: Vector2) -> float:
 			return min(abs_pos.x, abs_pos.y) * 2.0 + max(abs_pos.x, abs_pos.y) * 0.5
 	
 	return pos.length()
+
+func get_gpu_param_pack() -> Dictionary:
+	var extra_floats := PackedFloat32Array([shape_height, smoothness, deg_to_rad(shape_rotation)])
+	var extra_ints := PackedInt32Array([shape_type])
+	return _build_gpu_param_pack(FeatureType.SHAPE, extra_floats, extra_ints)

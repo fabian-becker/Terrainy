@@ -36,6 +36,28 @@ enum BlendMode {
 	AVERAGE
 }
 
+const GPU_PARAM_VERSION: int = 1
+
+enum FeatureType {
+	UNKNOWN = 0,
+	PRIMITIVE_HILL = 100,
+	PRIMITIVE_MOUNTAIN = 101,
+	PRIMITIVE_CRATER = 102,
+	PRIMITIVE_VOLCANO = 103,
+	PRIMITIVE_ISLAND = 104,
+	SHAPE = 200,
+	HEIGHTMAP = 210,
+	GRADIENT_LINEAR = 300,
+	GRADIENT_RADIAL = 301,
+	GRADIENT_CONE = 302,
+	GRADIENT_HEMISPHERE = 303,
+	LANDSCAPE_CANYON = 400,
+	LANDSCAPE_MOUNTAIN_RANGE = 401,
+	LANDSCAPE_DUNE_SEA = 402,
+	NOISE_PERLIN = 500,
+	NOISE_VORONOI = 501
+}
+
 ## Shape of the influence area
 @export var influence_shape: InfluenceShape = InfluenceShape.CIRCLE:
 	set(value):
@@ -158,7 +180,7 @@ static func _get_gpu_modifier_processor() -> GpuHeightmapModifier:
 	if not _gpu_modifier_processor:
 		_gpu_modifier_processor = GpuHeightmapModifier.new()
 		if not _gpu_modifier_processor.is_available():
-			push_warning("[TerrainFeatureNode] GPU modifiers unavailable, will use CPU fallback")
+			push_warning("[TerrainFeatureNode] GPU modifiers unavailable")
 	return _gpu_modifier_processor
 
 ## Prepare an immutable evaluation context for thread-safe evaluation.
@@ -177,6 +199,48 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 ## This avoids calling to_local() or accessing scene tree in worker threads.
 func get_influence_weight_safe(world_pos: Vector3, context: EvaluationContext) -> float:
 	return context.get_influence_weight(world_pos)
+
+## GPU parameter pack for compute kernels (versioned layout)
+func get_gpu_param_pack() -> Dictionary:
+	return _build_gpu_param_pack(FeatureType.UNKNOWN, PackedFloat32Array(), PackedInt32Array())
+
+func _build_gpu_param_pack(feature_type: int, extra_floats: PackedFloat32Array, extra_ints: PackedInt32Array) -> Dictionary:
+	var floats = _get_gpu_base_floats()
+	if not extra_floats.is_empty():
+		floats.append_array(extra_floats)
+	var ints = _get_gpu_base_ints()
+	if not extra_ints.is_empty():
+		ints.append_array(extra_ints)
+	return {
+		"version": GPU_PARAM_VERSION,
+		"type": feature_type,
+		"floats": floats,
+		"ints": ints
+	}
+
+func _get_gpu_base_floats() -> PackedFloat32Array:
+	var inv = global_transform.affine_inverse()
+	var floats := PackedFloat32Array()
+	floats.append_array([
+		global_position.x,
+		global_position.y,
+		global_position.z,
+		influence_size.x,
+		influence_size.y,
+		edge_falloff,
+		strength,
+		inv.basis.x.x, inv.basis.x.y, inv.basis.x.z,
+		inv.basis.y.x, inv.basis.y.y, inv.basis.y.z,
+		inv.basis.z.x, inv.basis.z.y, inv.basis.z.z,
+		inv.origin.x, inv.origin.y, inv.origin.z
+	])
+	return floats
+
+func _get_gpu_base_ints() -> PackedInt32Array:
+	var ints := PackedInt32Array()
+	ints.append(influence_shape)
+	ints.append(blend_mode)
+	return ints
 
 ## Generate a heightmap for this feature
 ## This is the new primary method for terrain generation
@@ -289,7 +353,7 @@ func generate_heightmap_with_context(resolution: Vector2i, terrain_bounds: Rect2
 	# Create heightmap image from packed array
 	var heightmap := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, height_data.to_byte_array())
 	
-	# Apply modifiers (CPU only for thread safety)
+	# Apply modifiers (CPU-only for thread safety)
 	if _has_any_modifiers():
 		_apply_modifiers_cpu(heightmap, terrain_bounds, context)
 	
@@ -297,6 +361,61 @@ func generate_heightmap_with_context(resolution: Vector2i, terrain_bounds: Rect2
 		var elapsed = Time.get_ticks_msec() - start_time
 		print("[%s] Generated %dx%d heightmap (context) in %d ms" % [name, resolution.x, resolution.y, elapsed])
 	
+	return heightmap
+
+## Generate a heightmap using a pre-computed context without applying modifiers.
+## Intended for worker threads where modifiers will be applied later on main thread.
+func generate_heightmap_with_context_raw(resolution: Vector2i, terrain_bounds: Rect2, context: EvaluationContext) -> Image:
+	var start_time = Time.get_ticks_msec()
+	var step_x := terrain_bounds.size.x / float(resolution.x - 1)
+	var step_y := terrain_bounds.size.y / float(resolution.y - 1)
+	var origin_x := terrain_bounds.position.x
+	var origin_z := terrain_bounds.position.y
+
+	var total_pixels := resolution.x * resolution.y
+	var height_data := PackedFloat32Array()
+	height_data.resize(total_pixels)
+
+	var idx := 0
+	for y in resolution.y:
+		var world_z := origin_z + (y * step_y)
+		for x in resolution.x:
+			var world_x := origin_x + (x * step_x)
+			var world_pos := Vector3(world_x, 0, world_z)
+			height_data[idx] = get_height_at_safe(world_pos, context)
+			idx += 1
+
+	var heightmap := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, height_data.to_byte_array())
+
+	if Engine.is_editor_hint():
+		var elapsed = Time.get_ticks_msec() - start_time
+		print("[%s] Generated %dx%d heightmap (context raw) in %d ms" % [name, resolution.x, resolution.y, elapsed])
+
+	return heightmap
+
+## Apply modifiers to an existing heightmap (GPU if available, CPU fallback)
+func apply_modifiers_to_heightmap(heightmap: Image, terrain_bounds: Rect2, context: EvaluationContext = null) -> Image:
+	if not _has_any_modifiers():
+		return heightmap
+
+	var processor = _get_gpu_modifier_processor()
+	if processor and processor.is_available():
+		var modified = processor.apply_modifiers(
+			heightmap,
+			int(smoothing),
+			smoothing_radius,
+			enable_terracing,
+			terrace_levels,
+			terrace_smoothness,
+			enable_min_clamp,
+			min_height,
+			enable_max_clamp,
+			max_height
+		)
+		if modified:
+			return modified
+
+	_apply_modifiers_cpu(heightmap, terrain_bounds, context)
 	return heightmap
 
 ## Check if any modifiers are enabled

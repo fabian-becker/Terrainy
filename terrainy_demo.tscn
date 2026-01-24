@@ -1,15 +1,13 @@
-[gd_scene load_steps=21 format=3 uid="uid://megrg78jfp83"]
+[gd_scene load_steps=19 format=3 uid="uid://megrg78jfp83"]
 
 [ext_resource type="Script" uid="uid://b03v1mqy58bj4" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_s0usi"]
 [ext_resource type="Script" uid="uid://ddlru3rps1tmg" path="res://addons/terrainy/resources/terrain_texture_layer.gd" id="2_50dxj"]
 [ext_resource type="Resource" uid="uid://capvahs7dnlxf" path="res://textures/rocky_terrain/rocky_terrain.tres" id="3_v4gbn"]
 [ext_resource type="Resource" uid="uid://dh8b8e3m2ucl7" path="res://textures/rock/rocky.tres" id="4_7tomh"]
 [ext_resource type="Resource" uid="uid://rnmk18jlmr5v" path="res://textures/snow/snow.tres" id="5_3hu61"]
-[ext_resource type="Script" uid="uid://b06n2v4b3hlyt" path="res://addons/terrainy/nodes/primitives/mountain_node.gd" id="6_bqgbw"]
-[ext_resource type="Script" uid="uid://en81cnl5mq8p" path="res://addons/terrainy/nodes/gradients/linear_gradient_node.gd" id="7_50dxj"]
+[ext_resource type="Script" uid="uid://b06n2v4b3hlyt" path="res://addons/terrainy/nodes/primitives/mountain_node.gd" id="7_s0usi"]
+[ext_resource type="Script" uid="uid://dru71ftjlqkij" path="res://addons/terrainy/nodes/landscapes/mountain_range_node.gd" id="8_50dxj"]
 [ext_resource type="Script" uid="uid://ck4gtrjpc6yu2" path="res://addons/terrainy/nodes/noise/perlin_node.gd" id="8_v4gbn"]
-[ext_resource type="Script" uid="uid://yjnphcd08chu" path="res://addons/terrainy/nodes/gradients/radial_gradient_node.gd" id="9_v4gbn"]
-[ext_resource type="Script" uid="uid://dru71ftjlqkij" path="res://addons/terrainy/nodes/landscapes/mountain_range_node.gd" id="10_7tomh"]
 
 [sub_resource type="Gradient" id="Gradient_kem5a"]
 interpolation_mode = 2
@@ -47,24 +45,25 @@ fog_mode = 1
 fog_density = 1.0
 adjustment_enabled = true
 
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_s0usi"]
-seed = -2003997436
-domain_warp_type = 2
-
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_7tomh"]
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_bqgbw"]
 noise_type = 3
-seed = -1888337052
-frequency = 0.0704
+seed = -715470655
+frequency = 0.005
+fractal_type = 0
 
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_3hu61"]
-seed = 2080841486
-frequency = 0.008
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_50dxj"]
+noise_type = 3
+seed = 1281261962
+frequency = 0.02
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_v4gbn"]
+seed = 1596524431
 fractal_octaves = 2
 
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_h176a"]
-seed = -1889416514
-frequency = 0.05
-fractal_octaves = 4
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_7tomh"]
+seed = 1382240560
+frequency = 0.0035
+fractal_type = 2
 
 [node name="Node3D" type="Node3D"]
 
@@ -79,58 +78,39 @@ shadow_enabled = true
 [node name="TerrainComposer" type="Node3D" parent="."]
 script = ExtResource("1_s0usi")
 terrain_size = Vector2(1024, 1024)
+resolution = 512
 texture_layers = Array[ExtResource("2_50dxj")]([ExtResource("3_v4gbn"), ExtResource("4_7tomh"), ExtResource("5_3hu61")])
 metadata/_custom_type_script = "uid://b03v1mqy58bj4"
 
-[node name="MountainNode" type="Node3D" parent="TerrainComposer"]
-script = ExtResource("6_bqgbw")
-noise = SubResource("FastNoiseLite_s0usi")
-height = 152.48819
-influence_size = Vector2(188.22768, 188.22768)
-smoothing = 1
-metadata/_custom_type_script = "uid://b06n2v4b3hlyt"
-metadata/_gizmo_manipulating = false
-
-[node name="LinearGradientNode" type="Node3D" parent="TerrainComposer"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -70.3522, 0, 202.29826)
-script = ExtResource("7_50dxj")
-direction = Vector2(0.9468852, -0.32157165)
-interpolation = 2
-start_height = 63.145
-end_height = 47.399918
-influence_size = Vector2(93.3669, 93.3669)
-edge_falloff = 0.39291208393413646
-metadata/_custom_type_script = "uid://en81cnl5mq8p"
-metadata/_gizmo_manipulating = false
-
-[node name="RadialGradientNode" type="Node3D" parent="TerrainComposer"]
-transform = Transform3D(1, 0, 0, 0, 0.99991524, 0.013019788, 0, -0.013019788, 0.99991524, -285.0767, -7.6293945e-06, -17.339355)
-script = ExtResource("9_v4gbn")
-start_height = 53.794434
-end_height = 20.550396
-influence_size = Vector2(80.69206, 80.69206)
-edge_falloff = 0.7471118130918242
-metadata/_custom_type_script = "uid://yjnphcd08chu"
-metadata/_gizmo_manipulating = false
-
-[node name="PerlinNoiseNode" type="Node3D" parent="TerrainComposer/RadialGradientNode"]
-transform = Transform3D(1, 0, 0, 0, 0.99991524, -0.013019788, 0, 0.013019788, 0.99991524, 0, 0, 0)
+[node name="BaseNoise" type="Node3D" parent="TerrainComposer"]
 script = ExtResource("8_v4gbn")
-amplitude = 24.0
-noise = SubResource("FastNoiseLite_7tomh")
-influence_size = Vector2(102.568436, 102.568436)
-edge_falloff = 0.33783187107859725
+amplitude = 32.0
+noise = SubResource("FastNoiseLite_bqgbw")
+influence_shape = 1
+influence_size = Vector2(1024, 1024)
+edge_falloff = 0.0
 metadata/_custom_type_script = "uid://ck4gtrjpc6yu2"
 metadata/_gizmo_manipulating = false
 
+[node name="MountainNode" type="Node3D" parent="TerrainComposer"]
+script = ExtResource("7_s0usi")
+noise = SubResource("FastNoiseLite_50dxj")
+noise_strength = 0.2
+height = 127.37419
+influence_size = Vector2(319.3083, 319.3083)
+edge_falloff = 0.8089090569194924
+metadata/_custom_type_script = "uid://b06n2v4b3hlyt"
+metadata/_gizmo_manipulating = false
+
 [node name="MountainRangeNode" type="Node3D" parent="TerrainComposer"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -79, 0, -340.94562)
-script = ExtResource("10_7tomh")
-peak_noise = SubResource("FastNoiseLite_3hu61")
-detail_noise = SubResource("FastNoiseLite_h176a")
-height = 120.80641
-influence_shape = 1
-influence_size = Vector2(212.39523, 71.19058)
-edge_falloff = 0.131065163532055
+transform = Transform3D(-0.6437631, 0, 0.7652249, 0, 1, 0, -0.7652249, 0, -0.6437631, -293.58878, 0, 190.61436)
+script = ExtResource("8_50dxj")
+peak_noise = SubResource("FastNoiseLite_v4gbn")
+detail_noise = SubResource("FastNoiseLite_7tomh")
+height = 223.6429
+direction = Vector2(0.9932381, 0.11609532)
+influence_shape = 2
+influence_size = Vector2(501.42172, 331.79688)
+edge_falloff = 0.6996719898077897
 metadata/_custom_type_script = "uid://dru71ftjlqkij"
 metadata/_gizmo_manipulating = false
