@@ -150,6 +150,11 @@ static func generate_from_heightmap(
 	
 	var array_mesh = ArrayMesh.new()
 	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	# Generate tangents for proper normal map rendering
+	var surface_tool = SurfaceTool.new()
+	surface_tool.create_from(array_mesh, 0)
+	surface_tool.generate_tangents()
+	array_mesh = surface_tool.commit()
 	
 	var elapsed = Time.get_ticks_msec() - start_time
 	if elapsed >= LOG_THRESHOLD_MS:

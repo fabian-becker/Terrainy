@@ -63,7 +63,9 @@ func compose(
 	resolution: Vector2i,
 	terrain_bounds: Rect2,
 	base_height: float,
-	use_gpu_composition: bool
+	use_gpu_composition: bool,
+	use_multithreading: bool = true,
+	max_worker_threads: int = 4
 ) -> Image:
 	var total_start = Time.get_ticks_msec()
 	# Check if resolution or bounds changed (invalidate influence cache)
@@ -77,6 +79,7 @@ func compose(
 	var generated_count := 0
 	var reused_count := 0
 	var parallel_tasks := []
+	var pending_tasks := []
 	var task_results := {}  # Shared dictionary for worker results
 	var gpu_eval_count := 0
 	
@@ -101,23 +104,39 @@ func compose(
 						gpu_eval_count += 1
 						generated_count += 1
 						continue
-			# Launch parallel generation task
+			# Launch parallel generation task (batched) or generate on main thread
 			var ctx = contexts.get(feature)
-			if ctx:
+			if use_multithreading and ctx:
 				var task_id = WorkerThreadPool.add_task(
 					_generate_heightmap_worker.bind(feature, resolution, terrain_bounds, ctx, task_results)
 				)
 				parallel_tasks.append({"feature": feature, "task_id": task_id})
+				pending_tasks.append({"feature": feature, "task_id": task_id})
+				# Batch wait to limit concurrency
+				var batch_size = clampi(max_worker_threads, 1, 32)
+				if pending_tasks.size() >= batch_size:
+					for task in pending_tasks:
+						WorkerThreadPool.wait_for_task_completion(task.task_id)
+					pending_tasks.clear()
 			else:
-				# Fallback: generate on main thread (shouldn't happen in Phase 4+)
-				push_warning("[TerrainHeightmapBuilder] No context for feature '%s', generating on main thread" % feature.name)
-				_heightmap_cache[feature] = feature.generate_heightmap(resolution, terrain_bounds)
+				# Fallback: generate on main thread (or no context)
+				if not ctx:
+					push_warning("[TerrainHeightmapBuilder] No context for feature '%s', generating on main thread" % feature.name)
+					_heightmap_cache[feature] = feature.generate_heightmap(resolution, terrain_bounds)
+				else:
+					_heightmap_cache[feature] = feature.generate_heightmap_with_context_raw(resolution, terrain_bounds, ctx)
+				if is_instance_valid(feature) and feature.has_method("apply_modifiers_to_heightmap"):
+					_heightmap_cache[feature] = feature.apply_modifiers_to_heightmap(
+						_heightmap_cache[feature],
+						terrain_bounds,
+						ctx
+					)
 			generated_count += 1
 		else:
 			reused_count += 1
 	
-	# Wait for all parallel tasks to complete
-	for task in parallel_tasks:
+	# Wait for any remaining parallel tasks to complete
+	for task in pending_tasks:
 		WorkerThreadPool.wait_for_task_completion(task.task_id)
 	
 	# Retrieve results from shared dictionary and cache them
