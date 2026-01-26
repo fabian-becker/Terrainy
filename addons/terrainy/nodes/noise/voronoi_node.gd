@@ -3,6 +3,7 @@ class_name VoronoiNode
 extends NoiseNode
 
 const NoiseNode = preload("res://addons/terrainy/nodes/noise/noise_node.gd")
+const NoiseEvaluationContext = preload("res://addons/terrainy/nodes/noise/noise_evaluation_context.gd")
 
 ## Voronoi/cellular pattern for rocky/cracked terrain
 
@@ -35,23 +36,16 @@ func _update_cellular_return_type() -> void:
 			noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
 
 func get_height_at(world_pos: Vector3) -> float:
-	var local_pos = to_local(world_pos)
-	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
-	
-	var radius = influence_size.x
-	
-	if distance_2d >= radius:
-		return 0.0
-	
-	if not noise:
-		return 0.0
-	
-	var voronoi_value = noise.get_noise_2d(world_pos.x, world_pos.z)
-	
-	# Normalize from [-1, 1] to [0, 1]
-	var height = (voronoi_value + 1.0) * 0.5 * amplitude
-	
-	return height
+	var ctx = prepare_evaluation_context()
+	return get_height_at_safe(world_pos, ctx)
+
+func prepare_evaluation_context() -> NoiseEvaluationContext:
+	return NoiseEvaluationContext.from_noise_feature(self, noise, amplitude)
+
+## Thread-safe version using context
+func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
+	var ctx = context as NoiseEvaluationContext
+	return ctx.get_noise_normalized(world_pos) * ctx.amplitude
 
 func get_gpu_param_pack() -> Dictionary:
 	var freq = noise.frequency if noise else 0.0

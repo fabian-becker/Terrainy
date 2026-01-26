@@ -17,8 +17,10 @@ signal texture_layers_changed
 # Constants
 const MAX_TERRAIN_RESOLUTION = 4096
 const MAX_FEATURE_COUNT = 64
+const MAX_CHUNK_SIZE = 8192
 const REBUILD_DEBOUNCE_SEC = 0.3  # Debounce rapid changes (e.g., gizmo manipulation)
 
+## Size of the terrain in world units (X,Z)
 @export var terrain_size: Vector2 = Vector2(100, 100):
 	set(value):
 		terrain_size = value
@@ -27,6 +29,7 @@ const REBUILD_DEBOUNCE_SEC = 0.3  # Debounce rapid changes (e.g., gizmo manipula
 		if auto_update and is_inside_tree():
 			rebuild_terrain()
 
+## Resolution of the terrain heightmap (number of vertices along one axis)
 @export var resolution: int = 128:
 	set(value):
 		resolution = clamp(value, 16, MAX_TERRAIN_RESOLUTION)
@@ -36,6 +39,7 @@ const REBUILD_DEBOUNCE_SEC = 0.3  # Debounce rapid changes (e.g., gizmo manipula
 		if auto_update and is_inside_tree():
 			rebuild_terrain()
 
+## Base height offset for the terrain
 @export var base_height: float = 0.0:
 	set(value):
 		base_height = value
@@ -43,37 +47,53 @@ const REBUILD_DEBOUNCE_SEC = 0.3  # Debounce rapid changes (e.g., gizmo manipula
 		if auto_update and is_inside_tree():
 			rebuild_terrain()
 
+## Automatically update terrain on feature/parameter changes
 @export var auto_update: bool = true
 
 @export_group("Performance")
+## Use GPU for heightmap composition (faster, requires compatible GPU)
 @export var use_gpu_composition: bool = true:
 	set(value):
 		use_gpu_composition = value
+		if _initial_rebuild_pending:
+			return
 		if is_inside_tree() and auto_update:
 			rebuild_terrain()
 
 @export_group("Chunking")
-@export var chunk_size: int = 512:
+## Size of each terrain chunk (in world units)
+@export_range(1, MAX_CHUNK_SIZE, 1) var chunk_size: int = 512:
 	set(value):
-		chunk_size = max(1, value)
+		chunk_size = clamp(value, 1, MAX_CHUNK_SIZE)
 		_mark_all_chunks_dirty()
 		if auto_update and is_inside_tree():
 			rebuild_terrain()
 
+@export_group("Threading")
+## Enable multithreaded generation (heightmaps + chunk meshes)
+@export var use_multithreading: bool = true
+## Max concurrent worker tasks for heightmap generation (1 = effectively single-threaded)
+@export_range(1, 32, 1) var max_worker_threads: int = 4
+
 @export_group("LOD")
+## Enable Level of Detail (LOD) for terrain chunks
 @export var enable_lod: bool = true:
 	set(value):
 		enable_lod = value
 		if auto_update and is_inside_tree():
 			_request_rebuild()
 
+## Distances at which LOD levels switch (in world units)
 @export var lod_distances: Array[float] = [500.0, 1000.0, 2000.0]
+## Scale factors for each LOD level (1.0 = full res, 0.5 = half res, etc.)
 @export var lod_scale_factors: Array[float] = [1.0, 0.5, 0.25, 0.125]
 
 @export_group("Material")
+## Material to use for the terrain chunks
 @export var terrain_material: Material
 
 @export_group("Texture Layers")
+## Texture layers for terrain material
 @export var texture_layers: Array[TerrainTextureLayer] = []:
 	set(value):
 		for layer in texture_layers:
@@ -410,7 +430,9 @@ func rebuild_terrain() -> void:
 		heightmap_resolution,
 		_terrain_bounds,
 		base_height,
-		use_gpu_composition
+		use_gpu_composition,
+		use_multithreading,
+		max_worker_threads
 	)
 	if _final_heightmap == null:
 		push_error("[TerrainComposer] Heightmap composition failed; aborting rebuild")
@@ -467,6 +489,8 @@ func _calculate_chunk_grid() -> bool:
 				grid_changed = true
 			else:
 				_update_chunk_bounds(chunk)
+				if _chunk_root and chunk.root and not chunk.root.get_parent():
+					_chunk_root.add_child(chunk.root, false, Node.INTERNAL_MODE_BACK)
 			new_chunks[chunk_pos] = chunk
 	
 	# Remove chunks no longer in grid
@@ -663,12 +687,19 @@ func _rebuild_chunks(full_rebuild: bool) -> void:
 		"rebuild_id": _rebuild_id
 	}
 	_chunk_thread = Thread.new()
-	var start_error = _chunk_thread.start(_generate_chunk_meshes_threaded.bind(thread_data))
-	if start_error == OK:
-		_chunk_thread_started = true
-		_chunk_thread_seen_alive = false
+	if use_multithreading:
+		var start_error = _chunk_thread.start(_generate_chunk_meshes_threaded.bind(thread_data))
+		if start_error == OK:
+			_chunk_thread_started = true
+			_chunk_thread_seen_alive = false
+		else:
+			push_error("[TerrainComposer] Failed to start chunk thread (%d), falling back to main thread" % start_error)
+			_chunk_thread = null
+			_chunk_thread_started = false
+			_chunk_thread_seen_alive = false
+			_generate_chunk_meshes_threaded(thread_data)
+			_on_chunk_generation_completed()
 	else:
-		push_error("[TerrainComposer] Failed to start chunk thread (%d), falling back to main thread" % start_error)
 		_chunk_thread = null
 		_chunk_thread_started = false
 		_chunk_thread_seen_alive = false

@@ -40,6 +40,8 @@ uniform int layer_texture_index[MAX_LAYERS];
 uniform float world_height_offset = 0.0;
 uniform float blend_noise_scale : hint_range(0.0, 100.0) = 10.0;
 uniform float blend_noise_strength : hint_range(0.0, 20.0) = 2.0;
+// Compatibility renderer workaround: disable AO if array sampling is unreliable
+uniform bool compatibility_disable_ao = false;
 
 // Simple 2D noise function for height variation
 float hash(vec2 p) {
@@ -255,7 +257,7 @@ void fragment() {
 			
 			// Sample AO with world-space mapping
 			float ao = 1.0;
-			if (extra_flags.x > 0.5) { // has_ao
+			if (extra_flags.x > 0.5 && !compatibility_disable_ao) { // has_ao
 				ao = mix(1.0, sample_terrain_texture(ao_textures, tex_idx, world_pos, uv_scale, uv_offset).r, pbr_params.z);
 			}
 			

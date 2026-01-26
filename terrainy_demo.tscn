@@ -80,6 +80,7 @@ shadow_enabled = true
 script = ExtResource("1_s0usi")
 terrain_size = Vector2(1024, 1024)
 resolution = 512
+use_gpu_composition = false
 texture_layers = Array[ExtResource("2_50dxj")]([ExtResource("3_v4gbn"), ExtResource("4_7tomh"), ExtResource("5_3hu61")])
 metadata/_custom_type_script = "uid://b03v1mqy58bj4"
 
@@ -94,6 +95,7 @@ metadata/_custom_type_script = "uid://ck4gtrjpc6yu2"
 metadata/_gizmo_manipulating = false
 
 [node name="MountainNode" type="Node3D" parent="TerrainComposer"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -60.336548, 0, -240.69368)
 script = ExtResource("7_s0usi")
 noise = SubResource("FastNoiseLite_50dxj")
 height = 130.0
