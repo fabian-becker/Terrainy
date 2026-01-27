@@ -40,3 +40,7 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 		height_factor = sqrt(1.0 - ctx.flatness * ctx.flatness)
 	
 	return ctx.end_height + ctx.start_height * height_factor
+
+func get_gpu_param_pack() -> Dictionary:
+	var extra_floats := PackedFloat32Array([start_height, end_height, flatness])
+	return _build_gpu_param_pack(FeatureType.GRADIENT_HEMISPHERE, extra_floats, PackedInt32Array())

@@ -1,8 +1,9 @@
 shader_type spatial;
 render_mode blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
 
-// Varying to pass world position from vertex to fragment shader
+// Varying to pass world position and normal from vertex to fragment shader
 varying vec3 world_pos;
+varying vec3 world_normal;
 
 // Maximum number of texture layers supported
 const int MAX_LAYERS = 32;
@@ -39,6 +40,8 @@ uniform int layer_texture_index[MAX_LAYERS];
 uniform float world_height_offset = 0.0;
 uniform float blend_noise_scale : hint_range(0.0, 100.0) = 10.0;
 uniform float blend_noise_strength : hint_range(0.0, 20.0) = 2.0;
+// Compatibility renderer workaround: disable AO if array sampling is unreliable
+uniform bool compatibility_disable_ao = false;
 
 // Simple 2D noise function for height variation
 float hash(vec2 p) {
@@ -151,13 +154,15 @@ float calculate_layer_weight(int layer_idx, float world_height, float slope_angl
 void vertex() {
 	// Calculate world position in vertex shader for proper texture mapping
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	// Calculate world normal for view-independent slope
+	world_normal = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
 }
 
 void fragment() {
 	// Use world position from vertex shader for proper texture mapping
 	float world_height = world_pos.y + world_height_offset;
-	// Calculate slope angle (clamp handles downward-facing normals, keeping them at 90°)
-	float slope_angle = acos(clamp(NORMAL.y, 0.0, 1.0)); // In radians
+	// Calculate slope angle using world-space normal (view-independent)
+	float slope_angle = acos(clamp(world_normal.y, 0.0, 1.0)); // In radians
 	vec2 world_xz = vec2(world_pos.x, world_pos.z);
 	
 	// OPTIMIZATION: Compute noise ONCE per fragment for all layers
@@ -252,7 +257,7 @@ void fragment() {
 			
 			// Sample AO with world-space mapping
 			float ao = 1.0;
-			if (extra_flags.x > 0.5) { // has_ao
+			if (extra_flags.x > 0.5 && !compatibility_disable_ao) { // has_ao
 				ao = mix(1.0, sample_terrain_texture(ao_textures, tex_idx, world_pos, uv_scale, uv_offset).r, pbr_params.z);
 			}
 			

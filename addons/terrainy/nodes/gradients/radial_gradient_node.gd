@@ -45,3 +45,8 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 			t = normalized_distance * normalized_distance
 	
 	return lerp(ctx.start_height, ctx.end_height, t)
+
+func get_gpu_param_pack() -> Dictionary:
+	var extra_floats := PackedFloat32Array([start_height, end_height])
+	var extra_ints := PackedInt32Array([falloff_type])
+	return _build_gpu_param_pack(FeatureType.GRADIENT_RADIAL, extra_floats, extra_ints)

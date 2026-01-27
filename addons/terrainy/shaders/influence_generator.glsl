@@ -49,8 +49,9 @@ float calculate_influence(vec2 local_pos_2d, int shape, vec2 size, float falloff
     }
     else if (shape == 2) {
         // ELLIPSE
-        float safe_size_x = max(size.x, MIN_INFLUENCE_SIZE);
-        float safe_size_y = max(size.y, MIN_INFLUENCE_SIZE);
+        vec2 half_size = size * 0.5;
+        float safe_size_x = max(half_size.x, MIN_INFLUENCE_SIZE);
+        float safe_size_y = max(half_size.y, MIN_INFLUENCE_SIZE);
         vec2 normalized = vec2(
             local_pos_2d.x / safe_size_x,
             local_pos_2d.y / safe_size_y

@@ -10,14 +10,14 @@ const LandscapeEvaluationContext = preload("res://addons/terrainy/nodes/landscap
 @export var dune_frequency: float = 0.015:
 	set(value):
 		dune_frequency = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var detail_noise: FastNoiseLite:
 	set(value):
 		detail_noise = value
 		if detail_noise and not detail_noise.changed.is_connected(_on_noise_changed):
 			detail_noise.changed.connect(_on_noise_changed)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 func _ready() -> void:
 	if not noise:
@@ -32,6 +32,11 @@ func _ready() -> void:
 		detail_noise.seed = randi() + 500
 		detail_noise.frequency = 0.15
 		detail_noise.fractal_octaves = 2
+	
+	if noise and not noise.changed.is_connected(_on_noise_changed):
+		noise.changed.connect(_on_noise_changed)
+	if detail_noise and not detail_noise.changed.is_connected(_on_noise_changed):
+		detail_noise.changed.connect(_on_noise_changed)
 
 func prepare_evaluation_context() -> LandscapeEvaluationContext:
 	var ctx = LandscapeEvaluationContext.from_landscape_feature(self, height, direction)
@@ -48,11 +53,8 @@ func get_height_at(world_pos: Vector3) -> float:
 func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
 	var ctx = context as LandscapeEvaluationContext
 	var local_pos = ctx.to_local(world_pos)
-	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
-	
-	var radius = ctx.influence_radius
-	
-	if distance_2d >= radius:
+	var normalized_distance = ctx.get_influence_normalized_distance(local_pos)
+	if normalized_distance >= 1.0:
 		return 0.0
 	
 	# Directional dune pattern (ridges perpendicular to wind)
@@ -78,7 +80,17 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 		result_height += ripples * 0.3
 	
 	# Fade at edges
-	var edge_fade = 1.0 - pow(distance_2d / radius, 2.0)
+	var edge_fade = 1.0 - pow(normalized_distance, 2.0)
 	result_height *= edge_fade
 	
 	return result_height
+
+func get_gpu_param_pack() -> Dictionary:
+	var dir = direction.normalized()
+	var primary_freq = noise.frequency if noise else 0.0
+	var detail_freq = detail_noise.frequency if detail_noise else 0.0
+	var primary_seed = noise.seed if noise else 0
+	var detail_seed = detail_noise.seed if detail_noise else 0
+	var extra_floats := PackedFloat32Array([height, dir.x, dir.y, dune_frequency, primary_freq, detail_freq])
+	var extra_ints := PackedInt32Array([primary_seed, detail_seed])
+	return _build_gpu_param_pack(FeatureType.LANDSCAPE_DUNE_SEA, extra_floats, extra_ints)

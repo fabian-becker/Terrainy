@@ -15,21 +15,21 @@ const LandscapeEvaluationContext = preload("res://addons/terrainy/nodes/landscap
 @export var ridge_sharpness: float = 0.5:
 	set(value):
 		ridge_sharpness = clamp(value, 0.1, 2.0)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var peak_noise: FastNoiseLite:
 	set(value):
 		peak_noise = value
 		if peak_noise and not peak_noise.changed.is_connected(_on_noise_changed):
 			peak_noise.changed.connect(_on_noise_changed)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var detail_noise: FastNoiseLite:
 	set(value):
 		detail_noise = value
 		if detail_noise and not detail_noise.changed.is_connected(_on_noise_changed):
 			detail_noise.changed.connect(_on_noise_changed)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 func _ready() -> void:
 	if not peak_noise:
@@ -43,6 +43,11 @@ func _ready() -> void:
 		detail_noise.seed = randi() + 1000
 		detail_noise.frequency = 0.05
 		detail_noise.fractal_octaves = 4
+	
+	if peak_noise and not peak_noise.changed.is_connected(_on_noise_changed):
+		peak_noise.changed.connect(_on_noise_changed)
+	if detail_noise and not detail_noise.changed.is_connected(_on_noise_changed):
+		detail_noise.changed.connect(_on_noise_changed)
 
 func prepare_evaluation_context() -> LandscapeEvaluationContext:
 	var ctx = LandscapeEvaluationContext.from_landscape_feature(self, height, direction)
@@ -58,11 +63,9 @@ func get_height_at(world_pos: Vector3) -> float:
 func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
 	var ctx = context as LandscapeEvaluationContext
 	var local_pos = ctx.to_local(world_pos)
-	
-	var radius = ctx.influence_radius
-	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
-	
-	if distance_2d >= radius:
+
+	var normalized_distance = ctx.get_influence_normalized_distance(local_pos)
+	if normalized_distance >= 1.0:
 		return 0.0
 	
 	# Distance perpendicular to ridge
@@ -72,7 +75,10 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 	var along_ridge = ctx.get_distance_along(local_pos)
 	
 	# Base ridge height profile
-	var ridge_falloff = 1.0 - pow(lateral_distance / radius, ctx.ridge_sharpness)
+	var ridge_width = ctx.influence_radius
+	if ctx.influence_shape != InfluenceShape.CIRCLE:
+		ridge_width = max(ctx.influence_size.y * 0.5, 0.0001)
+	var ridge_falloff = 1.0 - pow(lateral_distance / ridge_width, ctx.ridge_sharpness)
 	ridge_falloff = max(0.0, ridge_falloff)
 	
 	var result_height = ctx.height * ridge_falloff
@@ -87,3 +93,13 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 		result_height += result_height * detail * 0.2
 	
 	return result_height
+
+func get_gpu_param_pack() -> Dictionary:
+	var dir = direction.normalized()
+	var peak_freq = peak_noise.frequency if peak_noise else 0.0
+	var detail_freq = detail_noise.frequency if detail_noise else 0.0
+	var peak_seed = peak_noise.seed if peak_noise else 0
+	var detail_seed = detail_noise.seed if detail_noise else 0
+	var extra_floats := PackedFloat32Array([height, dir.x, dir.y, ridge_sharpness, peak_freq, detail_freq])
+	var extra_ints := PackedInt32Array([peak_seed, detail_seed])
+	return _build_gpu_param_pack(FeatureType.LANDSCAPE_MOUNTAIN_RANGE, extra_floats, extra_ints)

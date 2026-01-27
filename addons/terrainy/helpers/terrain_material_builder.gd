@@ -27,6 +27,11 @@ func update_material(
 		_shader_material = ShaderMaterial.new()
 		var shader = load("res://addons/terrainy/shaders/terrain_material.gdshader")
 		_shader_material.shader = shader
+	# Compatibility renderer: disable AO if texture arrays behave inconsistently
+	_shader_material.set_shader_parameter(
+		"compatibility_disable_ao",
+		not RenderingServer.get_rendering_device()
+	)
 	
 	mesh_instance.material_override = _shader_material
 	

@@ -6,6 +6,7 @@ extends RefCounted
 
 const TerrainFeatureNode = preload("res://addons/terrainy/nodes/terrain_feature_node.gd")
 const GpuHeightmapBlender = preload("res://addons/terrainy/helpers/gpu_heightmap_blender.gd")
+const GpuFeatureEvaluator = preload("res://addons/terrainy/helpers/gpu_feature_evaluator.gd")
 
 # Constants
 const INFLUENCE_WEIGHT_THRESHOLD = 0.001
@@ -23,8 +24,15 @@ var _cached_bounds: Rect2
 var _gpu_compositor: GpuHeightmapBlender = null
 var _use_gpu: bool = true
 
+# GPU feature evaluator (stub)
+var _gpu_feature_evaluator: GpuFeatureEvaluator = null
+
+# GPU parameter pack cache (debug/validation)
+var _last_gpu_param_packs: Array = []
+
 func _init() -> void:
 	_initialize_gpu_compositor()
+	_initialize_gpu_feature_evaluator()
 
 func _initialize_gpu_compositor() -> void:
 	# Check if GPU composition is available
@@ -35,11 +43,18 @@ func _initialize_gpu_compositor() -> void:
 	
 	_gpu_compositor = GpuHeightmapBlender.new()
 	if not _gpu_compositor.is_available():
-		push_warning("[TerrainHeightmapBuilder] GPU composition unavailable, will use CPU fallback")
+		push_warning("[TerrainHeightmapBuilder] GPU composition unavailable")
 		_use_gpu = false
 	else:
 		print("[TerrainHeightmapBuilder] GPU compositor initialized")
 		_use_gpu = true
+
+func _initialize_gpu_feature_evaluator() -> void:
+	if not RenderingServer.get_rendering_device():
+		return
+	_gpu_feature_evaluator = GpuFeatureEvaluator.new()
+	if not _gpu_feature_evaluator.is_available():
+		_gpu_feature_evaluator = null
 
 ## Compose heightmaps from features
 func compose(
@@ -48,7 +63,9 @@ func compose(
 	resolution: Vector2i,
 	terrain_bounds: Rect2,
 	base_height: float,
-	use_gpu_composition: bool
+	use_gpu_composition: bool,
+	use_multithreading: bool = true,
+	max_worker_threads: int = 4
 ) -> Image:
 	var total_start = Time.get_ticks_msec()
 	# Check if resolution or bounds changed (invalidate influence cache)
@@ -62,7 +79,9 @@ func compose(
 	var generated_count := 0
 	var reused_count := 0
 	var parallel_tasks := []
+	var pending_tasks := []
 	var task_results := {}  # Shared dictionary for worker results
+	var gpu_eval_count := 0
 	
 	# Separate features into: need generation vs cached
 	for feature in features:
@@ -73,41 +92,74 @@ func compose(
 		
 		# Check if we need to regenerate this feature's heightmap
 		if not _heightmap_cache.has(feature) or feature.is_dirty():
-			# Launch parallel generation task
+			# GPU feature evaluation (limited types)
+			if _should_use_gpu(use_gpu_composition) and _gpu_feature_evaluator:
+				if feature.has_method("get_gpu_param_pack"):
+					var pack = feature.get_gpu_param_pack()
+					var gpu_result = _gpu_feature_evaluator.evaluate_single_feature_gpu(resolution, terrain_bounds, pack)
+					if gpu_result:
+						if feature.has_method("apply_modifiers_to_heightmap"):
+							gpu_result = feature.apply_modifiers_to_heightmap(gpu_result, terrain_bounds, contexts.get(feature))
+						_heightmap_cache[feature] = gpu_result
+						gpu_eval_count += 1
+						generated_count += 1
+						continue
+			# Launch parallel generation task (batched) or generate on main thread
 			var ctx = contexts.get(feature)
-			if ctx:
+			if use_multithreading and ctx:
 				var task_id = WorkerThreadPool.add_task(
 					_generate_heightmap_worker.bind(feature, resolution, terrain_bounds, ctx, task_results)
 				)
 				parallel_tasks.append({"feature": feature, "task_id": task_id})
+				pending_tasks.append({"feature": feature, "task_id": task_id})
+				# Batch wait to limit concurrency
+				var batch_size = clampi(max_worker_threads, 1, 32)
+				if pending_tasks.size() >= batch_size:
+					for task in pending_tasks:
+						WorkerThreadPool.wait_for_task_completion(task.task_id)
+					pending_tasks.clear()
 			else:
-				# Fallback: generate on main thread (shouldn't happen in Phase 4+)
-				push_warning("[TerrainHeightmapBuilder] No context for feature '%s', generating on main thread" % feature.name)
-				_heightmap_cache[feature] = feature.generate_heightmap(resolution, terrain_bounds)
+				# Fallback: generate on main thread (or no context)
+				if not ctx:
+					push_warning("[TerrainHeightmapBuilder] No context for feature '%s', generating on main thread" % feature.name)
+					_heightmap_cache[feature] = feature.generate_heightmap(resolution, terrain_bounds)
+				else:
+					_heightmap_cache[feature] = feature.generate_heightmap_with_context_raw(resolution, terrain_bounds, ctx)
+				if is_instance_valid(feature) and feature.has_method("apply_modifiers_to_heightmap"):
+					_heightmap_cache[feature] = feature.apply_modifiers_to_heightmap(
+						_heightmap_cache[feature],
+						terrain_bounds,
+						ctx
+					)
 			generated_count += 1
 		else:
 			reused_count += 1
 	
-	# Wait for all parallel tasks to complete
-	for task in parallel_tasks:
+	# Wait for any remaining parallel tasks to complete
+	for task in pending_tasks:
 		WorkerThreadPool.wait_for_task_completion(task.task_id)
 	
 	# Retrieve results from shared dictionary and cache them
 	for task in parallel_tasks:
 		var feature = task.feature
 		if task_results.has(feature):
-			_heightmap_cache[feature] = task_results[feature]
+			var heightmap = task_results[feature]
+			var ctx = contexts.get(feature)
+			if is_instance_valid(feature) and feature.has_method("apply_modifiers_to_heightmap"):
+				heightmap = feature.apply_modifiers_to_heightmap(heightmap, terrain_bounds, ctx)
+			_heightmap_cache[feature] = heightmap
 		else:
 			push_error("[TerrainHeightmapBuilder] Failed to generate heightmap for feature '%s'" % feature.name)
 	
 	var feature_gen_elapsed = Time.get_ticks_msec() - feature_gen_start
 	if generated_count > 0:
-		print("[TerrainHeightmapBuilder] Feature heightmaps: %d generated in parallel, %d cached in %d ms" % [generated_count, reused_count, feature_gen_elapsed])
+		print("[TerrainHeightmapBuilder] Feature heightmaps: %d generated (%d GPU, %d CPU), %d cached in %d ms" % [generated_count, gpu_eval_count, generated_count - gpu_eval_count, reused_count, feature_gen_elapsed])
 	else:
 		print("[TerrainHeightmapBuilder] Feature heightmaps: all %d cached (0 generated)" % reused_count)
 	
 	# Step 2: Compose all heightmaps
 	if _should_use_gpu(use_gpu_composition):
+		_last_gpu_param_packs = _collect_gpu_param_packs(features)
 		var result = _compose_gpu(features, contexts, resolution, terrain_bounds, base_height)
 		if result:
 			var total_elapsed = Time.get_ticks_msec() - total_start
@@ -120,6 +172,21 @@ func compose(
 	var total_elapsed = Time.get_ticks_msec() - total_start
 	print("[TerrainHeightmapBuilder] Compose total time: %d ms" % total_elapsed)
 	return cpu_result
+
+## Collect GPU parameter packs for validation and future GPU kernels
+func _collect_gpu_param_packs(features: Array[TerrainFeatureNode]) -> Array:
+	var packs: Array = []
+	for feature in features:
+		if not is_instance_valid(feature) or not feature.is_inside_tree() or not feature.visible:
+			continue
+		if not feature.has_method("get_gpu_param_pack"):
+			push_warning("[TerrainHeightmapBuilder] Feature '%s' missing GPU parameter pack" % feature.name)
+			continue
+		var pack = feature.get_gpu_param_pack()
+		if not pack.has("version") or pack["version"] != TerrainFeatureNode.GPU_PARAM_VERSION:
+			push_warning("[TerrainHeightmapBuilder] GPU param version mismatch for '%s'" % feature.name)
+		packs.append(pack)
+	return packs
 
 ## Check if GPU composition should be used
 func _should_use_gpu(user_wants_gpu: bool) -> bool:
@@ -140,6 +207,9 @@ func _compose_gpu(
 	base_height: float
 ) -> Image:
 	var start_time = Time.get_ticks_msec()
+	if not _gpu_compositor or not _gpu_compositor.is_available():
+		push_error("[TerrainHeightmapBuilder] GPU compositor not initialized")
+		return null
 	
 	# Prepare data arrays
 	var feature_heightmaps: Array[Image] = []
@@ -422,7 +492,7 @@ func _generate_heightmap_worker(
 	context,
 	results: Dictionary
 ) -> void:
-	var heightmap = feature.generate_heightmap_with_context(resolution, terrain_bounds, context)
+	var heightmap = feature.generate_heightmap_with_context_raw(resolution, terrain_bounds, context)
 	results[feature] = heightmap
 
 ## Cleanup GPU resources
@@ -430,3 +500,6 @@ func cleanup() -> void:
 	if _gpu_compositor:
 		_gpu_compositor.cleanup()
 		_gpu_compositor = null
+	if _gpu_feature_evaluator:
+		_gpu_feature_evaluator.cleanup()
+		_gpu_feature_evaluator = null

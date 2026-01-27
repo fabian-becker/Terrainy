@@ -10,24 +10,24 @@ const PrimitiveEvaluationContext = preload("res://addons/terrainy/nodes/primitiv
 @export var beach_width: float = 0.2:
 	set(value):
 		beach_width = clamp(value, 0.0, 0.5)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var beach_height: float = 1.0:
 	set(value):
 		beach_height = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var noise: FastNoiseLite:
 	set(value):
 		noise = value
 		if noise and not noise.changed.is_connected(_on_noise_changed):
 			noise.changed.connect(_on_noise_changed)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 @export var noise_strength: float = 0.3:
 	set(value):
 		noise_strength = value
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 func _ready() -> void:
 	if not noise:
@@ -35,9 +35,12 @@ func _ready() -> void:
 		noise.seed = randi()
 		noise.frequency = 0.05
 		noise.fractal_octaves = 3
+	
+	if noise and not noise.changed.is_connected(_on_noise_changed):
+		noise.changed.connect(_on_noise_changed)
 
 func _on_noise_changed() -> void:
-	parameters_changed.emit()
+	_commit_parameter_change()
 
 func prepare_evaluation_context() -> PrimitiveEvaluationContext:
 	var ctx = PrimitiveEvaluationContext.from_primitive_feature(self, height, 0)
@@ -79,3 +82,12 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 		result_height += result_height * noise_detail
 	
 	return max(0.0, result_height)
+
+func get_gpu_param_pack() -> Dictionary:
+	var noise_enabled = 1 if noise != null else 0
+	var noise_frequency = noise.frequency if noise else 0.0
+	var noise_seed = noise.seed if noise else 0
+	var noise_type = noise.noise_type if noise else 0
+	var extra_floats := PackedFloat32Array([height, beach_width, beach_height, noise_strength, noise_frequency])
+	var extra_ints := PackedInt32Array([noise_type, noise_seed, noise_enabled])
+	return _build_gpu_param_pack(FeatureType.PRIMITIVE_ISLAND, extra_floats, extra_ints)
