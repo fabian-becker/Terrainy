@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-01-27
+
+### Added
+- GPU feature evaluator with compute shader for all terrain features
+- GPU parameter packing system for thread-safe evaluation contexts
+- Raw heightmap generation method for improved multithreading workflow
+- Multithreading toggle (`use_multithreading`) for terrain composition
+- Modifier application method for post-generation processing
+- Feature type enumeration for GPU kernel dispatching
+- Support for gl_compatibility renderer mode
+
+### Changed
+- Terrain composer now supports single-threaded mode for compatibility testing
+- Influence generator uses half-size for elliptical shape calculations
+- Terrain material shader now uses world-space normals for view-independent slope calculations
+- Compatibility mode disables ambient occlusion in terrain shader to avoid array sampling issues
+- Project upgraded to Godot 4.6
+- Autoload path uses UID reference instead of direct file path
+
+### Fixed
+- View-dependent slope calculations in terrain material shader
+- Ellipse influence calculations now properly use half-size parameters
+- Ambient occlusion sampling compatibility issues in gl_compatibility mode
+
+### Performance
+- GPU-accelerated feature evaluation for supported renderers
+- Improved multithreading workflow with raw heightmap generation
+
 ## [0.4.1] - 2026-01-24
 
 ### Changed
@@ -137,6 +165,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom terrain shader with multi-layer support
 - PBR material workflow compatibility
 
+[0.5.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.5.0
 [0.4.1]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.4.1
 [0.3.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.3.0
 [0.2.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.2.0
