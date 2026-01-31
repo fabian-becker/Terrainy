@@ -369,11 +369,24 @@ func force_rebuild() -> void:
 	# Clear all caches for a completely fresh rebuild
 	if _heightmap_composer:
 		_heightmap_composer.clear_all_caches()
+
+	# Rescan features to refresh list and signals
+	_scan_features()
+
+	# Reset bounds cache to current feature bounds
+	_feature_bounds_cache.clear()
+	for feature in _feature_nodes:
+		if is_instance_valid(feature):
+			_feature_bounds_cache[feature] = _get_feature_world_bounds(feature)
 	
 	# Mark all features as dirty
 	for feature in _feature_nodes:
 		if is_instance_valid(feature) and feature.has_method("mark_dirty"):
 			feature.mark_dirty()
+
+	# Force all chunks to rebuild from the new heightmap
+	_mark_all_chunks_dirty()
+	_heightmap_dirty_pending = true
 	
 	# Trigger regular rebuild
 	rebuild_terrain()
