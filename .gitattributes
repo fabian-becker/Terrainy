@@ -5,7 +5,10 @@
 *.jpg filter=lfs diff=lfs merge=lfs -text
 *.png filter=lfs diff=lfs merge=lfs -text
 
-# Only include the addons folder when downloading from the Asset Library.
-/**        export-ignore
-/addons    !export-ignore
-/addons/** !export-ignore
+# Only include the addons folder, demo scene, and textures when downloading from the Asset Library.
+/**                 export-ignore
+/addons             !export-ignore
+/addons/**          !export-ignore
+/textures           !export-ignore
+/textures/**        !export-ignore
+/terrainy_demo.tscn !export-ignore
