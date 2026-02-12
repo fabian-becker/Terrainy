@@ -1,4 +1,4 @@
-[gd_scene load_steps=19 format=3 uid="uid://megrg78jfp83"]
+[gd_scene format=3 uid="uid://megrg78jfp83"]
 
 [ext_resource type="Script" uid="uid://b03v1mqy58bj4" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_s0usi"]
 [ext_resource type="Script" uid="uid://ddlru3rps1tmg" path="res://addons/terrainy/resources/terrain_texture_layer.gd" id="2_50dxj"]
@@ -66,17 +66,17 @@ seed = 1382240665
 frequency = 0.1
 fractal_type = 2
 
-[node name="Node3D" type="Node3D"]
+[node name="Node3D" type="Node3D" unique_id=477666693]
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=976184359]
 environment = SubResource("Environment_d4o4o")
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=654339276]
 transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
 light_energy = 0.4
 shadow_enabled = true
 
-[node name="TerrainComposer" type="Node3D" parent="."]
+[node name="TerrainComposer" type="Node3D" parent="." unique_id=650285127]
 script = ExtResource("1_s0usi")
 terrain_size = Vector2(1024, 1024)
 resolution = 512
@@ -84,7 +84,7 @@ use_gpu_composition = false
 texture_layers = Array[ExtResource("2_50dxj")]([ExtResource("3_v4gbn"), ExtResource("4_7tomh"), ExtResource("5_3hu61")])
 metadata/_custom_type_script = "uid://b03v1mqy58bj4"
 
-[node name="BaseNoise" type="Node3D" parent="TerrainComposer"]
+[node name="BaseNoise" type="Node3D" parent="TerrainComposer" unique_id=681778827]
 script = ExtResource("8_v4gbn")
 amplitude = 32.0
 noise = SubResource("FastNoiseLite_bqgbw")
@@ -94,7 +94,7 @@ edge_falloff = 0.0
 metadata/_custom_type_script = "uid://ck4gtrjpc6yu2"
 metadata/_gizmo_manipulating = false
 
-[node name="MountainNode" type="Node3D" parent="TerrainComposer"]
+[node name="MountainNode" type="Node3D" parent="TerrainComposer" unique_id=438339382]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -60.336548, 0, -240.69368)
 script = ExtResource("7_s0usi")
 noise = SubResource("FastNoiseLite_50dxj")
@@ -104,7 +104,7 @@ edge_falloff = 0.8089090569194924
 metadata/_custom_type_script = "uid://b06n2v4b3hlyt"
 metadata/_gizmo_manipulating = false
 
-[node name="MountainRangeNode" type="Node3D" parent="TerrainComposer"]
+[node name="MountainRangeNode" type="Node3D" parent="TerrainComposer" unique_id=293594719]
 transform = Transform3D(-0.6437631, 0, 0.7652249, 0, 1, 0, -0.7652249, 0, -0.6437631, -293.58878, 0, 190.61436)
 script = ExtResource("8_50dxj")
 peak_noise = SubResource("FastNoiseLite_v4gbn")
@@ -115,3 +115,6 @@ influence_size = Vector2(473.31656, 240.008)
 edge_falloff = 0.7
 metadata/_custom_type_script = "uid://dru71ftjlqkij"
 metadata/_gizmo_manipulating = false
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1523615742]
+transform = Transform3D(0.29562467, 0, 0.95530415, 0, 1, 0, -0.95530415, 0, 0.29562467, 240.70862, 122.614944, 157.2703)
