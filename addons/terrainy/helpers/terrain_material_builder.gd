@@ -175,6 +175,9 @@ func _get_or_create_image(texture: Texture2D, size: Vector2i, default_color: Col
 			fallback.fill(default_color)
 			fallback.generate_mipmaps()
 			return fallback
+		# Decompress if needed before any manipulations
+		if img.is_compressed():
+			img.decompress()
 		if img.get_size() != size:
 			img.resize(size.x, size.y, Image.INTERPOLATE_LANCZOS)
 		if img.get_format() != Image.FORMAT_RGBA8:
@@ -200,6 +203,9 @@ func _create_texture_array(images: Array[Image]) -> Texture2DArray:
 	
 	# Ensure all images have consistent properties
 	for i in range(images.size()):
+		# Decompress if needed before any manipulations
+		if images[i].is_compressed():
+			images[i].decompress()
 		if images[i].get_size() != size:
 			images[i].resize(size.x, size.y, Image.INTERPOLATE_LANCZOS)
 		if images[i].get_format() != format:

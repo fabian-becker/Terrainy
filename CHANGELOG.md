@@ -5,7 +5,11 @@ All notable changes to the Terrainy plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.1] - 2026-02-12
+
+### Fixed
+- Collision mesh offset causing collision to be positioned at chunk corner instead of center, mismatching the visual terrain mesh
+- Force rebuild now fully invalidates caches and marks all chunks dirty for a complete terrain refresh
 
 ## [0.5.0] - 2026-01-27
 
@@ -165,6 +169,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom terrain shader with multi-layer support
 - PBR material workflow compatibility
 
+[0.5.1]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.5.1
 [0.5.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.5.0
 [0.4.1]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.4.1
 [0.3.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.3.0

@@ -369,11 +369,24 @@ func force_rebuild() -> void:
 	# Clear all caches for a completely fresh rebuild
 	if _heightmap_composer:
 		_heightmap_composer.clear_all_caches()
+
+	# Rescan features to refresh list and signals
+	_scan_features()
+
+	# Reset bounds cache to current feature bounds
+	_feature_bounds_cache.clear()
+	for feature in _feature_nodes:
+		if is_instance_valid(feature):
+			_feature_bounds_cache[feature] = _get_feature_world_bounds(feature)
 	
 	# Mark all features as dirty
 	for feature in _feature_nodes:
 		if is_instance_valid(feature) and feature.has_method("mark_dirty"):
 			feature.mark_dirty()
+
+	# Force all chunks to rebuild from the new heightmap
+	_mark_all_chunks_dirty()
+	_heightmap_dirty_pending = true
 	
 	# Trigger regular rebuild
 	rebuild_terrain()
@@ -781,15 +794,11 @@ func _update_chunk_collision(chunk: TerrainChunk) -> void:
 		chunk.collision_shape.shape = height_shape
 		
 		chunk.collision_shape.scale = Vector3(
-			chunk.world_bounds.size.x / (width - 1),
+			chunk.world_bounds.size.x / float(width - 1),
 			1.0,
-			chunk.world_bounds.size.y / (depth - 1)
+			chunk.world_bounds.size.y / float(depth - 1)
 		)
-		chunk.collision_shape.position = Vector3(
-			-chunk.world_bounds.size.x * 0.5,
-			0,
-			-chunk.world_bounds.size.y * 0.5
-		)
+		chunk.collision_shape.position = Vector3.ZERO
 		var elapsed = Time.get_ticks_msec() - start_time
 		if elapsed >= CHUNK_LOG_THRESHOLD_MS:
 			push_warning("[TerrainComposer] Slow chunk collision: %dx%d in %d ms" % [width, depth, elapsed])

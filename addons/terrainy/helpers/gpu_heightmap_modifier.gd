@@ -83,10 +83,13 @@ func apply_modifiers(
 	input_format.format = RenderingDevice.DATA_FORMAT_R32_SFLOAT
 	input_format.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
 	
-	# Convert to RF if needed
-	if input_heightmap.get_format() != Image.FORMAT_RF:
+	# Decompress and convert to RF if needed
+	if input_heightmap.is_compressed() or input_heightmap.get_format() != Image.FORMAT_RF:
 		input_heightmap = input_heightmap.duplicate()
-		input_heightmap.convert(Image.FORMAT_RF)
+		if input_heightmap.is_compressed():
+			input_heightmap.decompress()
+		if input_heightmap.get_format() != Image.FORMAT_RF:
+			input_heightmap.convert(Image.FORMAT_RF)
 	
 	var input_texture := _rd.texture_create(input_format, RDTextureView.new(), [input_heightmap.get_data()])
 	if not input_texture.is_valid():
