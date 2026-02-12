@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Collision mesh offset causing collision to be positioned at chunk corner instead of center, mismatching the visual terrain mesh
 - Force rebuild now fully invalidates caches and marks all chunks dirty for a complete terrain refresh
 
 ## [0.5.0] - 2026-01-27
