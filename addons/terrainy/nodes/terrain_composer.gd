@@ -794,15 +794,11 @@ func _update_chunk_collision(chunk: TerrainChunk) -> void:
 		chunk.collision_shape.shape = height_shape
 		
 		chunk.collision_shape.scale = Vector3(
-			chunk.world_bounds.size.x / (width - 1),
+			chunk.world_bounds.size.x / float(width - 1),
 			1.0,
-			chunk.world_bounds.size.y / (depth - 1)
+			chunk.world_bounds.size.y / float(depth - 1)
 		)
-		chunk.collision_shape.position = Vector3(
-			-chunk.world_bounds.size.x * 0.5,
-			0,
-			-chunk.world_bounds.size.y * 0.5
-		)
+		chunk.collision_shape.position = Vector3.ZERO
 		var elapsed = Time.get_ticks_msec() - start_time
 		if elapsed >= CHUNK_LOG_THRESHOLD_MS:
 			push_warning("[TerrainComposer] Slow chunk collision: %dx%d in %d ms" % [width, depth, elapsed])
