@@ -6,34 +6,34 @@ extends RefCounted
 ## Used for evaluating terrain features in worker threads without scene tree access.
 
 ## World position of the feature
-var world_position: Vector3
+var world_position: Vector3 = Vector3.ZERO
 
 ## Pre-computed inverse transform for world→local conversion
-var inverse_transform: Transform3D
+var inverse_transform: Transform3D = Transform3D.IDENTITY
 
 ## Influence radius (max of width/depth)
-var influence_radius: float
+var influence_radius: float = 0.0
 
 ## Pre-computed squared radius for fast distance checks
-var influence_radius_sq: float
+var influence_radius_sq: float = 0.0
 
 ## Pre-computed AABB for fast spatial culling
-var aabb: AABB
+var aabb: AABB = AABB()
 
 ## Influence shape type
-var influence_shape: int
+var influence_shape: int = 0
 
 ## Influence size (width, depth)
-var influence_size: Vector2
+var influence_size: Vector2 = Vector2.ZERO
 
 ## Edge falloff parameter
-var edge_falloff: float
+var edge_falloff: float = 0.0
 
 ## Feature strength/weight
-var strength: float
+var strength: float = 1.0
 
 ## Blend mode
-var blend_mode: int
+var blend_mode: int = 0
 
 ## Create an EvaluationContext from a TerrainFeatureNode.
 ## This captures all necessary data for thread-safe evaluation.

@@ -53,6 +53,9 @@ func _enter_tree() -> void:
 	add_custom_type("PerlinNoiseNode", "Node3D", preload("res://addons/terrainy/nodes/noise/perlin_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	add_custom_type("VoronoiNode", "Node3D", preload("res://addons/terrainy/nodes/noise/voronoi_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	
+	# Water
+	add_custom_type("WaterNode", "Node3D", preload("res://addons/terrainy/nodes/water/water_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
+	
 	# Utility nodes
 	add_custom_type("ShapeNode", "Node3D", preload("res://addons/terrainy/nodes/basic/shape_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	add_custom_type("HeightmapNode", "Node3D", preload("res://addons/terrainy/nodes/basic/heightmap_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
@@ -153,6 +156,9 @@ func _exit_tree() -> void:
 	# Noise
 	remove_custom_type("PerlinNoiseNode")
 	remove_custom_type("VoronoiNode")
+	
+	# Water
+	remove_custom_type("WaterNode")
 	
 	# Utility
 	remove_custom_type("ShapeNode")
