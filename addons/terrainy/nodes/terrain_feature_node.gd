@@ -56,7 +56,8 @@ enum FeatureType {
 	LANDSCAPE_MOUNTAIN_RANGE = 401,
 	LANDSCAPE_DUNE_SEA = 402,
 	NOISE_PERLIN = 500,
-	NOISE_VORONOI = 501
+	NOISE_VORONOI = 501,
+	HOLE = 600
 }
 
 ## Shape of the influence area

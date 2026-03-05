@@ -115,6 +115,16 @@ const REBUILD_DEBOUNCE_SEC = 0.3  # Debounce rapid changes (e.g., gizmo manipula
 		generate_collision = value
 		_update_all_chunk_collisions()
 
+@export_flags_3d_physics var collision_layer: int = 1:
+	set(value):
+		collision_layer = value
+		_update_all_chunk_collision_properties()
+
+@export_flags_3d_physics var collision_mask: int = 1:
+	set(value):
+		collision_mask = value
+		_update_all_chunk_collision_properties()
+
 class TerrainChunk:
 	var position: Vector2i
 	var world_bounds: Rect2
@@ -125,6 +135,7 @@ class TerrainChunk:
 	var lod_level: int = 0
 	var is_dirty: bool = true
 	var heightmap: Image = null
+	var hole_mask: Image = null
 
 # Internal
 var _feature_nodes: Array[TerrainFeatureNode] = []
@@ -150,6 +161,7 @@ const CHUNK_LOG_THRESHOLD_MS = 100
 
 # Terrain state
 var _final_heightmap: Image
+var _final_hole_mask: Image
 var _terrain_bounds: Rect2
 
 # Rebuild timing
@@ -437,7 +449,7 @@ func rebuild_terrain() -> void:
 	
 	# Compose heightmaps using helper with contexts
 	var compose_start = Time.get_ticks_msec()
-	_final_heightmap = _heightmap_composer.compose(
+	var compose_result = _heightmap_composer.compose(
 		_feature_nodes,
 		feature_contexts,
 		heightmap_resolution,
@@ -447,13 +459,16 @@ func rebuild_terrain() -> void:
 		use_multithreading,
 		max_worker_threads
 	)
-	if _final_heightmap == null:
+	if compose_result.is_empty() or not compose_result.has("heightmap"):
 		push_error("[TerrainComposer] Heightmap composition failed; aborting rebuild")
 		_is_generating = false
 		if _coordinator_rebuild_pending and Engine.has_singleton("TerrainRebuildCoordinator"):
 			TerrainRebuildCoordinator.rebuild_completed(self)
 			_coordinator_rebuild_pending = false
 		return
+	
+	_final_heightmap = compose_result["heightmap"]
+	_final_hole_mask = compose_result.get("hole_mask", null)
 	var compose_elapsed = Time.get_ticks_msec() - compose_start
 	print("[TerrainComposer] Rebuild #%d compose time: %d ms" % [_rebuild_id, compose_elapsed])
 	
@@ -531,6 +546,8 @@ func _create_chunk(chunk_pos: Vector2i) -> TerrainChunk:
 	
 	chunk.static_body = StaticBody3D.new()
 	chunk.static_body.name = "CollisionBody"
+	chunk.static_body.collision_layer = collision_layer
+	chunk.static_body.collision_mask = collision_mask
 	chunk.root.add_child(chunk.static_body, false, Node.INTERNAL_MODE_BACK)
 	
 	chunk.collision_shape = CollisionShape3D.new()
@@ -572,9 +589,9 @@ func _get_terrain_origin_world() -> Vector2:
 		global_position.z - terrain_size.y * 0.5
 	)
 
-func _extract_chunk_heightmap(chunk: TerrainChunk, lod_level: int) -> Image:
+func _extract_chunk_heightmap(chunk: TerrainChunk, lod_level: int) -> Dictionary:
 	if not _final_heightmap:
-		return null
+		return {}
 	
 	var res_x = resolution
 	var res_y = resolution
@@ -597,14 +614,24 @@ func _extract_chunk_heightmap(chunk: TerrainChunk, lod_level: int) -> Image:
 	var chunk_heightmap = Image.create(width, height, false, Image.FORMAT_RF)
 	chunk_heightmap.blit_rect(_final_heightmap, Rect2i(start_x, start_y, width, height), Vector2i.ZERO)
 	
+	var chunk_hole_mask: Image = null
+	if _final_hole_mask:
+		chunk_hole_mask = Image.create(width, height, false, Image.FORMAT_RF)
+		chunk_hole_mask.blit_rect(_final_hole_mask, Rect2i(start_x, start_y, width, height), Vector2i.ZERO)
+	
 	if lod_level > 0 and lod_level < lod_scale_factors.size():
 		var scale = lod_scale_factors[lod_level]
 		var target_w = max(2, int(round((width - 1) * scale)) + 1)
 		var target_h = max(2, int(round((height - 1) * scale)) + 1)
 		if target_w != width or target_h != height:
 			chunk_heightmap.resize(target_w, target_h, Image.INTERPOLATE_BILINEAR)
+			if chunk_hole_mask:
+				chunk_hole_mask.resize(target_w, target_h, Image.INTERPOLATE_NEAREST)
 	
-	return chunk_heightmap
+	return {
+		"heightmap": chunk_heightmap,
+		"hole_mask": chunk_hole_mask
+	}
 
 func _get_feature_world_bounds(feature: TerrainFeatureNode) -> Rect2:
 	var center = Vector2(feature.global_position.x, feature.global_position.z)
@@ -682,12 +709,13 @@ func _rebuild_chunks(full_rebuild: bool) -> void:
 	
 	var jobs: Array = []
 	for chunk in dirty_chunks:
-		var heightmap = _extract_chunk_heightmap(chunk, chunk.lod_level)
-		if not heightmap:
+		var chunk_data = _extract_chunk_heightmap(chunk, chunk.lod_level)
+		if chunk_data.is_empty():
 			continue
 		jobs.append({
 			"key": chunk.position,
-			"heightmap": heightmap,
+			"heightmap": chunk_data["heightmap"],
+			"hole_mask": chunk_data["hole_mask"],
 			"size": Vector2(chunk.world_bounds.size.x, chunk.world_bounds.size.y),
 			"lod_level": chunk.lod_level
 		})
@@ -723,11 +751,14 @@ func _generate_chunk_meshes_threaded(data: Dictionary) -> void:
 	var results: Array = []
 	for job in data["jobs"]:
 		var heightmap: Image = job["heightmap"]
-		var mesh = TerrainMeshGenerator.generate_from_heightmap(heightmap, job["size"])
+		var hole_mask: Image = job.get("hole_mask", null)
+		var size: Vector2 = job["size"]
+		var mesh = TerrainMeshGenerator.generate_from_heightmap(heightmap, size, hole_mask)
 		results.append({
 			"key": job["key"],
 			"mesh": mesh,
 			"heightmap": heightmap,
+			"hole_mask": hole_mask,
 			"lod_level": job["lod_level"]
 		})
 	_pending_chunk_results = results
@@ -745,6 +776,7 @@ func _apply_pending_chunk_results() -> void:
 		chunk.mesh_instance.mesh = result["mesh"]
 		chunk.mesh_instance.visible = true
 		chunk.heightmap = result["heightmap"]
+		chunk.hole_mask = result.get("hole_mask", null)
 		chunk.lod_level = result["lod_level"]
 		chunk.is_dirty = false
 		_update_chunk_collision(chunk)
@@ -787,9 +819,20 @@ func _update_chunk_collision(chunk: TerrainChunk) -> void:
 		
 		var map_data: PackedFloat32Array = PackedFloat32Array()
 		map_data.resize(width * depth)
+		
+		var has_holes := chunk.hole_mask != null
+		var hole_data: PackedFloat32Array
+		if has_holes:
+			hole_data = chunk.hole_mask.get_data().to_float32_array()
+		
 		for z in range(depth):
 			for x in range(width):
-				map_data[z * width + x] = chunk.heightmap.get_pixel(x, z).r
+				var idx = z * width + x
+				if has_holes and hole_data[idx] >= 0.5:
+					map_data[idx] = -1000000.0  # Very negative value for holes
+				else:
+					map_data[idx] = chunk.heightmap.get_pixel(x, z).r
+		
 		height_shape.map_data = map_data
 		chunk.collision_shape.shape = height_shape
 		
@@ -815,6 +858,12 @@ func _update_chunk_collision(chunk: TerrainChunk) -> void:
 func _update_all_chunk_collisions() -> void:
 	for chunk in _chunks.values():
 		_update_chunk_collision(chunk)
+
+func _update_all_chunk_collision_properties() -> void:
+	for chunk in _chunks.values():
+		if chunk and chunk.static_body:
+			chunk.static_body.collision_layer = collision_layer
+			chunk.static_body.collision_mask = collision_mask
 
 func _update_chunk_lod() -> void:
 	var camera = get_viewport().get_camera_3d()
