@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://cn6fjwtg2402r"
-path="res://.godot/imported/coast_sand_03_diff_2k.jpg-074c2ec96bbd3559604a27a70b296a16.ctex"
+uid="uid://biwdpyonx0p23"
+path="res://.godot/imported/rock_05_nor_gl_2k.jpg-ab87de975bafcfd5f63495391d6a498d.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/sand/coast_sand_03_diff_2k.jpg"
-dest_files=["res://.godot/imported/coast_sand_03_diff_2k.jpg-074c2ec96bbd3559604a27a70b296a16.ctex"]
+source_file="res://addons/terrainy/demo/textures/rock/rock_05_nor_gl_2k.jpg"
+dest_files=["res://.godot/imported/rock_05_nor_gl_2k.jpg-ab87de975bafcfd5f63495391d6a498d.ctex"]
 
 [params]
 

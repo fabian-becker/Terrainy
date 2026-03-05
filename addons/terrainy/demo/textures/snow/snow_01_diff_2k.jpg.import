@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://k5vf7polde3u"
-path="res://.godot/imported/coast_sand_03_nor_gl_2k.jpg-7d853dd128d0e8db3a507c1899a8bb75.ctex"
+uid="uid://7ci04808kdj7"
+path="res://.godot/imported/snow_01_diff_2k.jpg-1c6ec92d957c907446f7ef6c28348cc1.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/sand/coast_sand_03_nor_gl_2k.jpg"
-dest_files=["res://.godot/imported/coast_sand_03_nor_gl_2k.jpg-7d853dd128d0e8db3a507c1899a8bb75.ctex"]
+source_file="res://addons/terrainy/demo/textures/snow/snow_01_diff_2k.jpg"
+dest_files=["res://.godot/imported/snow_01_diff_2k.jpg-1c6ec92d957c907446f7ef6c28348cc1.ctex"]
 
 [params]
 

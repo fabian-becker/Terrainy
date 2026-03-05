@@ -2,15 +2,15 @@
 
 [ext_resource type="Script" uid="uid://b03v1mqy58bj4" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_s0usi"]
 [ext_resource type="Script" uid="uid://ddlru3rps1tmg" path="res://addons/terrainy/resources/terrain_texture_layer.gd" id="2_50dxj"]
-[ext_resource type="Resource" uid="uid://capvahs7dnlxf" path="res://textures/rocky_terrain/rocky_terrain.tres" id="3_v4gbn"]
-[ext_resource type="Resource" uid="uid://dh8b8e3m2ucl7" path="res://textures/rock/rocky.tres" id="4_7tomh"]
-[ext_resource type="Resource" uid="uid://rnmk18jlmr5v" path="res://textures/snow/snow.tres" id="5_3hu61"]
+[ext_resource type="Resource" uid="uid://capvahs7dnlxf" path="res://addons/terrainy/demo/textures/rocky_terrain/rocky_terrain.tres" id="3_v4gbn"]
+[ext_resource type="Resource" uid="uid://dh8b8e3m2ucl7" path="res://addons/terrainy/demo/textures/rock/rocky.tres" id="4_7tomh"]
+[ext_resource type="Resource" uid="uid://rnmk18jlmr5v" path="res://addons/terrainy/demo/textures/snow/snow.tres" id="5_3hu61"]
 [ext_resource type="Script" uid="uid://b06n2v4b3hlyt" path="res://addons/terrainy/nodes/primitives/mountain_node.gd" id="7_s0usi"]
 [ext_resource type="Script" uid="uid://dru71ftjlqkij" path="res://addons/terrainy/nodes/landscapes/mountain_range_node.gd" id="8_50dxj"]
 [ext_resource type="Script" uid="uid://ck4gtrjpc6yu2" path="res://addons/terrainy/nodes/noise/perlin_node.gd" id="8_v4gbn"]
 [ext_resource type="Script" uid="uid://bwgsrqld6yf0x" path="res://addons/terrainy/nodes/water/water_node.gd" id="9_v4gbn"]
 [ext_resource type="Script" uid="uid://bqy5ykoxnyrj0" path="res://addons/terrainy/nodes/hole_node.gd" id="10_7tomh"]
-[ext_resource type="Script" uid="uid://bxs5tabywy0m6" path="res://character_body_3d.gd" id="11_3hu61"]
+[ext_resource type="Script" uid="uid://bxs5tabywy0m6" path="res://addons/terrainy/demo/character_body_3d.gd" id="11_3hu61"]
 
 [sub_resource type="Gradient" id="Gradient_kem5a"]
 interpolation_mode = 2

@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://c15mpfthvac3b"
-path="res://.godot/imported/rocky_terrain_02_nor_gl_2k.jpg-535c4879b64bb69b7a9fed494d16d5eb.ctex"
+uid="uid://cgjqysn8okfu"
+path="res://.godot/imported/rocky_terrain_02_spec_2k.jpg-356703d92df07b1a8e490fbd68cc6ec2.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/rocky_terrain/rocky_terrain_02_nor_gl_2k.jpg"
-dest_files=["res://.godot/imported/rocky_terrain_02_nor_gl_2k.jpg-535c4879b64bb69b7a9fed494d16d5eb.ctex"]
+source_file="res://addons/terrainy/demo/textures/rocky_terrain/rocky_terrain_02_spec_2k.jpg"
+dest_files=["res://.godot/imported/rocky_terrain_02_spec_2k.jpg-356703d92df07b1a8e490fbd68cc6ec2.ctex"]
 
 [params]
 

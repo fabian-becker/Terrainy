@@ -9,6 +9,3 @@
 /**                 export-ignore
 /addons             !export-ignore
 /addons/**          !export-ignore
-/textures           !export-ignore
-/textures/**        !export-ignore
-/terrainy_demo.tscn !export-ignore

@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://go25h4eqqcxg"
-path="res://.godot/imported/coast_sand_03_arm_2k.jpg-e148712efc3c9ab4923b52638b10a25c.ctex"
+uid="uid://c15mpfthvac3b"
+path="res://.godot/imported/rocky_terrain_02_nor_gl_2k.jpg-03a3e3dc61dda7ebc321a8e21ef7aeda.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/sand/coast_sand_03_arm_2k.jpg"
-dest_files=["res://.godot/imported/coast_sand_03_arm_2k.jpg-e148712efc3c9ab4923b52638b10a25c.ctex"]
+source_file="res://addons/terrainy/demo/textures/rocky_terrain/rocky_terrain_02_nor_gl_2k.jpg"
+dest_files=["res://.godot/imported/rocky_terrain_02_nor_gl_2k.jpg-03a3e3dc61dda7ebc321a8e21ef7aeda.ctex"]
 
 [params]
 

@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://c4amiux16fqhf"
-path="res://.godot/imported/rock_05_diff_2k.jpg-1e76427e50a350151b0e87ba3e540e4f.ctex"
+uid="uid://cphiu0x3nblrb"
+path="res://.godot/imported/snow_01_rough_2k.jpg-3369689ce193282836d8169ae57bdaea.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/rock/rock_05_diff_2k.jpg"
-dest_files=["res://.godot/imported/rock_05_diff_2k.jpg-1e76427e50a350151b0e87ba3e540e4f.ctex"]
+source_file="res://addons/terrainy/demo/textures/snow/snow_01_rough_2k.jpg"
+dest_files=["res://.godot/imported/snow_01_rough_2k.jpg-3369689ce193282836d8169ae57bdaea.ctex"]
 
 [params]
 
