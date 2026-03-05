@@ -56,6 +56,9 @@ func _enter_tree() -> void:
 	# Water
 	add_custom_type("WaterNode", "Node3D", preload("res://addons/terrainy/nodes/water/water_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	
+	#Holes
+	add_custom_type("HoleNode", "Node3D", preload("res://addons/terrainy/nodes/hole_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
+
 	# Utility nodes
 	add_custom_type("ShapeNode", "Node3D", preload("res://addons/terrainy/nodes/basic/shape_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	add_custom_type("HeightmapNode", "Node3D", preload("res://addons/terrainy/nodes/basic/heightmap_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
@@ -159,6 +162,9 @@ func _exit_tree() -> void:
 	
 	# Water
 	remove_custom_type("WaterNode")
+
+	# Holes
+	remove_custom_type("HoleNode")
 	
 	# Utility
 	remove_custom_type("ShapeNode")

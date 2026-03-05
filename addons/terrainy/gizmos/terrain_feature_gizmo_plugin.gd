@@ -4,12 +4,14 @@ extends EditorNode3DGizmoPlugin
 ## Gizmo plugin for TerrainFeatureNodes to visualize influence radius
 
 const TerrainFeatureNode = preload("res://addons/terrainy/nodes/terrain_feature_node.gd")
+const HoleNode = preload("res://addons/terrainy/nodes/hole_node.gd")
 
 # Gizmo color constants
 const GIZMO_COLOR_MAIN = Color(0.3, 0.8, 1.0, 0.6)
 const GIZMO_COLOR_FALLOFF = Color(0.8, 0.5, 0.2, 0.4)
 const GIZMO_COLOR_DIRECTION = Color(1.0, 0.3, 0.3, 0.8)
 const GIZMO_COLOR_HEIGHT = Color(0.3, 1.0, 0.3, 0.6)
+const GIZMO_COLOR_HOLE = Color(1.0, 0.3, 0.3, 0.5)  # Red for holes
 
 signal gizmo_manipulation_started(node: Node3D)
 signal gizmo_manipulation_ended(node: Node3D)
@@ -22,6 +24,7 @@ func _init():
 	create_material("falloff", GIZMO_COLOR_FALLOFF)
 	create_material("direction", GIZMO_COLOR_DIRECTION)
 	create_material("height", GIZMO_COLOR_HEIGHT)
+	create_material("hole", GIZMO_COLOR_HOLE)
 	create_handle_material("handles")
 
 func _get_gizmo_name() -> String:
@@ -91,6 +94,30 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 	lines.push_back(Vector3(5, 0, 0))
 	lines.push_back(Vector3(0, 0, -5))
 	lines.push_back(Vector3(0, 0, 5))
+	
+	# Draw special indication for hole nodes
+	var hole_lines = PackedVector3Array()
+	if node is HoleNode:
+		var hole_node = node as HoleNode
+		# Draw X through the center to indicate this is a hole
+		var max_size = max(size.x, size.y) * 0.3
+		hole_lines.push_back(Vector3(-max_size, 0.5, -max_size))
+		hole_lines.push_back(Vector3(max_size, 0.5, max_size))
+		hole_lines.push_back(Vector3(-max_size, 0.5, max_size))
+		hole_lines.push_back(Vector3(max_size, 0.5, -max_size))
+		
+		# Draw bevel width indicator if beveled
+		if hole_node.edge_type == HoleNode.EdgeType.BEVELED and hole_node.edge_bevel_width > 0:
+			var bevel = hole_node.edge_bevel_width
+			var bevel_lines = PackedVector3Array()
+			match node.influence_shape:
+				TerrainFeatureNode.InfluenceShape.CIRCLE:
+					_draw_circle(bevel_lines, size.x - bevel, segments)
+				TerrainFeatureNode.InfluenceShape.RECTANGLE:
+					_draw_rectangle(bevel_lines, size - Vector2(bevel * 2, bevel * 2))
+				TerrainFeatureNode.InfluenceShape.ELLIPSE:
+					_draw_ellipse(bevel_lines, size - Vector2(bevel * 2, bevel * 2), segments)
+			gizmo.add_lines(bevel_lines, get_material("falloff", gizmo))
 	
 	# Draw direction arrow for gradient and landscape nodes
 	if "direction" in node:
@@ -171,6 +198,8 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		gizmo.add_lines(direction_lines, get_material("direction", gizmo))
 	if height_lines.size() > 0:
 		gizmo.add_lines(height_lines, get_material("height", gizmo))
+	if hole_lines.size() > 0:
+		gizmo.add_lines(hole_lines, get_material("hole", gizmo))
 	
 	# Add handles
 	var handles = PackedVector3Array()

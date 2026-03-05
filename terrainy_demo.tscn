@@ -1,4 +1,4 @@
-[gd_scene load_steps=20 format=3 uid="uid://megrg78jfp83"]
+[gd_scene load_steps=21 format=3 uid="uid://megrg78jfp83"]
 
 [ext_resource type="Script" uid="uid://b03v1mqy58bj4" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_s0usi"]
 [ext_resource type="Script" uid="uid://ddlru3rps1tmg" path="res://addons/terrainy/resources/terrain_texture_layer.gd" id="2_50dxj"]
@@ -9,6 +9,7 @@
 [ext_resource type="Script" uid="uid://dru71ftjlqkij" path="res://addons/terrainy/nodes/landscapes/mountain_range_node.gd" id="8_50dxj"]
 [ext_resource type="Script" uid="uid://ck4gtrjpc6yu2" path="res://addons/terrainy/nodes/noise/perlin_node.gd" id="8_v4gbn"]
 [ext_resource type="Script" uid="uid://bwgsrqld6yf0x" path="res://addons/terrainy/nodes/water/water_node.gd" id="9_v4gbn"]
+[ext_resource type="Script" uid="uid://bqy5ykoxnyrj0" path="res://addons/terrainy/nodes/hole_node.gd" id="10_7tomh"]
 
 [sub_resource type="Gradient" id="Gradient_kem5a"]
 interpolation_mode = 2
@@ -81,9 +82,8 @@ shadow_enabled = true
 [node name="TerrainComposer" type="Node3D" parent="."]
 script = ExtResource("1_s0usi")
 terrain_size = Vector2(1024, 1024)
-resolution = 512
+resolution = 1024
 base_height = -10.0
-use_gpu_composition = false
 texture_layers = Array[ExtResource("2_50dxj")]([ExtResource("3_v4gbn"), ExtResource("4_7tomh"), ExtResource("5_3hu61")])
 metadata/_custom_type_script = "uid://b03v1mqy58bj4"
 
@@ -134,6 +134,16 @@ wave_frequency = 0.3
 normal_strength = 1.0
 influence_size = Vector2(68.38356, 68.38356)
 metadata/_custom_type_script = "uid://bwgsrqld6yf0x"
+metadata/_gizmo_manipulating = false
+
+[node name="Hole" type="Node3D" parent="TerrainComposer"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 154.6316, 0, 58.93773)
+script = ExtResource("10_7tomh")
+edge_type = 1
+edge_bevel_width = 1.0
+influence_size = Vector2(60.614685, 60.614685)
+edge_falloff = 0.44059419088097906
+metadata/_custom_type_script = "uid://bqy5ykoxnyrj0"
 metadata/_gizmo_manipulating = false
 
 [node name="Camera3D" type="Camera3D" parent="."]
