@@ -2,6 +2,7 @@
 extends EditorPlugin
 
 var rebuild_button: Button
+var bake_button: Button
 # var gizmo_toggle_button: CheckButton
 var current_terrain_composer: Node3D
 var terrain_gizmo_plugin: EditorNode3DGizmoPlugin
@@ -81,6 +82,11 @@ func _enter_tree() -> void:
 	rebuild_button.text = "Rebuild Terrain"
 	rebuild_button.pressed.connect(_on_rebuild_pressed)
 	add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, rebuild_button)
+
+	bake_button = Button.new()
+	bake_button.text = "Bake Terrain"
+	bake_button.pressed.connect(_on_bake_pressed)
+	add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, bake_button)
 	
 	# gizmo_toggle_button = CheckButton.new()
 	# gizmo_toggle_button.text = "Show Gizmos"
@@ -112,6 +118,10 @@ func _exit_tree() -> void:
 	if rebuild_button:
 		remove_control_from_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, rebuild_button)
 		rebuild_button.queue_free()
+
+	if bake_button:
+		remove_control_from_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, bake_button)
+		bake_button.queue_free()
 	
 	# if gizmo_toggle_button:
 	# 	remove_control_from_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, gizmo_toggle_button)
@@ -188,6 +198,8 @@ func _update_button_visibility() -> void:
 	
 	var has_terrain_composer = _find_terrain_composer_in_tree() != null
 	rebuild_button.visible = has_terrain_composer
+	if bake_button:
+		bake_button.visible = has_terrain_composer
 
 func _find_terrain_composer_in_tree() -> Node3D:
 	var edited_scene_root = get_tree().edited_scene_root
@@ -224,6 +236,24 @@ func _on_rebuild_pressed() -> void:
 	if target and is_instance_valid(target):
 		# Force a complete rebuild with all caches cleared
 		target.force_rebuild()
+
+func _on_bake_pressed() -> void:
+	print("[Terrainy] Bake Terrain button pressed")
+
+	var target = current_terrain_composer
+	if not target or not is_instance_valid(target):
+		target = _find_terrain_composer_in_tree()
+
+	if target and is_instance_valid(target) and target.has_method("bake_terrain_to_disk"):
+		if target.has_method("set"):
+			var undo_redo = get_undo_redo()
+			if undo_redo:
+				var previous_value = target.get("bake_enabled")
+				undo_redo.create_action("Enable Terrain Bake")
+				undo_redo.add_do_property(target, "bake_enabled", true)
+				undo_redo.add_undo_property(target, "bake_enabled", previous_value)
+				undo_redo.commit_action()
+		target.bake_terrain_to_disk()
 
 func _rebuild_all_terrain_composers() -> void:
 	var edited_scene_root = get_tree().edited_scene_root
