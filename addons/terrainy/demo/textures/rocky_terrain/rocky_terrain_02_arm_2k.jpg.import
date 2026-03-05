@@ -2,21 +2,20 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://c30o87vyn3121"
-path.s3tc="res://.godot/imported/sky_23_2k.png-bf386d88a6dc18d153f5d57a67baf115.s3tc.ctex"
+uid="uid://bs3fqedur7wuf"
+path="res://.godot/imported/rocky_terrain_02_arm_2k.jpg-138fe1ceb294eab3d4c9f3d2dac0493f.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc"],
-"vram_texture": true
+"vram_texture": false
 }
 
 [deps]
 
-source_file="res://textures/sky_23_2k.png"
-dest_files=["res://.godot/imported/sky_23_2k.png-bf386d88a6dc18d153f5d57a67baf115.s3tc.ctex"]
+source_file="res://addons/terrainy/demo/textures/rocky_terrain/rocky_terrain_02_arm_2k.jpg"
+dest_files=["res://.godot/imported/rocky_terrain_02_arm_2k.jpg-138fe1ceb294eab3d4c9f3d2dac0493f.ctex"]
 
 [params]
 
-compress/mode=2
+compress/mode=0
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -38,4 +37,4 @@ process/normal_map_invert_y=false
 process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
-detect_3d/compress_to=0
+detect_3d/compress_to=2
