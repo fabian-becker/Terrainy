@@ -148,22 +148,36 @@ vec2 rotate2d(vec2 p, float angle) {
 	return vec2(p.x * c - p.y * s, p.x * s + p.y * c);
 }
 
-float shape_distance(vec2 pos, int shape_type, float radius) {
-	vec2 abs_pos = abs(pos);
-	if (shape_type == 0) {
-		return length(pos);
-	} else if (shape_type == 1) {
-		return max(abs_pos.x, abs_pos.y);
-	} else if (shape_type == 2) {
-		return abs_pos.x + abs_pos.y;
-	} else if (shape_type == 3) {
-		float angle = atan(pos.y, pos.x);
-		float star_radius = radius * (0.6 + 0.4 * abs(sin(angle * 2.5)));
-		return length(pos) / star_radius * radius;
-	} else if (shape_type == 4) {
-		return min(abs_pos.x, abs_pos.y) * 2.0 + max(abs_pos.x, abs_pos.y) * 0.5;
+float sample_shape_mask(int data_offset, ivec2 size, vec2 uv) {
+	if (size.x <= 0 || size.y <= 0) {
+		return 0.0;
 	}
-	return length(pos);
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
+		return 0.0;
+	}
+
+	float x = uv.x * float(size.x - 1);
+	float y = uv.y * float(size.y - 1);
+	int x0 = int(floor(x));
+	int y0 = int(floor(y));
+	int x1 = min(x0 + 1, size.x - 1);
+	int y1 = min(y0 + 1, size.y - 1);
+	float dx = x - float(x0);
+	float dy = y - float(y0);
+
+	int idx00 = y0 * size.x + x0;
+	int idx10 = y0 * size.x + x1;
+	int idx01 = y1 * size.x + x0;
+	int idx11 = y1 * size.x + x1;
+
+	float h00 = param_floats[data_offset + idx00];
+	float h10 = param_floats[data_offset + idx10];
+	float h01 = param_floats[data_offset + idx01];
+	float h11 = param_floats[data_offset + idx11];
+
+	float h0 = mix(h00, h10, dx);
+	float h1 = mix(h01, h11, dx);
+	return mix(h0, h1, dy);
 }
 
 float sample_heightmap(int data_offset, ivec2 size, int wrap_mode, int invert, vec2 uv) {
@@ -348,20 +362,31 @@ void main() {
 		float shape_height = get_float(19);
 		float smoothness = get_float(20);
 		float rotation = get_float(21);
-		int shape_type = get_int(2);
-		float radius = max(influence_size.x, 0.0001);
+		int mask_size_x = get_int(2);
+		int mask_size_y = get_int(3);
+		int data_offset = get_int(4);
+		vec2 half_size = vec2(max(influence_size.x * 0.5, 0.0001), max(influence_size.y * 0.5, 0.0001));
 		vec2 pos_2d = rotate2d(local_pos.xz, rotation);
-		float dist = shape_distance(pos_2d, shape_type, radius);
-		if (dist >= radius) {
+		float normalized_distance = max(abs(pos_2d.x) / half_size.x, abs(pos_2d.y) / half_size.y);
+		if (normalized_distance >= 1.0) {
 			height = 0.0;
 		} else {
-			float edge_start = radius * (1.0 - smoothness);
-			float height_factor = 1.0;
-			if (dist > edge_start && radius > edge_start) {
-				float edge_t = (dist - edge_start) / max(radius - edge_start, 0.0001);
-				height_factor = 1.0 - smoothstep(0.0, 1.0, edge_t);
+			vec2 uv = vec2(
+				(pos_2d.x / max(influence_size.x, 0.0001)) + 0.5,
+				(pos_2d.y / max(influence_size.y, 0.0001)) + 0.5
+			);
+			float mask_value = sample_shape_mask(data_offset, ivec2(mask_size_x, mask_size_y), uv);
+			if (mask_value <= 0.0) {
+				height = 0.0;
+			} else {
+				float edge_start = 1.0 - smoothness;
+				float height_factor = 1.0;
+				if (normalized_distance > edge_start && 1.0 > edge_start) {
+					float edge_t = (normalized_distance - edge_start) / max(1.0 - edge_start, 0.0001);
+					height_factor = 1.0 - smoothstep(0.0, 1.0, edge_t);
+				}
+				height = shape_height * mask_value * height_factor;
 			}
-			height = shape_height * height_factor;
 		}
 	} else if (params.feature_type == FEATURE_HEIGHTMAP) {
 		float height_scale = get_float(19);

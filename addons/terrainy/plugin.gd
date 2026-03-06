@@ -7,6 +7,7 @@ var bake_button: Button
 var current_terrain_composer: Node3D
 var terrain_gizmo_plugin: EditorNode3DGizmoPlugin
 var _editor_selection: EditorSelection
+var _shape_node_inspector_plugin: EditorInspectorPlugin
 
 func _enter_tree() -> void:
 	# Add rebuild coordinator autoload
@@ -69,6 +70,11 @@ func _enter_tree() -> void:
 	terrain_gizmo_plugin = preload("res://addons/terrainy/gizmos/terrain_feature_gizmo_plugin.gd").new()
 	terrain_gizmo_plugin.undo_redo = get_undo_redo()
 	add_node_3d_gizmo_plugin(terrain_gizmo_plugin)
+
+	# Add custom inspector for ShapeNode mask editing.
+	_shape_node_inspector_plugin = preload("res://addons/terrainy/editor/shape_node_inspector_plugin.gd").new()
+	_shape_node_inspector_plugin.host_plugin = self
+	add_inspector_plugin(_shape_node_inspector_plugin)
 	
 	# Refresh gizmos for existing nodes after a short delay
 	call_deferred("_refresh_existing_gizmos")
@@ -130,6 +136,10 @@ func _exit_tree() -> void:
 	
 	if terrain_gizmo_plugin:
 		remove_node_3d_gizmo_plugin(terrain_gizmo_plugin)
+
+	if _shape_node_inspector_plugin:
+		remove_inspector_plugin(_shape_node_inspector_plugin)
+		_shape_node_inspector_plugin = null
 
 	if _editor_selection and _editor_selection.selection_changed.is_connected(_on_selection_changed):
 		_editor_selection.selection_changed.disconnect(_on_selection_changed)
