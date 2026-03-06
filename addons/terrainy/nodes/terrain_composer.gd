@@ -3,6 +3,7 @@ class_name TerrainComposer
 extends Node3D
 
 const TerrainFeatureNode = preload("res://addons/terrainy/nodes/terrain_feature_node.gd")
+const ScatterNode = preload("res://addons/terrainy/nodes/scatter/scatter_node.gd")
 const TerrainTextureLayer = preload("res://addons/terrainy/resources/terrain_texture_layer.gd")
 const TerrainMeshGenerator = preload("res://addons/terrainy/helpers/terrain_mesh_generator.gd")
 const TerrainHeightmapBuilder = preload("res://addons/terrainy/helpers/terrain_heightmap_builder.gd")
@@ -152,6 +153,8 @@ class TerrainChunk:
 
 # Internal
 var _feature_nodes: Array[TerrainFeatureNode] = []
+var _height_feature_nodes: Array[TerrainFeatureNode] = []
+var _scatter_nodes: Array[ScatterNode] = []
 var _is_generating: bool = false
 
 # Chunking
@@ -226,6 +229,7 @@ func _ready() -> void:
 		_initial_rebuild_pending = false
 		_update_material()
 		_update_all_chunk_collision_properties()
+		_refresh_scatter_instances()
 		terrain_updated.emit()
 		set_process(enable_lod)
 		return
@@ -281,6 +285,7 @@ func _exit_tree() -> void:
 		_heightmap_composer = null
 	
 	# Clean up chunks
+	_clear_all_scatter_instances()
 	for chunk in _chunks.values():
 		_free_chunk(chunk)
 	_chunks.clear()
@@ -294,7 +299,15 @@ func _scan_features() -> void:
 			feature.parameters_changed.disconnect(_on_feature_changed)
 	
 	_feature_nodes.clear()
+	_height_feature_nodes.clear()
+	_scatter_nodes.clear()
 	_scan_recursive(self)
+
+	for feature in _feature_nodes:
+		if feature is ScatterNode:
+			_scatter_nodes.append(feature)
+		else:
+			_height_feature_nodes.append(feature)
 
 	var features_changed = false
 	if previous_features.size() != _feature_nodes.size():
@@ -385,7 +398,7 @@ func _on_feature_changed(feature: TerrainFeatureNode) -> void:
 	_maybe_invalidate_bake("feature parameters changed")
 
 	# Invalidate caches via helper
-	if _heightmap_composer:
+	if _heightmap_composer and not (feature is ScatterNode):
 		_heightmap_composer.invalidate_heightmap(feature)
 		
 		# Only invalidate influence if influence-related properties changed
@@ -857,7 +870,7 @@ func rebuild_terrain() -> void:
 	# Phase 4: Prepare all evaluation contexts on main thread
 	var context_start = Time.get_ticks_msec()
 	var feature_contexts = {}
-	for feature in _feature_nodes:
+	for feature in _height_feature_nodes:
 		if is_instance_valid(feature) and feature.is_inside_tree() and feature.visible:
 			feature_contexts[feature] = feature.prepare_evaluation_context()
 	var context_elapsed = Time.get_ticks_msec() - context_start
@@ -866,7 +879,7 @@ func rebuild_terrain() -> void:
 	# Compose heightmaps using helper with contexts
 	var compose_start = Time.get_ticks_msec()
 	var compose_result = _heightmap_composer.compose(
-		_feature_nodes,
+		_height_feature_nodes,
 		feature_contexts,
 		heightmap_resolution,
 		_terrain_bounds,
@@ -1130,6 +1143,7 @@ func _rebuild_chunks(full_rebuild: bool) -> void:
 		_is_generating = false
 		_rebuild_start_msec = 0
 		_initial_rebuild_pending = false
+		_refresh_scatter_instances()
 		if _coordinator_rebuild_pending and Engine.has_singleton("TerrainRebuildCoordinator"):
 			TerrainRebuildCoordinator.rebuild_completed(self)
 			_coordinator_rebuild_pending = false
@@ -1218,6 +1232,7 @@ func _apply_pending_chunk_results() -> void:
 
 func _on_chunk_generation_completed() -> void:
 	_apply_pending_chunk_results()
+	_refresh_scatter_instances()
 	_is_generating = false
 	_initial_rebuild_pending = false
 
@@ -1326,3 +1341,186 @@ func _calculate_lod_level(distance: float) -> int:
 		if distance < lod_distances[i]:
 			return i
 	return clampi(lod_distances.size(), 0, lod_scale_factors.size() - 1)
+
+func _clear_all_scatter_instances() -> void:
+	for scatter in _scatter_nodes:
+		if is_instance_valid(scatter):
+			_clear_scatter_instances(scatter)
+
+func _refresh_scatter_instances() -> void:
+	if _final_heightmap == null:
+		return
+
+	for scatter in _scatter_nodes:
+		if not is_instance_valid(scatter):
+			continue
+		if not scatter.visible or not scatter.is_inside_tree():
+			_clear_scatter_instances(scatter)
+			continue
+		if scatter.scene == null or scatter.density <= 0.0:
+			_clear_scatter_instances(scatter)
+			continue
+		_scatter_single_node(scatter)
+
+func _scatter_single_node(scatter: ScatterNode) -> void:
+	var scope = _resolve_scatter_scope(scatter)
+	if scope.is_empty():
+		_clear_scatter_instances(scatter)
+		return
+
+	var scope_rect: Rect2 = scope["bounds"]
+	if scope_rect.size.x <= 0.0 or scope_rect.size.y <= 0.0:
+		_clear_scatter_instances(scatter)
+		return
+
+	var scope_context: EvaluationContext = scope.get("context", null)
+	var scope_area = scope_rect.size.x * scope_rect.size.y
+	var computed_count = int(round(scope_area * scatter.density))
+	computed_count = max(computed_count, scatter.min_instances)
+	if scatter.max_instances > 0:
+		computed_count = min(computed_count, scatter.max_instances)
+	if computed_count <= 0:
+		_clear_scatter_instances(scatter)
+		return
+
+	var rng = RandomNumberGenerator.new()
+	var stable_key = "%s|%d" % [str(get_path_to(scatter)), scatter.seed]
+	rng.seed = stable_key.hash()
+
+	var container = _get_or_create_scatter_container(scatter)
+	for child in container.get_children():
+		child.queue_free()
+
+	var accepted_aabbs: Array[AABB] = []
+	var max_attempts = max(computed_count * 12, 64)
+	var placed = 0
+
+	for attempt in range(max_attempts):
+		if placed >= computed_count:
+			break
+
+		var world_x = rng.randf_range(scope_rect.position.x, scope_rect.position.x + scope_rect.size.x)
+		var world_z = rng.randf_range(scope_rect.position.y, scope_rect.position.y + scope_rect.size.y)
+		var world_pos = Vector3(world_x, 0.0, world_z)
+
+		if scope_context != null and scope_context.get_influence_weight(world_pos) <= 0.0:
+			continue
+
+		if not _terrain_bounds.has_point(Vector2(world_x, world_z)):
+			continue
+
+		var sampled_height = _sample_height_at(world_x, world_z)
+		var sampled_normal = _sample_normal_at(world_x, world_z)
+		world_pos.y = sampled_height
+
+		var random_scale = scatter.get_random_scale(rng)
+		var candidate_half_extents = scatter.get_overlap_half_extents(random_scale)
+		var candidate_aabb = AABB(world_pos - candidate_half_extents, candidate_half_extents * 2.0)
+
+		if not scatter.allow_overlap:
+			var overlaps = false
+			for existing in accepted_aabbs:
+				if existing.intersects(candidate_aabb):
+					overlaps = true
+					break
+			if overlaps:
+				continue
+
+		var instance = scatter.scene.instantiate()
+		if not (instance is Node3D):
+			instance.queue_free()
+			continue
+
+		var instance_3d := instance as Node3D
+		container.add_child(instance_3d, false, Node.INTERNAL_MODE_BACK)
+
+		var basis = Basis.IDENTITY
+		if scatter.align_to_normal:
+			basis = Basis(Quaternion(Vector3.UP, sampled_normal))
+
+		var random_rotation = scatter.get_rotation_radians(rng)
+		basis = basis.rotated(Vector3.RIGHT, random_rotation.x)
+		basis = basis.rotated(Vector3.UP, random_rotation.y)
+		basis = basis.rotated(Vector3.BACK, random_rotation.z)
+		basis = basis.scaled(random_scale)
+
+		instance_3d.global_transform = Transform3D(basis, world_pos)
+		accepted_aabbs.append(candidate_aabb)
+		placed += 1
+
+func _resolve_scatter_scope(scatter: ScatterNode) -> Dictionary:
+	var parent_feature = _find_parent_feature(scatter)
+	if parent_feature != null:
+		var feature_bounds = _get_feature_world_bounds(parent_feature)
+		var intersection = feature_bounds.intersection(_terrain_bounds)
+		if intersection.size.x <= 0.0 or intersection.size.y <= 0.0:
+			return {}
+		return {
+			"bounds": intersection,
+			"context": parent_feature.prepare_evaluation_context()
+		}
+
+	if scatter.get_parent() == self:
+		return {
+			"bounds": _terrain_bounds,
+			"context": null
+		}
+
+	var fallback = _terrain_bounds
+	if fallback.size.x <= 0.0 or fallback.size.y <= 0.0:
+		return {}
+	return {
+		"bounds": fallback,
+		"context": null
+	}
+
+func _find_parent_feature(scatter: ScatterNode) -> TerrainFeatureNode:
+	var node: Node = scatter.get_parent()
+	while node != null and node != self:
+		if node is TerrainFeatureNode:
+			return node as TerrainFeatureNode
+		node = node.get_parent()
+	return null
+
+func _sample_height_at(world_x: float, world_z: float) -> float:
+	if _final_heightmap == null:
+		return base_height
+
+	var u = (world_x - _terrain_bounds.position.x) / max(_terrain_bounds.size.x, 0.0001)
+	var v = (world_z - _terrain_bounds.position.y) / max(_terrain_bounds.size.y, 0.0001)
+	u = clampf(u, 0.0, 1.0)
+	v = clampf(v, 0.0, 1.0)
+
+	var ix = int(round(u * float(_final_heightmap.get_width() - 1)))
+	var iy = int(round(v * float(_final_heightmap.get_height() - 1)))
+	return global_position.y + _final_heightmap.get_pixel(ix, iy).r
+
+func _sample_normal_at(world_x: float, world_z: float) -> Vector3:
+	var sample_step_x = max(_terrain_bounds.size.x / max(float(resolution), 1.0), 0.5)
+	var sample_step_z = max(_terrain_bounds.size.y / max(float(resolution), 1.0), 0.5)
+
+	var h_l = _sample_height_at(world_x - sample_step_x, world_z)
+	var h_r = _sample_height_at(world_x + sample_step_x, world_z)
+	var h_d = _sample_height_at(world_x, world_z - sample_step_z)
+	var h_u = _sample_height_at(world_x, world_z + sample_step_z)
+
+	var normal = Vector3(h_l - h_r, 2.0, h_d - h_u).normalized()
+	if normal.is_equal_approx(Vector3.ZERO):
+		return Vector3.UP
+	return normal
+
+func _get_or_create_scatter_container(scatter: ScatterNode) -> Node3D:
+	var existing = scatter.get_node_or_null("ScatterInstances")
+	if existing and existing is Node3D:
+		return existing as Node3D
+
+	var container = Node3D.new()
+	container.name = "ScatterInstances"
+	scatter.add_child(container, false, Node.INTERNAL_MODE_BACK)
+	return container
+
+func _clear_scatter_instances(scatter: ScatterNode) -> void:
+	var container = scatter.get_node_or_null("ScatterInstances")
+	if container and container is Node3D:
+		for child in container.get_children():
+			child.queue_free()

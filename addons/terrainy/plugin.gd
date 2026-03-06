@@ -63,6 +63,7 @@ func _enter_tree() -> void:
 	# Utility nodes
 	add_custom_type("ShapeNode", "Node3D", preload("res://addons/terrainy/nodes/basic/shape_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	add_custom_type("HeightmapNode", "Node3D", preload("res://addons/terrainy/nodes/basic/heightmap_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
+	add_custom_type("ScatterNode", "Node3D", preload("res://addons/terrainy/nodes/scatter/scatter_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	
 	# Add gizmo plugin
 	terrain_gizmo_plugin = preload("res://addons/terrainy/gizmos/terrain_feature_gizmo_plugin.gd").new()
@@ -179,6 +180,7 @@ func _exit_tree() -> void:
 	# Utility
 	remove_custom_type("ShapeNode")
 	remove_custom_type("HeightmapNode")
+	remove_custom_type("ScatterNode")
 
 func _handles(object: Object) -> bool:
 	return object is Node3D and object.get_script() == preload("res://addons/terrainy/nodes/terrain_composer.gd")

@@ -28,6 +28,14 @@ A hybrid node-based and spatial terrain editor for Godot 4 with live preview and
 - Perlin Noise
 - Voronoi patterns
 
+**Object Scattering**
+- Scatter packed scenes (grass, trees, props, buildings) after terrain generation
+- Deterministic placement with seed, density, and transform variation controls
+- Optional AABB overlap rejection
+- Scope-aware placement:
+  - If `ScatterNode` is child of a terrain feature, placement is constrained to the parent feature influence area
+  - If `ScatterNode` is direct child of `TerrainComposer`, placement uses the full terrain area
+
 ### Terrain Modifiers
 
 All terrain features support modifiers that can be applied to adjust their appearance:
