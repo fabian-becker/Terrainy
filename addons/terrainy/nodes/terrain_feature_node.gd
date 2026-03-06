@@ -57,7 +57,8 @@ enum FeatureType {
 	LANDSCAPE_DUNE_SEA = 402,
 	NOISE_PERLIN = 500,
 	NOISE_VORONOI = 501,
-	HOLE = 600
+	HOLE = 600,
+	SCATTER = 700
 }
 
 ## Shape of the influence area
@@ -201,6 +202,11 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 ## This avoids calling to_local() or accessing scene tree in worker threads.
 func get_influence_weight_safe(world_pos: Vector3, context: EvaluationContext) -> float:
 	return context.get_influence_weight(world_pos)
+
+## Whether this feature contributes to the terrain heightmap composition.
+## Override in non-height features (for example scatter/object placement nodes).
+func affects_heightmap() -> bool:
+	return true
 
 ## GPU parameter pack for compute kernels (versioned layout)
 func get_gpu_param_pack() -> Dictionary:

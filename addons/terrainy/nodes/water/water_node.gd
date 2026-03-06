@@ -135,16 +135,25 @@ signal water_mesh_updated
 var _water_mesh_instance: MeshInstance3D = null
 var _water_shader_material: ShaderMaterial = null
 var _is_building_mesh: bool = false
+var _composer: Node = null
 
 func _ready() -> void:
 	super._ready()
+	_connect_to_composer()
 	_create_water_mesh_instance()
 	_update_water_mesh()
 
 func _exit_tree() -> void:
+	_disconnect_from_composer()
 	if _water_mesh_instance and is_instance_valid(_water_mesh_instance):
 		_water_mesh_instance.queue_free()
 		_water_mesh_instance = null
+
+func _enter_tree() -> void:
+	# Tool scripts can reload while the scene remains open; reconnect and rebuild.
+	_connect_to_composer()
+	if is_inside_tree():
+		call_deferred("_ensure_water_mesh")
 
 func prepare_evaluation_context() -> WaterEvaluationContext:
 	return WaterEvaluationContext.from_water_feature(self)
@@ -269,6 +278,9 @@ func _update_water_mesh() -> void:
 		if _water_mesh_instance:
 			_water_mesh_instance.visible = false
 		return
+
+	if not _water_mesh_instance or not is_instance_valid(_water_mesh_instance):
+		_create_water_mesh_instance()
 	
 	if _is_building_mesh:
 		return
@@ -277,7 +289,7 @@ func _update_water_mesh() -> void:
 	call_deferred("_build_water_mesh")
 
 func _build_water_mesh() -> void:
-	if not is_inside_tree() or not _water_mesh_instance:
+	if not is_inside_tree() or not _water_mesh_instance or not is_instance_valid(_water_mesh_instance):
 		_is_building_mesh = false
 		return
 	
@@ -353,6 +365,34 @@ func _build_water_mesh() -> void:
 	_is_building_mesh = false
 	_water_mesh_instance.visible = generate_water_mesh
 	water_mesh_updated.emit()
+
+func _ensure_water_mesh() -> void:
+	if not is_inside_tree():
+		return
+	if not _water_mesh_instance or not is_instance_valid(_water_mesh_instance):
+		_create_water_mesh_instance()
+	if generate_water_mesh and (_water_mesh_instance.mesh == null or not _water_mesh_instance.visible):
+		_update_water_mesh()
+
+func _connect_to_composer() -> void:
+	_disconnect_from_composer()
+	var node: Node = get_parent()
+	while node:
+		if node.has_signal("terrain_updated"):
+			_composer = node
+			if not _composer.terrain_updated.is_connected(_on_composer_terrain_updated):
+				_composer.terrain_updated.connect(_on_composer_terrain_updated)
+			break
+		node = node.get_parent()
+
+func _disconnect_from_composer() -> void:
+	if _composer and is_instance_valid(_composer):
+		if _composer.terrain_updated.is_connected(_on_composer_terrain_updated):
+			_composer.terrain_updated.disconnect(_on_composer_terrain_updated)
+	_composer = null
+
+func _on_composer_terrain_updated() -> void:
+	_ensure_water_mesh()
 
 func get_water_surface_bounds() -> AABB:
 	var center = Vector3(global_position.x, water_level, global_position.z)
