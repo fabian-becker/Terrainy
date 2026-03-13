@@ -9,6 +9,10 @@ uniform vec4 water_color_deep : source_color = vec4(0.05, 0.2, 0.4, 0.95);
 uniform float depth_max : hint_range(0.1, 50.0) = 10.0;
 uniform float water_level : hint_range(-100.0, 100.0) = 0.0;
 
+// Shape parameters (0 = circle, 1 = rectangle, 2 = ellipse)
+uniform int influence_shape : hint_range(0, 2) = 0;
+uniform vec2 influence_size = vec2(50.0, 50.0);
+
 // Foam
 uniform float foam_width : hint_range(0.0, 10.0) = 2.0;
 uniform float foam_intensity : hint_range(0.0, 1.0) = 0.8;
@@ -32,6 +36,7 @@ uniform float time_scale : hint_range(0.0, 5.0) = 1.0;
 
 // Varying
 varying vec3 world_pos;
+varying vec3 local_pos;
 varying vec2 uv_coords;
 varying float depth_at_fragment;
 
@@ -70,6 +75,7 @@ float fbm(vec2 p) {
 void vertex() {
 	// Store world position and UV
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	local_pos = VERTEX.xyz;
 	uv_coords = UV;
 	
 	// Apply wave displacement
@@ -149,9 +155,29 @@ void fragment() {
 	ROUGHNESS = mix(0.1, 0.8, foam_mask); // Foam is rougher
 	METALLIC = 0.0;
 	
+	// Shape masking for circle/ellipse/rectangle
+	float shape_alpha = 1.0;
+	vec2 half_size = influence_size * 0.5;
+	vec2 pos_2d = local_pos.xz / max(half_size, vec2(0.001));
+	
+	if (influence_shape == 0) {
+		// Circle
+		float dist = length(pos_2d);
+		shape_alpha = 1.0 - smoothstep(0.98, 1.0, dist);
+	} else if (influence_shape == 1) {
+		// Rectangle
+		vec2 abs_pos = abs(pos_2d);
+		float max_dist = max(abs_pos.x, abs_pos.y);
+		shape_alpha = 1.0 - smoothstep(0.98, 1.0, max_dist);
+	} else {
+		// Ellipse
+		float dist_sq = pos_2d.x * pos_2d.x + pos_2d.y * pos_2d.y;
+		shape_alpha = 1.0 - smoothstep(0.96, 1.0, sqrt(dist_sq));
+	}
+	
 	// Transparency based on depth and foam
 	final_alpha = mix(final_alpha, 1.0, foam_mask * foam_intensity);
-	ALPHA = final_alpha;
+	ALPHA = final_alpha * shape_alpha;
 	
 	// Specular for water shininess
 	SPECULAR = 0.5;

@@ -166,12 +166,13 @@ metadata/_custom_type_script = "uid://bwgsrqld6yf0x"
 metadata/_gizmo_manipulating = false
 
 [node name="Hole" type="Node3D" parent="TerrainComposer"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 154.6316, 0, 58.93773)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 154.27197, 27.975754, 56.769333)
 script = ExtResource("10_7tomh")
 edge_type = 1
 edge_bevel_width = 1.0
-influence_size = Vector2(60.614685, 60.614685)
-edge_falloff = 0.44059419088097906
+use_3d_influence = true
+influence_size = Vector2(42.732178, 42.732178)
+edge_falloff = 0.45
 metadata/_custom_type_script = "uid://bqy5ykoxnyrj0"
 metadata/_gizmo_manipulating = false
 

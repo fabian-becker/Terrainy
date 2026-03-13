@@ -89,7 +89,6 @@ func get_distance_2d(world_pos: Vector3) -> float:
 func get_influence_weight(world_pos: Vector3) -> float:
 	var local_pos = to_local(world_pos)
 	
-	# Calculate normalized distance based on shape
 	var normalized_distance: float
 	
 	match influence_shape:
@@ -110,11 +109,47 @@ func get_influence_weight(world_pos: Vector3) -> float:
 		_:
 			normalized_distance = 0.0
 	
-	# Outside influence area
 	if normalized_distance >= 1.0:
 		return 0.0
 	
-	# Apply edge falloff
+	if edge_falloff > 0.0:
+		var falloff_start = 1.0 - edge_falloff
+		if normalized_distance > falloff_start:
+			var t = (normalized_distance - falloff_start) / edge_falloff
+			return 1.0 - smoothstep(0.0, 1.0, t)
+	
+	return 1.0
+
+## Get influence weight for 3D shapes (used by rotated holes).
+## Considers all three local axes for proper rotation support.
+func get_influence_weight_3d(world_pos: Vector3, shape_size: Vector3) -> float:
+	var local_pos = to_local(world_pos)
+	
+	var normalized_distance: float
+	
+	match influence_shape:
+		TerrainFeatureNode.InfluenceShape.CIRCLE:
+			var distance_3d = local_pos.length()
+			normalized_distance = distance_3d / max(influence_radius, max(shape_size.x, max(shape_size.y, shape_size.z)) * 0.5)
+		
+		TerrainFeatureNode.InfluenceShape.RECTANGLE:
+			var dx = abs(local_pos.x) / (shape_size.x / 2.0)
+			var dy = abs(local_pos.y) / (shape_size.y / 2.0)
+			var dz = abs(local_pos.z) / (shape_size.z / 2.0)
+			normalized_distance = max(max(dx, dy), dz)
+		
+		TerrainFeatureNode.InfluenceShape.ELLIPSE:
+			var dx = local_pos.x / (shape_size.x / 2.0)
+			var dy = local_pos.y / (shape_size.y / 2.0)
+			var dz = local_pos.z / (shape_size.z / 2.0)
+			normalized_distance = sqrt(dx * dx + dy * dy + dz * dz)
+		
+		_:
+			normalized_distance = 0.0
+	
+	if normalized_distance >= 1.0:
+		return 0.0
+	
 	if edge_falloff > 0.0:
 		var falloff_start = 1.0 - edge_falloff
 		if normalized_distance > falloff_start:
