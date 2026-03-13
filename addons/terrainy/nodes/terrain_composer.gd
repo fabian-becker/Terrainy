@@ -1037,20 +1037,30 @@ func _extract_chunk_heightmap(chunk: TerrainChunk, lod_level: int) -> Dictionary
 	if not _final_heightmap:
 		return {}
 	
-	var res_x = resolution
-	var res_y = resolution
-	var pixels_per_unit_x = res_x / terrain_size.x
-	var pixels_per_unit_y = res_y / terrain_size.y
+	# Heightmap is created at resolution + 1 (see _bake_and_rebuild)
+	# This means there are (resolution) intervals, with (resolution + 1) vertices/pixels
+	var heightmap_res_x = resolution + 1
+	var heightmap_res_y = resolution + 1
+	var intervals_x = resolution
+	var intervals_y = resolution
 	
-	var start_x = int(round((chunk.world_bounds.position.x - _terrain_bounds.position.x) * pixels_per_unit_x))
-	var start_y = int(round((chunk.world_bounds.position.y - _terrain_bounds.position.y) * pixels_per_unit_y))
-	var end_x = int(round((chunk.world_bounds.position.x + chunk.world_bounds.size.x - _terrain_bounds.position.x) * pixels_per_unit_x))
-	var end_y = int(round((chunk.world_bounds.position.y + chunk.world_bounds.size.y - _terrain_bounds.position.y) * pixels_per_unit_y))
+	# Calculate pixel positions from chunk grid indices using intervals
+	# This ensures adjacent chunks share the exact same border pixel
+	var grid_x = max(1, _chunk_grid_size.x)
+	var grid_y = max(1, _chunk_grid_size.y)
 	
-	start_x = clampi(start_x, 0, res_x)
-	start_y = clampi(start_y, 0, res_y)
-	end_x = clampi(end_x, 0, res_x)
-	end_y = clampi(end_y, 0, res_y)
+	var intervals_per_chunk_x = float(intervals_x) / float(grid_x)
+	var intervals_per_chunk_y = float(intervals_y) / float(grid_y)
+	
+	var start_x = int(round(chunk.position.x * intervals_per_chunk_x))
+	var start_y = int(round(chunk.position.y * intervals_per_chunk_y))
+	var end_x = int(round((chunk.position.x + 1) * intervals_per_chunk_x))
+	var end_y = int(round((chunk.position.y + 1) * intervals_per_chunk_y))
+	
+	start_x = clampi(start_x, 0, heightmap_res_x - 1)
+	start_y = clampi(start_y, 0, heightmap_res_y - 1)
+	end_x = clampi(end_x, 0, heightmap_res_x - 1)
+	end_y = clampi(end_y, 0, heightmap_res_y - 1)
 	
 	var width = max(2, end_x - start_x + 1)
 	var height = max(2, end_y - start_y + 1)
