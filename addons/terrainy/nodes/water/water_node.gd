@@ -232,6 +232,8 @@ func _update_water_shader_params() -> void:
 	_water_shader_material.set_shader_parameter("normal_strength", normal_strength)
 	_water_shader_material.set_shader_parameter("use_wave_normal", wave_normal_texture != null)
 	_water_shader_material.set_shader_parameter("use_foam_texture", foam_texture != null)
+	_water_shader_material.set_shader_parameter("influence_shape", int(influence_shape))
+	_water_shader_material.set_shader_parameter("influence_size", Vector2(influence_size.x, influence_size.y))
 	
 	if wave_normal_texture:
 		_water_shader_material.set_shader_parameter("wave_normal", wave_normal_texture)

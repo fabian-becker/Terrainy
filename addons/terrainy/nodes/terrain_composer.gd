@@ -333,6 +333,14 @@ func _scan_features() -> void:
 			_heightmap_composer.invalidate_influence(removed_feature)
 		_feature_bounds_cache.erase(removed_feature)
 		_heightmap_dirty_pending = true
+	
+	# Cache bounds for new features and mark their chunks dirty
+	for feature in _feature_nodes:
+		if not _feature_bounds_cache.has(feature) and is_instance_valid(feature):
+			var bounds = _get_feature_world_bounds(feature)
+			_feature_bounds_cache[feature] = bounds
+			_mark_chunks_dirty_for_bounds(bounds)
+			_heightmap_dirty_pending = true
 
 	if features_changed:
 		_mark_all_chunks_dirty()
@@ -1090,30 +1098,34 @@ func _extract_chunk_heightmap(chunk: TerrainChunk, lod_level: int) -> Dictionary
 func _get_feature_world_bounds(feature: TerrainFeatureNode) -> Rect2:
 	var center = Vector2(feature.global_position.x, feature.global_position.z)
 	var half_size: Vector2
+	
 	match feature.influence_shape:
 		TerrainFeatureNode.InfluenceShape.CIRCLE:
 			var radius = max(feature.influence_size.x, feature.influence_size.y)
 			half_size = Vector2(radius, radius)
-			return Rect2(center - half_size, half_size * 2.0)
 		_:
 			half_size = feature.influence_size * 0.5
-			var corners = [
-				Vector3(-half_size.x, 0, -half_size.y),
-				Vector3(half_size.x, 0, -half_size.y),
-				Vector3(half_size.x, 0, half_size.y),
-				Vector3(-half_size.x, 0, half_size.y)
-			]
-			var min_x = INF
-			var min_z = INF
-			var max_x = -INF
-			var max_z = -INF
-			for corner in corners:
-				var world_corner = feature.global_transform * corner
-				min_x = min(min_x, world_corner.x)
-				min_z = min(min_z, world_corner.z)
-				max_x = max(max_x, world_corner.x)
-				max_z = max(max_z, world_corner.z)
-			return Rect2(Vector2(min_x, min_z), Vector2(max_x - min_x, max_z - min_z))
+	
+	var corners = [
+		Vector3(-half_size.x, 0, -half_size.y),
+		Vector3(half_size.x, 0, -half_size.y),
+		Vector3(half_size.x, 0, half_size.y),
+		Vector3(-half_size.x, 0, half_size.y)
+	]
+	
+	var min_x = INF
+	var min_z = INF
+	var max_x = -INF
+	var max_z = -INF
+	
+	for corner in corners:
+		var world_corner = feature.global_transform * corner
+		min_x = min(min_x, world_corner.x)
+		min_z = min(min_z, world_corner.z)
+		max_x = max(max_x, world_corner.x)
+		max_z = max(max_z, world_corner.z)
+	
+	return Rect2(Vector2(min_x, min_z), Vector2(max_x - min_x, max_z - min_z))
 
 func _get_chunks_affected_by_feature(feature: TerrainFeatureNode) -> Array[TerrainChunk]:
 	var bounds = _get_feature_world_bounds(feature)

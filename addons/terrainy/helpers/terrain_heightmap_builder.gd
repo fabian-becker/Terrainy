@@ -498,17 +498,22 @@ func _compose_hole_mask(
 		if not is_instance_valid(feature):
 			continue
 		
-		var influence_map: Image
+		var use_3d = feature.get("use_3d_influence") == true
+		var hole_depth_val = feature.get("hole_depth") if feature.get("hole_depth") != null else 100.0
 		var cache_key = _get_influence_cache_key(feature)
+		cache_key += "_%d_%.0f" % [1 if use_3d else 0, hole_depth_val]
+		cache_key += "_hole"
+		
+		var influence_map: Image
 		
 		if _influence_cache.has(feature) and _influence_cache_keys.get(feature) == cache_key:
 			influence_map = _influence_cache[feature]
 		else:
 			var ctx = contexts.get(feature)
-			if ctx:
-				influence_map = _generate_influence_map(feature, ctx, resolution, terrain_bounds)
+			if use_3d:
+				influence_map = _generate_hole_influence_map_3d(feature, ctx, resolution, terrain_bounds, hole_depth_val)
 			else:
-				influence_map = _generate_influence_map(feature, null, resolution, terrain_bounds)
+				influence_map = _generate_influence_map(feature, ctx, resolution, terrain_bounds)
 			_influence_cache[feature] = influence_map
 			_influence_cache_keys[feature] = cache_key
 		
@@ -529,17 +534,58 @@ func _compose_hole_mask(
 	hole_mask.set_data(width, height, false, Image.FORMAT_RF, hole_mask_data)
 	return hole_mask
 
+## Generate influence map for holes with 3D rotation support.
+## Uses full 3D local coordinates to properly handle rotated holes.
+func _generate_hole_influence_map_3d(
+	feature: TerrainFeatureNode,
+	context,
+	resolution: Vector2i,
+	terrain_bounds: Rect2,
+	hole_depth: float
+) -> Image:
+	var influence_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
+	var influence_data = influence_map.get_data()
+	var bytes_per_pixel = 4
+	
+	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
+	var shape_size = Vector3(feature.influence_size.x, hole_depth, feature.influence_size.y)
+	
+	for y in range(resolution.y):
+		var world_z = terrain_bounds.position.y + (y * step.y)
+		for x in range(resolution.x):
+			var world_x = terrain_bounds.position.x + (x * step.x)
+			var world_pos = Vector3(world_x, 0, world_z)
+			
+			var weight: float
+			if context:
+				weight = context.get_influence_weight_3d(world_pos, shape_size)
+			else:
+				weight = feature.get_influence_weight_safe(world_pos, context)
+			
+			var pixel_index = y * resolution.x + x
+			var offset = pixel_index * bytes_per_pixel
+			influence_data.encode_float(offset, weight)
+	
+	influence_map.set_data(resolution.x, resolution.y, false, Image.FORMAT_RF, influence_data)
+	return influence_map
+
 ## Generate cache key for influence map
 func _get_influence_cache_key(feature: TerrainFeatureNode) -> String:
-	# Only include properties that affect influence calculation
 	var pos_rounded = (feature.global_position / CACHE_KEY_POSITION_PRECISION).round() * CACHE_KEY_POSITION_PRECISION
 	var size_rounded = (feature.influence_size / CACHE_KEY_POSITION_PRECISION).round() * CACHE_KEY_POSITION_PRECISION
 	var falloff_rounded = snappedf(feature.edge_falloff, CACHE_KEY_FALLOFF_PRECISION)
-	return "%s_%s_%d_%f" % [
+	var rot = feature.global_rotation
+	var rot_rounded = "%d_%d_%d" % [
+		int(round(rot.x * 100.0)),
+		int(round(rot.y * 100.0)),
+		int(round(rot.z * 100.0))
+	]
+	return "%s_%s_%d_%f_%s" % [
 		pos_rounded,
 		size_rounded,
 		int(feature.influence_shape),
-		falloff_rounded
+		falloff_rounded,
+		rot_rounded
 	]
 
 ## Invalidate heightmap cache for a feature
