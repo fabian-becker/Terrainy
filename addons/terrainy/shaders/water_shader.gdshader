@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode blend_add, depth_draw_always, cull_back, diffuse_lambert, specular_schlick_ggx;
+render_mode blend_add, depth_draw_always, cull_disabled, diffuse_lambert, specular_schlick_ggx;
 
 // Water colors
 uniform vec4 water_color_shallow : source_color = vec4(0.2, 0.6, 0.8, 0.8);

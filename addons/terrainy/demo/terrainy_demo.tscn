@@ -1,4 +1,4 @@
-[gd_scene load_steps=30 format=4 uid="uid://megrg78jfp83"]
+[gd_scene format=4 uid="uid://megrg78jfp83"]
 
 [ext_resource type="Script" uid="uid://b03v1mqy58bj4" path="res://addons/terrainy/nodes/terrain_composer.gd" id="1_s0usi"]
 [ext_resource type="Script" uid="uid://ddlru3rps1tmg" path="res://addons/terrainy/resources/terrain_texture_layer.gd" id="2_50dxj"]
@@ -91,17 +91,17 @@ mask_image = SubResource("Image_2hyka")
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2hyka"]
 
-[node name="Node3D" type="Node3D"]
+[node name="Node3D" type="Node3D" unique_id=1263526723]
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=495215861]
 environment = SubResource("Environment_d4o4o")
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=211780620]
 transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
 light_energy = 0.4
 shadow_enabled = true
 
-[node name="TerrainComposer" type="Node3D" parent="."]
+[node name="TerrainComposer" type="Node3D" parent="." unique_id=2129152287]
 script = ExtResource("1_s0usi")
 terrain_size = Vector2(1024, 1024)
 resolution = 1024
@@ -111,7 +111,7 @@ texture_layers = Array[ExtResource("2_50dxj")]([ExtResource("3_v4gbn"), ExtResou
 bake_enabled = true
 metadata/_custom_type_script = "uid://b03v1mqy58bj4"
 
-[node name="BaseNoise" type="Node3D" parent="TerrainComposer"]
+[node name="BaseNoise" type="Node3D" parent="TerrainComposer" unique_id=773049692]
 script = ExtResource("8_v4gbn")
 amplitude = 32.0
 noise = SubResource("FastNoiseLite_bqgbw")
@@ -122,7 +122,7 @@ blend_mode = 5
 metadata/_custom_type_script = "uid://ck4gtrjpc6yu2"
 metadata/_gizmo_manipulating = false
 
-[node name="MountainNode" type="Node3D" parent="TerrainComposer"]
+[node name="MountainNode" type="Node3D" parent="TerrainComposer" unique_id=1384208970]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -54.252617, 0, -224.1757)
 script = ExtResource("7_s0usi")
 noise = SubResource("FastNoiseLite_50dxj")
@@ -132,12 +132,12 @@ edge_falloff = 0.8089090569194924
 metadata/_custom_type_script = "uid://b06n2v4b3hlyt"
 metadata/_gizmo_manipulating = false
 
-[node name="ScatterNode" type="Node3D" parent="TerrainComposer/MountainNode"]
+[node name="ScatterNode" type="Node3D" parent="TerrainComposer/MountainNode" unique_id=578110349]
 script = ExtResource("8_my2sa")
 scene = ExtResource("9_uc8ge")
 metadata/_custom_type_script = "uid://dte5ivgu6llon"
 
-[node name="MountainRangeNode" type="Node3D" parent="TerrainComposer"]
+[node name="MountainRangeNode" type="Node3D" parent="TerrainComposer" unique_id=315063664]
 transform = Transform3D(-0.6437631, 0, 0.7652249, 0, 1, 0, -0.7652249, 0, -0.6437631, -82.19888, 0, 263.58664)
 script = ExtResource("8_50dxj")
 peak_noise = SubResource("FastNoiseLite_v4gbn")
@@ -149,7 +149,7 @@ edge_falloff = 0.7
 metadata/_custom_type_script = "uid://dru71ftjlqkij"
 metadata/_gizmo_manipulating = false
 
-[node name="WaterNode" type="Node3D" parent="TerrainComposer"]
+[node name="WaterNode" type="Node3D" parent="TerrainComposer" unique_id=969483268]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 173.58435, 1.5258789e-05, 211.57533)
 script = ExtResource("9_v4gbn")
 water_level = -1.0
@@ -165,7 +165,7 @@ influence_size = Vector2(68.38356, 68.38356)
 metadata/_custom_type_script = "uid://bwgsrqld6yf0x"
 metadata/_gizmo_manipulating = false
 
-[node name="Hole" type="Node3D" parent="TerrainComposer"]
+[node name="Hole" type="Node3D" parent="TerrainComposer" unique_id=600996680]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 154.27197, 27.975754, 56.769333)
 script = ExtResource("10_7tomh")
 edge_type = 1
@@ -176,7 +176,7 @@ edge_falloff = 0.45
 metadata/_custom_type_script = "uid://bqy5ykoxnyrj0"
 metadata/_gizmo_manipulating = false
 
-[node name="ShapeNode" type="Node3D" parent="TerrainComposer"]
+[node name="ShapeNode" type="Node3D" parent="TerrainComposer" unique_id=962415757]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 257.18707, 0, 34.46656)
 script = ExtResource("13_uc8ge")
 shape_mask = SubResource("Resource_lph88")
@@ -186,15 +186,15 @@ edge_falloff = 0.0
 metadata/_custom_type_script = "uid://lh225yegfldu"
 metadata/_gizmo_manipulating = false
 
-[node name="CharacterBody3D" type="CharacterBody3D" parent="."]
+[node name="CharacterBody3D" type="CharacterBody3D" parent="." unique_id=424743236]
 transform = Transform3D(0.2956247, 0, 0.9553042, 0, 1, 0, -0.9553042, 0, 0.29562473, 216.38916, 15.871635, 158.69342)
 script = ExtResource("11_3hu61")
 
-[node name="Camera3D" type="Camera3D" parent="CharacterBody3D"]
+[node name="Camera3D" type="Camera3D" parent="CharacterBody3D" unique_id=1813706577]
 transform = Transform3D(0.99999994, 0, 0, 0, 1, 0, 0, 0, 0.99999994, 0, 0, 0)
 
-[node name="CollisionShape3D" type="CollisionShape3D" parent="CharacterBody3D"]
+[node name="CollisionShape3D" type="CollisionShape3D" parent="CharacterBody3D" unique_id=1576507154]
 shape = SubResource("CapsuleShape3D_7tomh")
 
-[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+[node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=1646436455]
 material_override = SubResource("StandardMaterial3D_2hyka")
