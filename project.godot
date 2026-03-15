@@ -16,12 +16,12 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 config/name="Terrainy"
 run/main_scene="uid://megrg78jfp83"
-config/features=PackedStringArray("4.5", "Forward Plus")
+config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
 
 [autoload]
 
-TerrainRebuildCoordinator="*res://addons/terrainy/helpers/terrain_rebuild_coordinator.gd"
+TerrainRebuildCoordinator="*uid://brautlco0ivx3"
 
 [dotnet]
 
