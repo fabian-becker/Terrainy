@@ -26,7 +26,7 @@ float calculate_influence(vec2 local_pos_2d, int shape, vec2 size, float falloff
     if (shape == 0) {
         // CIRCLE
         distance = length(local_pos_2d);
-        max_distance = max(size.x, MIN_INFLUENCE_SIZE);
+        max_distance = max(max(size.x, size.y) * 0.5, MIN_INFLUENCE_SIZE);
         
         if (distance >= max_distance) {
             return 0.0;

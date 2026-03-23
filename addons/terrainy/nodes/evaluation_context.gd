@@ -11,7 +11,7 @@ var world_position: Vector3 = Vector3.ZERO
 ## Pre-computed inverse transform for world→local conversion
 var inverse_transform: Transform3D = Transform3D.IDENTITY
 
-## Influence radius (max of width/depth)
+## Influence radius (max of influence half-extents)
 var influence_radius: float = 0.0
 
 ## Pre-computed squared radius for fast distance checks
@@ -47,7 +47,7 @@ static func from_feature(feature: TerrainFeatureNode) -> EvaluationContext:
 	# Capture influence data
 	ctx.influence_shape = feature.influence_shape
 	ctx.influence_size = feature.influence_size
-	ctx.influence_radius = max(feature.influence_size.x, feature.influence_size.y)
+	ctx.influence_radius = get_influence_radius(ctx.influence_shape, ctx.influence_size)
 	ctx.influence_radius_sq = ctx.influence_radius * ctx.influence_radius
 	
 	# Capture blend parameters
@@ -56,10 +56,25 @@ static func from_feature(feature: TerrainFeatureNode) -> EvaluationContext:
 	ctx.blend_mode = feature.blend_mode
 	
 	# Pre-compute AABB for spatial culling
-	var half_size = Vector3(ctx.influence_radius, 1000.0, ctx.influence_radius)
+	var half_extents = get_influence_half_extents(ctx.influence_shape, ctx.influence_size)
+	var half_size = Vector3(half_extents.x, 1000.0, half_extents.y)
 	ctx.aabb = AABB(ctx.world_position - half_size, half_size * 2.0)
 	
 	return ctx
+
+static func get_influence_half_extents(shape: int, size: Vector2) -> Vector2:
+	match shape:
+		TerrainFeatureNode.InfluenceShape.CIRCLE:
+			var radius = max(max(size.x, size.y) * 0.5, 0.0001)
+			return Vector2(radius, radius)
+		TerrainFeatureNode.InfluenceShape.ELLIPSE:
+			return Vector2(max(size.x * 0.5, 0.0001), max(size.y * 0.5, 0.0001))
+		_:
+			return Vector2(max(size.x * 0.5, 0.0001), max(size.y * 0.5, 0.0001))
+
+static func get_influence_radius(shape: int, size: Vector2) -> float:
+	var half_extents = get_influence_half_extents(shape, size)
+	return max(half_extents.x, half_extents.y)
 
 ## Convert world-space position to local-space without scene tree access.
 ## This is the thread-safe replacement for Node3D.to_local()
@@ -94,16 +109,16 @@ func get_influence_weight(world_pos: Vector3) -> float:
 	match influence_shape:
 		TerrainFeatureNode.InfluenceShape.CIRCLE:
 			var distance_2d = Vector2(local_pos.x, local_pos.z).length()
-			normalized_distance = distance_2d / influence_radius
+			normalized_distance = distance_2d / max(influence_radius, 0.0001)
 		
 		TerrainFeatureNode.InfluenceShape.RECTANGLE:
-			var dx = abs(local_pos.x) / (influence_size.x / 2.0)
-			var dz = abs(local_pos.z) / (influence_size.y / 2.0)
+			var dx = abs(local_pos.x) / max(influence_size.x * 0.5, 0.0001)
+			var dz = abs(local_pos.z) / max(influence_size.y * 0.5, 0.0001)
 			normalized_distance = max(dx, dz)
 		
 		TerrainFeatureNode.InfluenceShape.ELLIPSE:
-			var dx = local_pos.x / (influence_size.x / 2.0)
-			var dz = local_pos.z / (influence_size.y / 2.0)
+			var dx = local_pos.x / max(influence_size.x * 0.5, 0.0001)
+			var dz = local_pos.z / max(influence_size.y * 0.5, 0.0001)
 			normalized_distance = sqrt(dx * dx + dz * dz)
 		
 		_:

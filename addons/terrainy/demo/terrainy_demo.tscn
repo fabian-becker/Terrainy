@@ -161,7 +161,8 @@ wave_speed = 0.6
 wave_height = 0.4
 wave_frequency = 0.3
 normal_strength = 1.0
-influence_size = Vector2(68.38356, 68.38356)
+influence_shape = 1
+influence_size = Vector2(50, 100)
 metadata/_custom_type_script = "uid://bwgsrqld6yf0x"
 metadata/_gizmo_manipulating = false
 

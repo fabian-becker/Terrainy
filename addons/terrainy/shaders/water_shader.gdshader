@@ -157,21 +157,24 @@ void fragment() {
 	
 	// Shape masking for circle/ellipse/rectangle
 	float shape_alpha = 1.0;
-	vec2 half_size = influence_size * 0.5;
-	vec2 pos_2d = local_pos.xz / max(half_size, vec2(0.001));
 	
 	if (influence_shape == 0) {
 		// Circle
-		float dist = length(pos_2d);
+		float radius = max(max(influence_size.x, influence_size.y) * 0.5, 0.001);
+		float dist = length(local_pos.xz) / radius;
 		shape_alpha = 1.0 - smoothstep(0.98, 1.0, dist);
 	} else if (influence_shape == 1) {
 		// Rectangle
+		vec2 half_size = influence_size * 0.5;
+		vec2 pos_2d = local_pos.xz / max(half_size, vec2(0.001));
 		vec2 abs_pos = abs(pos_2d);
 		float max_dist = max(abs_pos.x, abs_pos.y);
 		shape_alpha = 1.0 - smoothstep(0.98, 1.0, max_dist);
 	} else {
 		// Ellipse
-		float dist_sq = pos_2d.x * pos_2d.x + pos_2d.y * pos_2d.y;
+		vec2 half_size = max(influence_size * 0.5, vec2(0.001));
+		vec2 pos_2d = local_pos.xz / half_size;
+		float dist_sq = dot(pos_2d, pos_2d);
 		shape_alpha = 1.0 - smoothstep(0.96, 1.0, sqrt(dist_sq));
 	}
 	

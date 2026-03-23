@@ -1101,8 +1101,10 @@ func _get_feature_world_bounds(feature: TerrainFeatureNode) -> Rect2:
 	
 	match feature.influence_shape:
 		TerrainFeatureNode.InfluenceShape.CIRCLE:
-			var radius = max(feature.influence_size.x, feature.influence_size.y)
+			var radius = max(feature.influence_size.x, feature.influence_size.y) * 0.5
 			half_size = Vector2(radius, radius)
+		TerrainFeatureNode.InfluenceShape.ELLIPSE:
+			half_size = feature.influence_size * 0.5
 		_:
 			half_size = feature.influence_size * 0.5
 	

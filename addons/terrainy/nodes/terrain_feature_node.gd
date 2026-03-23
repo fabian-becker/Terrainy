@@ -67,7 +67,7 @@ enum FeatureType {
 		influence_shape = value
 		_commit_parameter_change()
 
-## The size of this terrain feature's area of influence (radius for circle, width/depth for others)
+## The size of this terrain feature's area of influence (full width/depth for all shapes)
 @export var influence_size: Vector2 = Vector2(50.0, 50.0):
 	set(value):
 		influence_size = value
@@ -583,10 +583,14 @@ func _apply_terracing(height: float) -> float:
 ## Get axis-aligned bounding box of influence area
 func get_influence_aabb() -> AABB:
 	var half_size: Vector2
-	if influence_shape == InfluenceShape.CIRCLE:
-		half_size = Vector2(influence_size.x, influence_size.x)
-	else:
-		half_size = influence_size * 0.5
+	match influence_shape:
+		InfluenceShape.CIRCLE:
+			var radius = max(influence_size.x, influence_size.y) * 0.5
+			half_size = Vector2(radius, radius)
+		InfluenceShape.ELLIPSE:
+			half_size = influence_size * 0.5
+		_:
+			half_size = influence_size * 0.5
 	
 	return AABB(
 		global_position + Vector3(-half_size.x, -100, -half_size.y),

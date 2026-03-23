@@ -35,13 +35,14 @@ static func from_gradient_feature(feature: TerrainFeatureNode, start_h: float, e
 	ctx.inverse_transform = feature.global_transform.affine_inverse()
 	ctx.influence_shape = feature.influence_shape
 	ctx.influence_size = feature.influence_size
-	ctx.influence_radius = max(feature.influence_size.x, feature.influence_size.y)
+	ctx.influence_radius = EvaluationContext.get_influence_radius(ctx.influence_shape, ctx.influence_size)
 	ctx.influence_radius_sq = ctx.influence_radius * ctx.influence_radius
 	ctx.edge_falloff = feature.edge_falloff
 	ctx.strength = feature.strength
 	ctx.blend_mode = feature.blend_mode
 	
-	var half_size = Vector3(ctx.influence_radius, 1000.0, ctx.influence_radius)
+	var half_extents = EvaluationContext.get_influence_half_extents(ctx.influence_shape, ctx.influence_size)
+	var half_size = Vector3(half_extents.x, 1000.0, half_extents.y)
 	ctx.aabb = AABB(ctx.world_position - half_size, half_size * 2.0)
 	
 	# Add gradient-specific properties
