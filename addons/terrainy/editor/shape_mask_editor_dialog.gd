@@ -55,6 +55,7 @@ var _width_spin: SpinBox
 var _height_spin: SpinBox
 var _undo_button: Button
 var _redo_button: Button
+var _import_dialog: FileDialog
 var _brush_indicator: BrushIndicatorOverlay
 var _indicator_label: Label
 var _last_mouse_canvas_pos: Vector2 = Vector2.ZERO
@@ -266,6 +267,20 @@ func _build_ui() -> void:
 	clear_button.pressed.connect(_on_clear_pressed)
 	footer_row.add_child(clear_button)
 
+	var import_button = Button.new()
+	import_button.text = "Import Image"
+	import_button.pressed.connect(_on_import_pressed)
+	footer_row.add_child(import_button)
+
+	_import_dialog = FileDialog.new()
+	_import_dialog.title = "Import Shape Mask Image"
+	_import_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	_import_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_import_dialog.use_native_dialog = true
+	_import_dialog.add_filter("*.png,*.jpg,*.jpeg,*.webp,*.bmp,*.tga,*.exr ; Image Files")
+	_import_dialog.file_selected.connect(_on_import_file_selected)
+	add_child(_import_dialog)
+
 	_brush_indicator = BrushIndicatorOverlay.new()
 	_brush_indicator.indicator_color = Color(1.0, 0.55, 0.2, 0.35)
 	_brush_indicator.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -348,6 +363,28 @@ func _on_clear_pressed() -> void:
 		return
 	_push_undo_state()
 	_working_image.fill(Color.WHITE)
+	_refresh_canvas()
+
+func _on_import_pressed() -> void:
+	if _import_dialog == null:
+		return
+	_import_dialog.popup_centered_ratio(0.65)
+
+func _on_import_file_selected(path: String) -> void:
+	var imported = Image.new()
+	var err = imported.load(path)
+	if err != OK:
+		push_warning("Failed to import image '%s' (error %d)." % [path, err])
+		return
+	if imported.get_width() <= 0 or imported.get_height() <= 0:
+		push_warning("Imported image has invalid size.")
+		return
+	_push_undo_state()
+	if imported.get_format() != Image.FORMAT_L8:
+		imported.convert(Image.FORMAT_L8)
+	_working_image = imported
+	_width_spin.value = _working_image.get_width()
+	_height_spin.value = _working_image.get_height()
 	_refresh_canvas()
 
 func _on_canvas_input(event: InputEvent) -> void:
