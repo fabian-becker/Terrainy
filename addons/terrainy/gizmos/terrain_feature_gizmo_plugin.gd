@@ -72,9 +72,10 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 	# Draw influence shape based on type
 	match node.influence_shape:
 		TerrainFeatureNode.InfluenceShape.CIRCLE:
-			_draw_circle(lines, size.x, segments)
+			var circle_radius = max(size.x, size.y) * 0.5
+			_draw_circle(lines, circle_radius, segments)
 			if node.edge_falloff > 0.0:
-				var falloff_radius = size.x * (1.0 - node.edge_falloff)
+				var falloff_radius = circle_radius * (1.0 - node.edge_falloff)
 				_draw_circle(falloff_lines, falloff_radius, segments)
 		
 		TerrainFeatureNode.InfluenceShape.RECTANGLE:
@@ -84,9 +85,10 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 				_draw_rectangle(falloff_lines, falloff_size)
 		
 		TerrainFeatureNode.InfluenceShape.ELLIPSE:
-			_draw_ellipse(lines, size, segments)
+			var ellipse_radii = size * 0.5
+			_draw_ellipse(lines, ellipse_radii, segments)
 			if node.edge_falloff > 0.0:
-				var falloff_size = size * (1.0 - node.edge_falloff)
+				var falloff_size = ellipse_radii * (1.0 - node.edge_falloff)
 				_draw_ellipse(falloff_lines, falloff_size, segments)
 	
 	# Add cross at center
@@ -112,11 +114,12 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 			var bevel_lines = PackedVector3Array()
 			match node.influence_shape:
 				TerrainFeatureNode.InfluenceShape.CIRCLE:
-					_draw_circle(bevel_lines, size.x - bevel, segments)
+					var circle_radius = max(size.x, size.y) * 0.5
+					_draw_circle(bevel_lines, circle_radius - bevel, segments)
 				TerrainFeatureNode.InfluenceShape.RECTANGLE:
 					_draw_rectangle(bevel_lines, size - Vector2(bevel * 2, bevel * 2))
 				TerrainFeatureNode.InfluenceShape.ELLIPSE:
-					_draw_ellipse(bevel_lines, size - Vector2(bevel * 2, bevel * 2), segments)
+					_draw_ellipse(bevel_lines, size * 0.5 - Vector2(bevel, bevel), segments)
 			gizmo.add_lines(bevel_lines, get_material("falloff", gizmo))
 	
 	# Draw direction arrow for gradient and landscape nodes
@@ -207,10 +210,7 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 	var half_size = size * 0.5
 	
 	# Handle 0: Size control (right side for width)
-	if node.influence_shape == TerrainFeatureNode.InfluenceShape.CIRCLE:
-		handles.push_back(Vector3(size.x, 0, 0))
-	else:
-		handles.push_back(Vector3(half_size.x, 0, 0))
+	handles.push_back(Vector3(half_size.x, 0, 0))
 	
 	# Handle 1: Size control (depth, for rectangle and ellipse)
 	if node.influence_shape != TerrainFeatureNode.InfluenceShape.CIRCLE:
@@ -218,7 +218,7 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 	
 	# Handle 2: Falloff control (if falloff exists)
 	if node.edge_falloff > 0.0:
-		var falloff_extent = size.x if node.influence_shape == TerrainFeatureNode.InfluenceShape.CIRCLE else half_size.x
+		var falloff_extent = half_size.x
 		var falloff_size = falloff_extent * (1.0 - node.edge_falloff)
 		handles.push_back(Vector3(falloff_size, 0, 0))
 	
@@ -391,7 +391,7 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 			var local_intersection = node.to_local(intersection)
 			if node.influence_shape == TerrainFeatureNode.InfluenceShape.CIRCLE:
 				var new_radius = max(1.0, abs(local_intersection.x))
-				node.influence_size = Vector2(new_radius, new_radius)
+				node.influence_size = Vector2(new_radius * 2.0, new_radius * 2.0)
 			else:
 				var new_size_x = max(1.0, abs(local_intersection.x) * 2.0)
 				node.influence_size.x = new_size_x
@@ -419,9 +419,7 @@ func _set_handle(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool, came
 			if intersection != null:
 				var local_intersection = node.to_local(intersection)
 				var distance = Vector2(local_intersection.x, local_intersection.z).length()
-				var max_size = max(node.influence_size.x, node.influence_size.y)
-				if node.influence_shape != TerrainFeatureNode.InfluenceShape.CIRCLE:
-					max_size *= 0.5
+				var max_size = max(node.influence_size.x, node.influence_size.y) * 0.5
 				var new_falloff_radius = max(0.1, distance)
 				node.edge_falloff = clamp(1.0 - (new_falloff_radius / max_size), 0.0, 1.0)
 			_redraw(gizmo)

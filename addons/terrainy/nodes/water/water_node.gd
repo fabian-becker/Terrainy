@@ -139,12 +139,16 @@ var _composer: Node = null
 
 func _ready() -> void:
 	super._ready()
+	if not parameters_changed.is_connected(_on_feature_parameters_changed):
+		parameters_changed.connect(_on_feature_parameters_changed)
 	_connect_to_composer()
 	_create_water_mesh_instance()
 	_update_water_mesh()
 
 func _exit_tree() -> void:
 	_disconnect_from_composer()
+	if parameters_changed.is_connected(_on_feature_parameters_changed):
+		parameters_changed.disconnect(_on_feature_parameters_changed)
 	if _water_mesh_instance and is_instance_valid(_water_mesh_instance):
 		_water_mesh_instance.queue_free()
 		_water_mesh_instance = null
@@ -165,17 +169,14 @@ func get_height_at(world_pos: Vector3) -> float:
 func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float:
 	var ctx = context as WaterEvaluationContext
 	var local_pos = ctx.to_local(world_pos)
-	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
-	
-	var radius = ctx.influence_radius
-	if distance_2d >= radius:
+	var normalized_dist = _get_normalized_distance(local_pos, ctx)
+	if normalized_dist >= 1.0:
 		return 0.0
 	
 	var influence_weight = ctx.get_influence_weight(world_pos)
 	if influence_weight <= 0.0:
 		return 0.0
-	
-	var normalized_dist = distance_2d / radius
+
 	var shore_zone = ctx.shore_slope
 	var depth: float
 	
@@ -186,6 +187,21 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 		depth = -ctx.carve_depth * ctx.bottom_flatness
 	
 	return depth * influence_weight
+
+func _get_normalized_distance(local_pos: Vector3, ctx: WaterEvaluationContext) -> float:
+	match ctx.influence_shape:
+		InfluenceShape.CIRCLE:
+			return Vector2(local_pos.x, local_pos.z).length() / max(ctx.influence_radius, 0.0001)
+		InfluenceShape.RECTANGLE:
+			var half_x = max(ctx.influence_size.x * 0.5, 0.0001)
+			var half_z = max(ctx.influence_size.y * 0.5, 0.0001)
+			return max(abs(local_pos.x) / half_x, abs(local_pos.z) / half_z)
+		InfluenceShape.ELLIPSE:
+			var nx = local_pos.x / max(ctx.influence_size.x * 0.5, 0.0001)
+			var nz = local_pos.z / max(ctx.influence_size.y * 0.5, 0.0001)
+			return sqrt(nx * nx + nz * nz)
+		_:
+			return 2.0
 
 func get_gpu_param_pack() -> Dictionary:
 	var extra_floats := PackedFloat32Array([
@@ -297,13 +313,17 @@ func _build_water_mesh() -> void:
 	
 	var size_x: float
 	var size_z: float
-	
-	if influence_shape == InfluenceShape.CIRCLE:
-		size_x = influence_size.x * 2.0
-		size_z = influence_size.x * 2.0
-	else:
-		size_x = influence_size.x
-		size_z = influence_size.y
+	match influence_shape:
+		InfluenceShape.CIRCLE:
+			var diameter = max(influence_size.x, influence_size.y)
+			size_x = diameter
+			size_z = diameter
+		InfluenceShape.ELLIPSE:
+			size_x = influence_size.x
+			size_z = influence_size.y
+		_:
+			size_x = influence_size.x
+			size_z = influence_size.y
 	
 	var water_y = water_level - global_position.y
 	
@@ -396,9 +416,21 @@ func _disconnect_from_composer() -> void:
 func _on_composer_terrain_updated() -> void:
 	_ensure_water_mesh()
 
+func _on_feature_parameters_changed() -> void:
+	_update_water_shader_params()
+	_update_water_mesh()
+
 func get_water_surface_bounds() -> AABB:
 	var center = Vector3(global_position.x, water_level, global_position.z)
-	var size = Vector3(influence_size.x, 0.1, influence_size.y)
+	var size: Vector3
+	match influence_shape:
+		InfluenceShape.CIRCLE:
+			var diameter = max(influence_size.x, influence_size.y)
+			size = Vector3(diameter, 0.1, diameter)
+		InfluenceShape.ELLIPSE:
+			size = Vector3(influence_size.x, 0.1, influence_size.y)
+		_:
+			size = Vector3(influence_size.x, 0.1, influence_size.y)
 	return AABB(center - size * 0.5, size)
 
 func get_carved_depth_at(world_pos: Vector3) -> float:

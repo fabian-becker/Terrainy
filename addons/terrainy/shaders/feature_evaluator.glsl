@@ -226,7 +226,7 @@ float sample_heightmap(int data_offset, ivec2 size, int wrap_mode, int invert, v
 
 float influence_normalized_distance(vec3 local_pos, int influence_shape, vec2 influence_size) {
 	if (influence_shape == 0) {
-		float radius = max(max(influence_size.x, influence_size.y), 0.0001);
+		float radius = max(max(influence_size.x, influence_size.y) * 0.5, 0.0001);
 		return length(local_pos.xz) / radius;
 	} else if (influence_shape == 1) {
 		vec2 half_size = influence_size * 0.5;
@@ -295,7 +295,7 @@ void main() {
 		float rim_height = get_float(20);
 		float rim_width = get_float(21);
 		float floor_ratio = get_float(22);
-		float radius = max(max(influence_size.x, influence_size.y), 0.0001);
+		float radius = max(max(influence_size.x, influence_size.y) * 0.5, 0.0001);
 		float dist = length(local_pos.xz);
 		if (dist >= radius) {
 			height = 0.0;
@@ -319,7 +319,7 @@ void main() {
 		float crater_ratio = get_float(20);
 		float crater_depth = get_float(21);
 		float slope_concavity = get_float(22);
-		float radius = max(max(influence_size.x, influence_size.y), 0.0001);
+		float radius = max(max(influence_size.x, influence_size.y) * 0.5, 0.0001);
 		float dist = length(local_pos.xz);
 		if (dist >= radius) {
 			height = 0.0;
@@ -340,7 +340,7 @@ void main() {
 		float noise_strength = get_float(22);
 		float noise_frequency = get_float(23);
 		int noise_enabled = get_int(4);
-		float radius = max(max(influence_size.x, influence_size.y), 0.0001);
+		float radius = max(max(influence_size.x, influence_size.y) * 0.5, 0.0001);
 		float dist = length(local_pos.xz);
 		if (dist >= radius) {
 			height = 0.0;
@@ -409,7 +409,7 @@ void main() {
 		int interpolation = get_int(2);
 		vec2 pos_2d = local_pos.xz;
 		float projected = dot(pos_2d, dir);
-		float radius = max(influence_size.x, 0.0001);
+		float radius = max(influence_size.x * 0.5, 0.0001);
 		float t = (projected + radius) / (radius * 2.0);
 		t = clamp(t, 0.0, 1.0);
 		if (interpolation == 1) {
@@ -424,7 +424,7 @@ void main() {
 		float start_h = get_float(19);
 		float end_h = get_float(20);
 		int falloff = get_int(2);
-		float radius = max(max(influence_size.x, influence_size.y), 0.0001);
+		float radius = max(max(influence_size.x, influence_size.y) * 0.5, 0.0001);
 		float dist = length(world_pos.xz - vec2(get_float(0), get_float(2)));
 		float nd = dist / radius;
 		if (nd >= 1.0) {
@@ -446,7 +446,7 @@ void main() {
 		float start_h = get_float(19);
 		float end_h = get_float(20);
 		float sharpness = get_float(21);
-		float radius = max(influence_size.x, 0.0001);
+		float radius = max(influence_size.x * 0.5, 0.0001);
 		float dist = length(local_pos.xz);
 		if (dist >= radius) {
 			height = end_h;
@@ -459,7 +459,7 @@ void main() {
 		float start_h = get_float(19);
 		float end_h = get_float(20);
 		float flatness = get_float(21);
-		float radius = max(influence_size.x, 0.0001);
+		float radius = max(influence_size.x * 0.5, 0.0001);
 		float dist = length(local_pos.xz);
 		if (dist >= radius) {
 			height = end_h;
@@ -510,7 +510,9 @@ void main() {
 		} else {
 			float lateral_distance = abs(dot(local_pos.xz, perp));
 			float ridge_width = max(max(influence_size.x, influence_size.y), 0.0001);
-			if (influence_shape != 0) {
+			if (influence_shape == 0) {
+				ridge_width *= 0.5;
+			} else {
 				ridge_width = max(influence_size.y * 0.5, 0.0001);
 			}
 			float ridge_falloff = 1.0 - pow(lateral_distance / ridge_width, ridge_sharpness);
