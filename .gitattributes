@@ -5,6 +5,12 @@
 *.jpg filter=lfs diff=lfs merge=lfs -text
 *.png filter=lfs diff=lfs merge=lfs -text
 
+# Demo textures as regular files (not LFS)
+addons/terrainy/demo/textures/*.jpg -filter=lfs -diff=lfs -merge=lfs -text
+addons/terrainy/demo/textures/*.png -filter=lfs -diff=lfs -merge=lfs -text
+addons/terrainy/demo/textures/**/*.jpg -filter=lfs -diff=lfs -merge=lfs -text
+addons/terrainy/demo/textures/**/*.png -filter=lfs -diff=lfs -merge=lfs -text
+
 # Only include the addons folder, demo scene, and textures when downloading from the Asset Library.
 /**                 export-ignore
 /addons             !export-ignore
