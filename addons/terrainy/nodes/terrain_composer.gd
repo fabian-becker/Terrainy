@@ -279,6 +279,11 @@ func _exit_tree() -> void:
 		if not _chunk_thread.is_alive() and _chunk_thread_seen_alive:
 			_chunk_thread.wait_to_finish()
 	
+	# Disconnect feature signals to prevent transform notifications during teardown
+	for feature in _feature_nodes:
+		if is_instance_valid(feature) and feature.parameters_changed.is_connected(_on_feature_changed):
+			feature.parameters_changed.disconnect(_on_feature_changed)
+	
 	# Clean up helpers
 	if _heightmap_composer:
 		_heightmap_composer.cleanup()
@@ -336,7 +341,7 @@ func _scan_features() -> void:
 	
 	# Cache bounds for new features and mark their chunks dirty
 	for feature in _feature_nodes:
-		if not _feature_bounds_cache.has(feature) and is_instance_valid(feature):
+		if not _feature_bounds_cache.has(feature) and is_instance_valid(feature) and feature.is_inside_tree():
 			var bounds = _get_feature_world_bounds(feature)
 			_feature_bounds_cache[feature] = bounds
 			_mark_chunks_dirty_for_bounds(bounds)
@@ -368,9 +373,11 @@ func _on_child_changed(_node: Node) -> void:
 	call_deferred("_rescan_and_rebuild")
 
 func _rescan_and_rebuild() -> void:
+	if not is_inside_tree():
+		return
 	_scan_features()
 	_maybe_invalidate_bake("feature tree changed")
-	if auto_update and is_inside_tree():
+	if auto_update:
 		rebuild_terrain()
 
 func _setup_rebuild_debounce_timer() -> void:
@@ -403,6 +410,8 @@ func _on_rebuild_timer_timeout() -> void:
 		rebuild_terrain()
 
 func _on_feature_changed(feature: TerrainFeatureNode) -> void:
+	if not is_inside_tree() or not is_instance_valid(feature) or not feature.is_inside_tree():
+		return
 	_maybe_invalidate_bake("feature parameters changed")
 
 	# Invalidate caches via helper
@@ -438,6 +447,122 @@ func bake_terrain_to_disk() -> void:
 
 func clear_baked_terrain() -> void:
 	_invalidate_bake_cache("manual clear")
+
+func bake_to_scene(output_path: String) -> bool:
+	if _chunks.is_empty():
+		push_warning("[TerrainComposer] Cannot bake to scene because no chunks are available")
+		return false
+
+	var root_node := Node3D.new()
+	root_node.name = "BakedTerrain"
+
+	var baked_material: Material = null
+	if terrain_material:
+		baked_material = terrain_material
+
+	for chunk in _chunks.values():
+		if not chunk.mesh_instance or not chunk.mesh_instance.mesh:
+			push_warning("[TerrainComposer] Chunk %s has no mesh, skipping" % str(chunk.position))
+			continue
+
+		var chunk_root := StaticBody3D.new()
+		chunk_root.name = "Chunk_%d_%d" % [chunk.position.x, chunk.position.y]
+		chunk_root.collision_layer = collision_layer
+		chunk_root.collision_mask = collision_mask
+
+		var chunk_pos := Vector3.ZERO
+		if chunk.root and is_instance_valid(chunk.root):
+			chunk_pos = Vector3(chunk.world_bounds.position.x, 0.0, chunk.world_bounds.position.y)
+		chunk_root.position = chunk_pos
+
+		root_node.add_child(chunk_root)
+		chunk_root.owner = root_node
+
+		var mesh_instance := MeshInstance3D.new()
+		mesh_instance.mesh = chunk.mesh_instance.mesh.duplicate()
+		if baked_material:
+			mesh_instance.material_override = baked_material
+		elif chunk.mesh_instance.material_override:
+			mesh_instance.material_override = chunk.mesh_instance.material_override
+		mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		mesh_instance.name = "Mesh"
+		chunk_root.add_child(mesh_instance)
+		mesh_instance.owner = root_node
+
+		if generate_collision and chunk.collision_shape and chunk.collision_shape.shape:
+			var collision_shape := CollisionShape3D.new()
+			collision_shape.shape = chunk.collision_shape.shape.duplicate()
+			collision_shape.position = chunk.collision_shape.position
+			collision_shape.scale = chunk.collision_shape.scale
+			collision_shape.name = "Collision"
+			chunk_root.add_child(collision_shape)
+			collision_shape.owner = root_node
+
+	for feature in _feature_nodes:
+		if not is_instance_valid(feature):
+			continue
+		if not feature.get("generate_water_mesh"):
+			continue
+		var water_mesh_prop = feature.get("_water_mesh_instance")
+		if not water_mesh_prop or not is_instance_valid(water_mesh_prop):
+			continue
+		var water_mesh_instance = water_mesh_prop as MeshInstance3D
+		if not water_mesh_instance.mesh:
+			continue
+
+		var water_node := MeshInstance3D.new()
+		water_node.name = feature.name + "_Water"
+		water_node.mesh = water_mesh_instance.mesh.duplicate()
+		if water_mesh_instance.material_override:
+			water_node.material_override = water_mesh_instance.material_override
+		water_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+		var feature_pos := Vector3.ZERO
+		if feature is Node3D:
+			feature_pos = (feature as Node3D).position
+		water_node.position = feature_pos
+
+		root_node.add_child(water_node)
+		water_node.owner = root_node
+
+	for scatter in _scatter_nodes:
+		if not is_instance_valid(scatter):
+			continue
+		var container = scatter.get_node_or_null("ScatterInstances")
+		if not container:
+			continue
+		for child in container.get_children():
+			if not is_instance_valid(child) or not (child is Node3D):
+				continue
+			var instance_copy = child.duplicate(Node.DUPLICATE_SIGNALS | Node.DUPLICATE_GROUPS)
+			if not instance_copy:
+				continue
+			var cast_child := child as Node3D
+			var cast_copy := instance_copy as Node3D
+			# Use local transform since root_node is not in the scene tree
+			cast_copy.transform = cast_child.global_transform
+			root_node.add_child(instance_copy)
+			instance_copy.owner = root_node
+			_set_owners_recursive(instance_copy, root_node)
+
+	var packed_scene := PackedScene.new()
+	var error := packed_scene.pack(root_node)
+	if error != OK:
+		push_error("[TerrainComposer] Failed to pack baked scene (error %d)" % error)
+		return false
+
+	error = ResourceSaver.save(packed_scene, output_path)
+	if error != OK:
+		push_error("[TerrainComposer] Failed to save baked scene: %s (error %d)" % [output_path, error])
+		return false
+
+	print("[TerrainComposer] Baked terrain saved to %s" % output_path)
+	return true
+
+func _set_owners_recursive(node: Node, owner: Node) -> void:
+	for child in node.get_children():
+		child.owner = owner
+		_set_owners_recursive(child, owner)
 
 func _maybe_invalidate_bake(reason: String) -> void:
 	if not bake_enabled:

@@ -19,8 +19,7 @@ enum WrapMode {
 		if heightmap_texture and heightmap_texture.changed.is_connected(_on_heightmap_changed):
 			heightmap_texture.changed.disconnect(_on_heightmap_changed)
 		heightmap_texture = value
-		if heightmap_texture and not heightmap_texture.changed.is_connected(_on_heightmap_changed):
-			heightmap_texture.changed.connect(_on_heightmap_changed)
+		_ensure_texture_connection()
 		_invalidate_heightmap_cache()
 		_commit_parameter_change()
 
@@ -51,6 +50,9 @@ var _heightmap_data_dirty: bool = true
 
 func _ready() -> void:
 	super._ready()
+	_ensure_texture_connection()
+
+func _ensure_texture_connection() -> void:
 	if heightmap_texture and not heightmap_texture.changed.is_connected(_on_heightmap_changed):
 		heightmap_texture.changed.connect(_on_heightmap_changed)
 
@@ -103,21 +105,35 @@ func _get_heightmap_data() -> PackedFloat32Array:
 	_heightmap_data_dirty = false
 
 	if heightmap_texture == null:
+		push_warning("[%s] No heightmap texture assigned" % name)
 		return _cached_height_data
 
 	var img = heightmap_texture.get_image()
 	if img == null:
-		return _cached_height_data
+		if heightmap_texture is CompressedTexture2D or heightmap_texture is ImageTexture:
+			var texture_path = heightmap_texture.resource_path
+			if not texture_path.is_empty():
+				var loaded_image = Image.load_from_file(texture_path)
+				if loaded_image != null:
+					img = loaded_image
+					if not Engine.is_editor_hint():
+						print("[%s] Loaded heightmap image from file: %s" % [name, texture_path])
+		
+		if img == null:
+			push_error("[%s] Failed to get heightmap image data - texture may not be loaded yet (path: %s)" % [name, heightmap_texture.resource_path])
+			return _cached_height_data
 
 	if img.get_format() != Image.FORMAT_RF:
 		img.convert(Image.FORMAT_RF)
 
 	var data = img.get_data().to_float32_array()
 	if data.is_empty():
+		push_warning("[%s] Heightmap image has no data (size: %dx%d)" % [name, img.get_width(), img.get_height()])
 		return _cached_height_data
 
 	_cached_height_data = data
 	_cached_height_size = Vector2i(img.get_width(), img.get_height())
+	print("[%s] Cached heightmap data: %dx%d (%d values)" % [name, _cached_height_size.x, _cached_height_size.y, _cached_height_data.size()])
 	return _cached_height_data
 
 func get_gpu_param_pack() -> Dictionary:
@@ -127,6 +143,8 @@ func get_gpu_param_pack() -> Dictionary:
 	var data_offset = 19 + extra_floats.size()
 	if not height_data.is_empty():
 		extra_floats.append_array(height_data)
+	else:
+		push_warning("[%s] GPU param pack has no heightmap data - terrain may be flat at runtime" % name)
 	var extra_ints := PackedInt32Array([
 		int(wrap_mode),
 		1 if invert else 0,
