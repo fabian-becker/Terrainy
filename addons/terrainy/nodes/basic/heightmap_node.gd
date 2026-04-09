@@ -110,7 +110,12 @@ func _get_heightmap_data() -> PackedFloat32Array:
 
 	var img = heightmap_texture.get_image()
 	if img == null:
-		if heightmap_texture is CompressedTexture2D or heightmap_texture is ImageTexture:
+		if heightmap_texture is NoiseTexture2D:
+			var noise = heightmap_texture.noise
+			if noise:
+				img = noise.get_image(heightmap_texture.width, heightmap_texture.height)
+		
+		if img == null and (heightmap_texture is CompressedTexture2D or heightmap_texture is ImageTexture):
 			var texture_path = heightmap_texture.resource_path
 			if not texture_path.is_empty():
 				var loaded_image = Image.load_from_file(texture_path)
