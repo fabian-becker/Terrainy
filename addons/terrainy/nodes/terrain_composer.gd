@@ -284,7 +284,7 @@ func _scan_features() -> void:
 	for feature in _feature_nodes:
 		if feature is ScatterNode:
 			_scatter_nodes.append(feature)
-		else:
+		elif feature.affects_heightmap():
 			_height_feature_nodes.append(feature)
 
 	var features_changed = false
@@ -1102,6 +1102,7 @@ func _scatter_single_node(scatter: ScatterNode) -> void:
 		return
 
 	var scope_context: EvaluationContext = scope.get("context", null)
+	var scope_feature: TerrainFeatureNode = scope.get("parent_feature", null)
 	var scope_area = scope_rect.size.x * scope_rect.size.y
 	var computed_count = int(round(scope_area * scatter.density))
 	computed_count = max(computed_count, scatter.min_instances)
@@ -1131,7 +1132,7 @@ func _scatter_single_node(scatter: ScatterNode) -> void:
 		var world_z = rng.randf_range(scope_rect.position.y, scope_rect.position.y + scope_rect.size.y)
 		var world_pos = Vector3(world_x, 0.0, world_z)
 
-		if scope_context != null and scope_context.get_influence_weight(world_pos) <= 0.0:
+		if scope_context != null and scope_feature != null and scope_feature.get_influence_weight_safe(world_pos, scope_context) <= 0.0:
 			continue
 
 		if not _terrain_bounds.has_point(Vector2(world_x, world_z)):
@@ -1185,7 +1186,8 @@ func _resolve_scatter_scope(scatter: ScatterNode) -> Dictionary:
 			return {}
 		return {
 			"bounds": intersection,
-			"context": parent_feature.prepare_evaluation_context()
+			"context": parent_feature.prepare_evaluation_context(),
+			"parent_feature": parent_feature
 		}
 
 	if scatter.get_parent() == self:
