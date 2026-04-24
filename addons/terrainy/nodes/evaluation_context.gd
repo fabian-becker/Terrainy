@@ -36,13 +36,13 @@ var strength: float = 1.0
 var blend_mode: int = 0
 
 ## Optional baked mask texture data (for thread-safe sampling in worker threads)
-var mask_data: PackedFloat32Array = PackedFloat32Array()
+var masktex_data: PackedFloat32Array = PackedFloat32Array()
 
 ## Size of the baked mask data (width, height)
-var mask_size: Vector2i = Vector2i.ZERO
+var masktex_size: Vector2i = Vector2i.ZERO
 
 ## Whether the mask should be inverted
-var mask_invert: bool = false
+var masktex_invert: bool = false
 
 ## Create an EvaluationContext from a TerrainFeatureNode.
 ## This captures all necessary data for thread-safe evaluation.
@@ -71,9 +71,9 @@ static func from_feature(feature: TerrainFeatureNode) -> EvaluationContext:
 	
 	# Capture optional mask texture data for thread-safe sampling
 	if feature.has_method("has_mask_texture") and feature.has_mask_texture():
-		ctx.mask_data = feature._get_mask_data().duplicate()
-		ctx.mask_size = feature._cached_mask_size
-		ctx.mask_invert = feature.mask_invert
+		ctx.masktex_data = feature._get_mask_data().duplicate()
+		ctx.masktex_size = feature._masktex_cache_size
+		ctx.masktex_invert = feature.mask_invert
 	
 	return ctx
 
