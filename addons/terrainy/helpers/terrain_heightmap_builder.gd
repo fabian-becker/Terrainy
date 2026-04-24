@@ -92,8 +92,10 @@ func compose(
 		
 		# Check if we need to regenerate this feature's heightmap
 		if not _heightmap_cache.has(feature) or feature.is_dirty():
-			# GPU feature evaluation (limited types)
-			if _should_use_gpu(use_gpu_composition) and _gpu_feature_evaluator:
+			# Check for mask texture (GPU evaluators can't handle texture masking)
+			var has_mask = feature.has_method("has_mask_texture") and feature.has_mask_texture()
+			# GPU feature evaluation (limited types and no mask textures)
+			if not has_mask and _should_use_gpu(use_gpu_composition) and _gpu_feature_evaluator:
 				if feature.has_method("get_gpu_param_pack"):
 					var pack = feature.get_gpu_param_pack()
 					var gpu_result = _gpu_feature_evaluator.evaluate_single_feature_gpu(resolution, terrain_bounds, pack)
@@ -238,6 +240,9 @@ func _compose_gpu(
 		if is_hole:
 			hole_features.append(feature)
 		
+		# Check if feature has a mask texture (GPU influence maps don't support textures)
+		var has_mask = feature.has_method("has_mask_texture") and feature.has_mask_texture()
+		
 		# Get or generate cached influence map
 		var influence_map: Image
 		var cache_key = _get_influence_cache_key(feature)
@@ -247,10 +252,11 @@ func _compose_gpu(
 			influence_cached_count += 1
 		else:
 			var inf_start = Time.get_ticks_msec()
-			# Use GPU to generate influence map for better performance
-			if _gpu_compositor and _gpu_compositor.is_available():
+			# Use GPU to generate influence map for better performance (unless masked)
+			if has_mask:
+				print("[TerrainHeightmapBuilder] Skipping GPU influence map for '%s' — mask textures require CPU path" % feature.name)
+			if not has_mask and _gpu_compositor and _gpu_compositor.is_available():
 				influence_map = _gpu_compositor.generate_influence_map_gpu(feature, resolution, terrain_bounds)
-				print("[TerrainHeightmapBuilder] Generated influence map for '%s' on GPU in %d ms" % [feature.name, Time.get_ticks_msec() - inf_start])
 			else:
 				# Get context for thread-safe influence calculation
 				var ctx = contexts.get(feature)
@@ -344,7 +350,7 @@ func _compose_cpu(
 		# Get or generate cached influence map
 		var influence_map: Image
 		var cache_key = _get_influence_cache_key(feature)
-		
+
 		if _influence_cache.has(feature) and _influence_cache_keys.get(feature) == cache_key:
 			influence_map = _influence_cache[feature]
 		else:

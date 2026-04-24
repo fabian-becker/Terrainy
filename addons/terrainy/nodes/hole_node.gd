@@ -58,6 +58,11 @@ func get_height_at_safe(_world_pos: Vector3, _context: EvaluationContext) -> flo
 	return 0.0
 
 func get_influence_weight_safe(world_pos: Vector3, context: EvaluationContext) -> float:
+	# Holes are boolean cut-out features, not blended height features.
+	# Mask textures are intentionally ignored for holes.
+	return _get_raw_influence_weight(world_pos, context)
+
+func _get_raw_influence_weight(world_pos: Vector3, context: EvaluationContext) -> float:
 	if not use_3d_influence:
 		return context.get_influence_weight(world_pos)
 	
