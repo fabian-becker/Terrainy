@@ -12,8 +12,6 @@ extends TerrainFeatureNode
 ##   2. Place scatter nodes or other features as children.
 ##   3. White = full influence, black = no influence.
 
-const EvaluationContext = preload("res://addons/terrainy/nodes/evaluation_context.gd")
-
 func _ready() -> void:
 	super._ready()
 	if Engine.is_editor_hint() and name.is_empty():

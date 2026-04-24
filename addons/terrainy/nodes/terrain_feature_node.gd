@@ -181,9 +181,9 @@ var _cached_resolution: Vector2i = Vector2i.ZERO
 var _cached_bounds: Rect2 = Rect2()
 
 # Cache for mask texture data
-var _cached_mask_data: PackedFloat32Array = PackedFloat32Array()
-var _cached_mask_size: Vector2i = Vector2i.ZERO
-var _mask_data_dirty: bool = true
+var _masktex_cache_data: PackedFloat32Array = PackedFloat32Array()
+var _masktex_cache_size: Vector2i = Vector2i.ZERO
+var _masktex_cache_dirty: bool = true
 
 # GPU modifier processor (shared across all features)
 static var _gpu_modifier_processor: GpuHeightmapModifier = null
@@ -689,24 +689,24 @@ func has_mask_texture() -> bool:
 ## Uses context-provided mask data when available (thread-safe), otherwise falls back
 ## to node state (main-thread only).
 func _sample_mask_texture(world_pos: Vector3, context: EvaluationContext) -> float:
-	var mask_data: PackedFloat32Array
-	var mask_size: Vector2i
+	var masktex_data: PackedFloat32Array
+	var masktex_size: Vector2i
 	var invert: bool
 	
 	# Thread-safe path: use baked mask data from context
-	if not context.mask_data.is_empty() and context.mask_size.x > 0 and context.mask_size.y > 0:
-		mask_data = context.mask_data
-		mask_size = context.mask_size
-		invert = context.mask_invert
+	if not context.masktex_data.is_empty() and context.masktex_size.x > 0 and context.masktex_size.y > 0:
+		masktex_data = context.masktex_data
+		masktex_size = context.masktex_size
+		invert = context.masktex_invert
 	else:
 		# Main-thread fallback: read from node state
 		if mask_texture == null:
 			return 1.0
 		
-		mask_data = _get_mask_data()
-		if mask_data.is_empty():
+		masktex_data = _get_mask_data()
+		if masktex_data.is_empty():
 			return 1.0
-		mask_size = _cached_mask_size
+		masktex_size = _masktex_cache_size
 		invert = mask_invert
 	
 	var local_pos = context.to_local(world_pos)
@@ -719,24 +719,24 @@ func _sample_mask_texture(world_pos: Vector3, context: EvaluationContext) -> flo
 	u = clampf(u, 0.0, 1.0)
 	v = clampf(v, 0.0, 1.0)
 	
-	var x = u * float(mask_size.x - 1)
-	var y = v * float(mask_size.y - 1)
+	var x = u * float(masktex_size.x - 1)
+	var y = v * float(masktex_size.y - 1)
 	var x0 = int(floor(x))
 	var y0 = int(floor(y))
-	var x1 = mini(x0 + 1, mask_size.x - 1)
-	var y1 = mini(y0 + 1, mask_size.y - 1)
+	var x1 = mini(x0 + 1, masktex_size.x - 1)
+	var y1 = mini(y0 + 1, masktex_size.y - 1)
 	var dx = x - float(x0)
 	var dy = y - float(y0)
 	
-	var idx00 = y0 * mask_size.x + x0
-	var idx10 = y0 * mask_size.x + x1
-	var idx01 = y1 * mask_size.x + x0
-	var idx11 = y1 * mask_size.x + x1
+	var idx00 = y0 * masktex_size.x + x0
+	var idx10 = y0 * masktex_size.x + x1
+	var idx01 = y1 * masktex_size.x + x0
+	var idx11 = y1 * masktex_size.x + x1
 	
-	var h00 = mask_data[idx00]
-	var h10 = mask_data[idx10]
-	var h01 = mask_data[idx01]
-	var h11 = mask_data[idx11]
+	var h00 = masktex_data[idx00]
+	var h10 = masktex_data[idx10]
+	var h01 = masktex_data[idx01]
+	var h11 = masktex_data[idx11]
 	
 	var h0 = lerp(h00, h10, dx)
 	var h1 = lerp(h01, h11, dx)
@@ -749,16 +749,16 @@ func _sample_mask_texture(world_pos: Vector3, context: EvaluationContext) -> flo
 
 func _get_mask_data() -> PackedFloat32Array:
 	## Must only be called from the main thread (or under a mutex guard).
-	## This method mutates node state; worker threads must use context.mask_data instead.
-	if not _mask_data_dirty and not _cached_mask_data.is_empty():
-		return _cached_mask_data
+	## This method mutates node state; worker threads must use context.masktex_data instead.
+	if not _masktex_cache_dirty and not _masktex_cache_data.is_empty():
+		return _masktex_cache_data
 	
-	_cached_mask_data = PackedFloat32Array()
-	_cached_mask_size = Vector2i.ZERO
-	_mask_data_dirty = false
+	_masktex_cache_data = PackedFloat32Array()
+	_masktex_cache_size = Vector2i.ZERO
+	_masktex_cache_dirty = false
 	
 	if mask_texture == null:
-		return _cached_mask_data
+		return _masktex_cache_data
 	
 	var img = mask_texture.get_image()
 	if img == null:
@@ -779,7 +779,7 @@ func _get_mask_data() -> PackedFloat32Array:
 			push_warning("[%s] Mask texture '%s' (type %s) could not be read. Procedural textures (NoiseTexture, ViewportTexture, etc.) are not supported as masks." % [name, texture_path, texture_class])
 		
 		if img == null:
-			return _cached_mask_data
+			return _masktex_cache_data
 	
 	# Convert to RGBA8 for safe channel extraction
 	if img.get_format() != Image.FORMAT_RGBA8:
@@ -811,9 +811,9 @@ func _get_mask_data() -> PackedFloat32Array:
 		
 		grayscale[i] = clampf(value, 0.0, 1.0)
 	
-	_cached_mask_data = grayscale
-	_cached_mask_size = Vector2i(width, height)
-	return _cached_mask_data
+	_masktex_cache_data = grayscale
+	_masktex_cache_size = Vector2i(width, height)
+	return _masktex_cache_data
 
 func _connect_mask_texture() -> void:
 	if mask_texture and not mask_texture.changed.is_connected(_on_mask_texture_changed):
@@ -828,6 +828,6 @@ func _on_mask_texture_changed() -> void:
 	_commit_parameter_change()
 
 func _invalidate_mask_cache() -> void:
-	_cached_mask_data = PackedFloat32Array()
-	_cached_mask_size = Vector2i.ZERO
-	_mask_data_dirty = true
+	_masktex_cache_data = PackedFloat32Array()
+	_masktex_cache_size = Vector2i.ZERO
+	_masktex_cache_dirty = true
