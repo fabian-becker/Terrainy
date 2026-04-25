@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode blend_add, depth_draw_always, cull_disabled, diffuse_lambert, specular_schlick_ggx;
+render_mode blend_mix, depth_draw_always, cull_disabled, diffuse_lambert, specular_schlick_ggx;
 
 // Water colors
 uniform vec4 water_color_shallow : source_color = vec4(0.2, 0.6, 0.8, 0.8);
@@ -26,6 +26,9 @@ uniform float wave_frequency : hint_range(0.1, 10.0) = 2.0;
 uniform float wave_tiling : hint_range(0.1, 20.0) = 1.0;
 uniform sampler2D wave_normal : filter_linear_mipmap_anisotropic, repeat_enable;
 
+// Depth texture
+uniform sampler2D depth_texture : hint_depth_texture, filter_linear_mipmap;
+
 // Flags
 uniform bool use_foam_texture = false;
 uniform bool use_wave_normal = false;
@@ -38,7 +41,6 @@ uniform float time_scale : hint_range(0.0, 5.0) = 1.0;
 varying vec3 world_pos;
 varying vec3 local_pos;
 varying vec2 uv_coords;
-varying float depth_at_fragment;
 
 // Noise function for foam variation
 float hash(vec2 p) {
@@ -88,18 +90,31 @@ void vertex() {
 		* cos(world_pos.z * wave_frequency * 1.9 + time * wave_speed * 1.1);
 	
 	VERTEX.y += (wave_offset * 0.7 + wave2 * 0.3) * wave_height;
-	
-	depth_at_fragment = water_level - VERTEX.y;
 }
 
 void fragment() {
 	float time = TIME * time_scale;
 	
-	// Calculate water depth factor (0 = shallow, 1 = deep)
-	float depth_factor = clamp(depth_at_fragment / depth_max, 0.0, 1.0);
+	// Compute true water thickness using scene depth
+	float scene_depth_raw = textureLod(depth_texture, SCREEN_UV, 0.0).r;
+	vec4 screen_pos = vec4(SCREEN_UV * 2.0 - 1.0, scene_depth_raw, 1.0);
+	vec4 view_pos = INV_PROJECTION_MATRIX * screen_pos;
+	view_pos.xyz /= view_pos.w;
+	float scene_depth = -view_pos.z;
+	float surface_depth = -VERTEX.z;
+	float water_thickness = max(scene_depth - surface_depth, 0.0);
+	float depth_factor = clamp(water_thickness / depth_max, 0.0, 1.0);
 	
 	// Blend between shallow and deep colors
 	vec4 water_color = mix(water_color_shallow, water_color_deep, depth_factor);
+	
+	// Backface handling: darken and make more opaque so water looks solid from below
+	vec3 base_normal = NORMAL;
+	if (!FRONT_FACING) {
+		base_normal = -base_normal;
+		water_color.rgb *= 0.75;
+		water_color.a = min(water_color.a + 0.25, 1.0);
+	}
 	
 	// Sample wave normal for surface detail
 	vec2 uv_offset = vec2(time * wave_speed * 0.1, time * wave_speed * 0.05);
@@ -120,6 +135,11 @@ void fragment() {
 	computed_normal.xy *= normal_strength;
 	computed_normal = normalize(computed_normal);
 	
+	// Flip normal for backfaces so the water looks solid from below
+	if (!FRONT_FACING) {
+		computed_normal = -computed_normal;
+	}
+	
 	NORMAL_MAP = computed_normal;
 	
 	// Calculate foam at shorelines (based on depth)
@@ -127,7 +147,7 @@ void fragment() {
 	float foam_mask = 0.0;
 	
 	// Foam appears in shallow water and at random foam patches
-	float shoreline_factor = 1.0 - clamp(depth_at_fragment / foam_width, 0.0, 1.0);
+	float shoreline_factor = 1.0 - clamp(water_thickness / foam_width, 0.0, 1.0);
 	shoreline_factor = pow(shoreline_factor, 2.0); // Sharpen the edge
 	
 	// Combine shoreline foam with noise
@@ -154,6 +174,12 @@ void fragment() {
 	ALBEDO = final_color;
 	ROUGHNESS = mix(0.1, 0.8, foam_mask); // Foam is rougher
 	METALLIC = 0.0;
+	
+	// Fake chromatic light diffraction at glancing angles
+	vec3 view_dir = normalize(CAMERA_POSITION_WORLD - world_pos);
+	float fresnel = pow(1.0 - abs(dot(view_dir, base_normal)), 3.0);
+	vec3 chromatic = vec3(fresnel * 1.1, fresnel * 0.9, fresnel * 0.7) * 0.4;
+	ALBEDO += chromatic;
 	
 	// Shape masking for circle/ellipse/rectangle
 	float shape_alpha = 1.0;

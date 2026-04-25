@@ -63,7 +63,7 @@ var _mouse_in_canvas: bool = false
 
 func _ready() -> void:
 	title = "Shape Mask Editor"
-	min_size = Vector2i(620, 760)
+	min_size = Vector2i(420, 520)
 	ok_button_text = "Apply"
 	confirmed.connect(_on_apply_pressed)
 	canceled.connect(_on_cancel_pressed)
@@ -211,7 +211,7 @@ func _build_ui() -> void:
 	root.add_child(canvas_label)
 
 	_canvas = TextureRect.new()
-	_canvas.custom_minimum_size = Vector2(560, 560)
+	_canvas.custom_minimum_size = Vector2(320, 320)
 	_canvas.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_canvas.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_canvas.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
@@ -277,7 +277,12 @@ func _build_ui() -> void:
 	_import_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
 	_import_dialog.access = FileDialog.ACCESS_FILESYSTEM
 	_import_dialog.use_native_dialog = true
-	_import_dialog.add_filter("*.png,*.jpg,*.jpeg,*.webp,*.bmp,*.tga,*.exr ; Image Files")
+	_import_dialog.add_filter("*.png", "PNG Image")
+	_import_dialog.add_filter("*.jpg,*.jpeg", "JPEG Image")
+	_import_dialog.add_filter("*.webp", "WebP Image")
+	_import_dialog.add_filter("*.bmp", "BMP Image")
+	_import_dialog.add_filter("*.tga", "TGA Image")
+	_import_dialog.add_filter("*.exr", "EXR Image")
 	_import_dialog.file_selected.connect(_on_import_file_selected)
 	add_child(_import_dialog)
 
@@ -371,10 +376,16 @@ func _on_import_pressed() -> void:
 	_import_dialog.popup_centered_ratio(0.65)
 
 func _on_import_file_selected(path: String) -> void:
-	var imported = Image.new()
-	var err = imported.load(path)
-	if err != OK:
-		push_warning("Failed to import image '%s' (error %d)." % [path, err])
+	var imported: Image = null
+	imported = Image.load_from_file(path)
+	if imported == null:
+		var img = Image.new()
+		var err = img.load(path)
+		if err == OK:
+			imported = img
+	
+	if imported == null:
+		push_warning("Failed to import image '%s'." % path)
 		return
 	if imported.get_width() <= 0 or imported.get_height() <= 0:
 		push_warning("Imported image has invalid size.")

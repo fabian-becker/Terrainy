@@ -52,8 +52,12 @@ signal water_mesh_updated
 ## Custom material for water (overrides default shader)
 @export var water_material: Material:
 	set(value):
+		if water_material == value:
+			return
 		water_material = value
-		_apply_water_material()
+		if not _is_applying_material:
+			_is_applying_material = true
+			call_deferred("_apply_water_material")
 
 ## Optional water settings resource for appearance (ignored if water_material is set)
 @export var water_settings: WaterSettingsRes:
@@ -135,6 +139,7 @@ signal water_mesh_updated
 var _water_mesh_instance: MeshInstance3D = null
 var _water_shader_material: ShaderMaterial = null
 var _is_building_mesh: bool = false
+var _is_applying_material: bool = false
 var _composer: Node = null
 
 func _ready() -> void:
@@ -257,6 +262,7 @@ func _update_water_shader_params() -> void:
 		_water_shader_material.set_shader_parameter("foam_texture", foam_texture)
 
 func _apply_water_material() -> void:
+	_is_applying_material = false
 	if not _water_mesh_instance:
 		return
 	
@@ -279,8 +285,8 @@ func _apply_water_settings() -> void:
 		wave_height = water_settings.wave_height
 		wave_frequency = water_settings.wave_frequency
 		
-		if water_settings.custom_material:
-			water_material = water_settings.custom_material
+		if water_settings.custom_material and water_settings.custom_material != water_material:
+			call_deferred("set", "water_material", water_settings.custom_material)
 		
 		_update_water_shader_params()
 
@@ -332,40 +338,73 @@ func _build_water_mesh() -> void:
 	var step_x = size_x / float(mesh_resolution)
 	var step_z = size_z / float(mesh_resolution)
 	
-	var vertex_count = (mesh_resolution + 1) * (mesh_resolution + 1)
-	var vertices = PackedVector3Array()
-	vertices.resize(vertex_count)
-	var uvs = PackedVector2Array()
-	uvs.resize(vertex_count)
-	var indices = PackedInt32Array()
-	indices.resize(mesh_resolution * mesh_resolution * 6)
+	var grid_w = mesh_resolution + 1
+	var grid_h = mesh_resolution + 1
+	var total_vertex_count = grid_w * grid_h
+	var all_vertices = PackedVector3Array()
+	all_vertices.resize(total_vertex_count)
+	var all_uvs = PackedVector2Array()
+	all_uvs.resize(total_vertex_count)
+	var valid = PackedByteArray()
+	valid.resize(total_vertex_count)
 	
 	var vert_idx = 0
-	for z in range(mesh_resolution + 1):
-		for x in range(mesh_resolution + 1):
+	for z in range(grid_h):
+		for x in range(grid_w):
 			var local_x = (x - half_res_x) * step_x
 			var local_z = (z - half_res_z) * step_z
 			
-			vertices[vert_idx] = Vector3(local_x, water_y, local_z)
-			uvs[vert_idx] = Vector2(x / float(mesh_resolution), z / float(mesh_resolution))
+			all_vertices[vert_idx] = Vector3(local_x, water_y, local_z)
+			all_uvs[vert_idx] = Vector2(x / float(mesh_resolution), z / float(mesh_resolution))
+			
+			var nd: float
+			match influence_shape:
+				InfluenceShape.CIRCLE:
+					var radius = max(size_x, size_z) * 0.5
+					nd = Vector2(local_x, local_z).length() / max(radius, 0.0001)
+				InfluenceShape.ELLIPSE:
+					var half_x = size_x * 0.5
+					var half_z = size_z * 0.5
+					nd = sqrt((local_x / max(half_x, 0.0001)) * (local_x / max(half_x, 0.0001)) + (local_z / max(half_z, 0.0001)) * (local_z / max(half_z, 0.0001)))
+				_:
+					nd = 0.0
+			
+			valid[vert_idx] = 1 if nd <= 1.02 else 0
 			vert_idx += 1
 	
-	var idx = 0
+	# Remap valid vertices into packed arrays
+	var remap = PackedInt32Array()
+	remap.resize(total_vertex_count)
+	var vertices = PackedVector3Array()
+	var uvs = PackedVector2Array()
+	var new_index = 0
+	for i in range(total_vertex_count):
+		if valid[i] == 1:
+			remap[i] = new_index
+			vertices.append(all_vertices[i])
+			uvs.append(all_uvs[i])
+			new_index += 1
+		else:
+			remap[i] = -1
+	
+	# Build indices for valid quads only
+	var indices = PackedInt32Array()
 	for z in range(mesh_resolution):
 		for x in range(mesh_resolution):
-			var i = z * (mesh_resolution + 1) + x
+			var i = z * grid_w + x
 			var i_right = i + 1
-			var i_down = i + mesh_resolution + 1
+			var i_down = i + grid_w
 			var i_diag = i_down + 1
 			
-			indices[idx] = i
-			indices[idx + 1] = i_right
-			indices[idx + 2] = i_down
+			if valid[i] == 0 or valid[i_right] == 0 or valid[i_down] == 0 or valid[i_diag] == 0:
+				continue
 			
-			indices[idx + 3] = i_right
-			indices[idx + 4] = i_diag
-			indices[idx + 5] = i_down
-			idx += 6
+			indices.append(remap[i])
+			indices.append(remap[i_right])
+			indices.append(remap[i_down])
+			indices.append(remap[i_right])
+			indices.append(remap[i_diag])
+			indices.append(remap[i_down])
 	
 	var arrays = []
 	arrays.resize(Mesh.ARRAY_MAX)

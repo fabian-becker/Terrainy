@@ -17,6 +17,7 @@ var shape_height: float
 var rotation_angle: float = 0.0
 var mask_size: Vector2i = Vector2i.ZERO
 var mask_data: PackedFloat32Array = PackedFloat32Array()
+var shape_mode: int = 0
 
 ## Create a ShapeEvaluationContext from a terrain feature node.
 static func from_shape_feature(
@@ -25,7 +26,8 @@ static func from_shape_feature(
 	smooth: float,
 	rotation: float,
 	packed_mask_data: PackedFloat32Array,
-	packed_mask_size: Vector2i
+	packed_mask_size: Vector2i,
+	shape_mode_val: int = 0
 ) -> ShapeEvaluationContext:
 	var ctx = ShapeEvaluationContext.new()
 
@@ -50,6 +52,7 @@ static func from_shape_feature(
 	ctx.rotation_angle = rotation
 	ctx.mask_data = packed_mask_data
 	ctx.mask_size = packed_mask_size
+	ctx.shape_mode = shape_mode_val
 
 	# Pre-compute 2D rotation matrix for XZ plane
 	# This allows rotating shape coordinates without scene tree access
