@@ -8,6 +8,17 @@ const ShapeMaskResource = preload("res://addons/terrainy/resources/shape_mask_re
 
 const DEFAULT_MASK_RESOLUTION := Vector2i(256, 256)
 
+enum ShapeMode {
+	CUSTOM_MASK, ## Use painted/imported mask image
+	CIRCLE,      ## Procedural circular shape
+	RECTANGLE    ## Procedural rectangular shape
+}
+
+@export var shape_mode: ShapeMode = ShapeMode.CUSTOM_MASK:
+	set(value):
+		shape_mode = value
+		_commit_parameter_change()
+
 ## Custom top-view mask as height stamp.
 
 @export var shape_height: float = 10.0:
@@ -59,7 +70,8 @@ func prepare_evaluation_context() -> ShapeEvaluationContext:
 		smoothness,
 		deg_to_rad(shape_rotation),
 		mask_data,
-		_cached_mask_size
+		_cached_mask_size,
+		shape_mode
 	)
 
 ## Thread-safe version using pre-computed context
@@ -86,20 +98,31 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 	if normalized_distance >= 1.0:
 		return 0.0
 
-	var uv = Vector2(
-		(pos_2d.x / size.x) + 0.5,
-		(pos_2d.y / size.y) + 0.5
-	)
-	var mask_value = ctx.sample_mask(uv)
-	if mask_value <= 0.0:
-		return 0.0
+	var mask_value: float
+	var boundary_nd: float = normalized_distance
+	if ctx.shape_mode == 0: # CUSTOM_MASK
+		var uv = Vector2(
+			(pos_2d.x / size.x) + 0.5,
+			(pos_2d.y / size.y) + 0.5
+		)
+		mask_value = ctx.sample_mask(uv)
+		if mask_value <= 0.0:
+			return 0.0
+	elif ctx.shape_mode == 1: # CIRCLE
+		var radius = max(half_size.x, half_size.y)
+		boundary_nd = pos_2d.length() / max(radius, 0.0001)
+		if boundary_nd >= 1.0:
+			return 0.0
+		mask_value = 1.0
+	else: # RECTANGLE
+		mask_value = 1.0
 
 	# Smooth falloff at edges
 	var edge_start = 1.0 - ctx.smoothness
 	var height_factor = 1.0
 
-	if normalized_distance > edge_start and 1.0 > edge_start:
-		var edge_t = (normalized_distance - edge_start) / (1.0 - edge_start)
+	if boundary_nd > edge_start and 1.0 > edge_start:
+		var edge_t = (boundary_nd - edge_start) / (1.0 - edge_start)
 		height_factor = 1.0 - smoothstep(0.0, 1.0, edge_t)
 
 	return ctx.shape_height * mask_value * height_factor
