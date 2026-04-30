@@ -113,35 +113,55 @@ static func generate_from_heightmap(
 		normals[vi] = _compute_normal(heights, vi, x, res_y, width, height, step_x, step_y)
 		vi += 1
 	
-	# Generate indices, skipping quads inside holes
+	# Generate indices
 	var indices := PackedInt32Array()
-	indices.resize(res_x * res_y * 6)  # Max possible size
-	var idx := 0
-	
-	for z in res_y:
-		var row_base := z * width
-		for x in res_x:
-			var i := row_base + x
-			var i_next_row := i + width
-			
-			# Check if this quad is inside a hole
-			if has_holes and _quad_is_hole(is_hole_vertex, i, width):
-				continue
-			
-			# Check for hole edge for potential bevel (simplified: skip bevel for now)
-			# TODO: Add bevel edge handling when edge_type == BEVELED
-			
-			indices[idx] = i
-			indices[idx + 1] = i + 1
-			indices[idx + 2] = i_next_row
-			indices[idx + 3] = i + 1
-			indices[idx + 4] = i_next_row + 1
-			indices[idx + 5] = i_next_row
-			
-			idx += 6
-	
-	# Shrink indices array to actual size
-	indices.resize(idx)
+
+	if has_holes:
+		# Marching-squares triangulation with interpolated boundary vertices for clean hole edges
+		var b_verts := PackedVector3Array()
+		var b_normals := PackedVector3Array()
+		var b_uvs := PackedVector2Array()
+		var edge_verts: Dictionary = {}
+
+		for z in res_y:
+			var row_base := z * width
+			for x in res_x:
+				var i00 := row_base + x
+				var i10 := i00 + 1
+				var i01 := i00 + width
+				var i11 := i00 + width + 1
+
+				var h00 := is_hole_vertex[i00] == 1
+				var h10 := is_hole_vertex[i10] == 1
+				var h01 := is_hole_vertex[i01] == 1
+				var h11 := is_hole_vertex[i11] == 1
+
+				_cell_triangles(
+					i00, i10, i01, i11, h00, h10, h01, h11,
+					heights, vertices, uvs, normals,
+					b_verts, b_normals, b_uvs, indices, edge_verts,
+					total_vertices, x, z, width
+				)
+
+		if b_verts.size() > 0:
+			vertices.append_array(b_verts)
+			normals.append_array(b_normals)
+			uvs.append_array(b_uvs)
+	else:
+		indices.resize(res_x * res_y * 6)
+		var idx := 0
+		for z in res_y:
+			var row_base := z * width
+			for x in res_x:
+				var i := row_base + x
+				var i_next_row := i + width
+				indices[idx] = i
+				indices[idx + 1] = i + 1
+				indices[idx + 2] = i_next_row
+				indices[idx + 3] = i + 1
+				indices[idx + 4] = i_next_row + 1
+				indices[idx + 5] = i_next_row
+				idx += 6
 	
 	# Create mesh
 	var arrays := []
@@ -254,3 +274,123 @@ static func _is_hole_boundary_vertex(
 				return true
 	
 	return false
+
+
+## Generate triangles for one grid cell using marching-squares on hole mask.
+## Boundary vertices are deduplicated across adjacent cells via edge_verts dict.
+static func _cell_triangles(
+	i00: int, i10: int, i01: int, i11: int,
+	h00: bool, h10: bool, h01: bool, h11: bool,
+	heights: PackedFloat32Array,
+	vertices: PackedVector3Array,
+	uvs: PackedVector2Array,
+	normals: PackedVector3Array,
+	b_verts: PackedVector3Array,
+	b_normals: PackedVector3Array,
+	b_uvs: PackedVector2Array,
+	indices: PackedInt32Array,
+	edge_verts: Dictionary,
+	base_off: int, gx: int, gz: int, gw: int
+) -> void:
+	# All solid or all hole
+	if (h00 == h10 and h10 == h01 and h01 == h11):
+		if not h00:
+			indices.append(i00); indices.append(i10); indices.append(i01)
+			indices.append(i10); indices.append(i11); indices.append(i01)
+		return
+
+	# Get shared boundary vertices for crossing edges
+	var bt = _bvert("h_%d_%d" % [gz, gx], edge_verts, i00, i10, h00, h10, heights, vertices, uvs, normals, b_verts, b_normals, b_uvs, base_off)
+	var br = _bvert("v_%d_%d" % [gz, gx + 1], edge_verts, i10, i11, h10, h11, heights, vertices, uvs, normals, b_verts, b_normals, b_uvs, base_off)
+	var bb = _bvert("h_%d_%d" % [gz + 1, gx], edge_verts, i01, i11, h01, h11, heights, vertices, uvs, normals, b_verts, b_normals, b_uvs, base_off)
+	var bl = _bvert("v_%d_%d" % [gz, gx], edge_verts, i00, i01, h00, h01, heights, vertices, uvs, normals, b_verts, b_normals, b_uvs, base_off)
+
+	# Build ordered solid polygon (counter-clockwise around cell center).
+	var poly: PackedInt32Array = _build_solid_poly(
+		i00, i10, i01, i11, h00, h10, h01, h11, bt, br, bb, bl
+	)
+
+	# Fan triangulate the solid polygon
+	for i in range(2, poly.size()):
+		indices.append(poly[0]); indices.append(poly[i - 1]); indices.append(poly[i])
+
+
+## Build an ordered polygon of solid vertices (corners + boundary vertices).
+## Traverses the cell perimeter CCW and collects vertices in the solid region.
+static func _build_solid_poly(
+	i00: int, i10: int, i01: int, i11: int,
+	h00: bool, h10: bool, h01: bool, h11: bool,
+	bt: int, br: int, bb: int, bl: int
+) -> PackedInt32Array:
+	var poly: PackedInt32Array = []
+
+	# Left edge: i00 → i01
+	if not h00: poly.append(i00)
+	if h00 != h01 and bl >= 0: poly.append(bl)
+	if not h01: poly.append(i01)
+
+	# Bottom edge: i01 → i11
+	if h01 != h11 and bb >= 0: poly.append(bb)
+	if not h11: poly.append(i11)
+
+	# Right edge: i11 → i10
+	if h11 != h10 and br >= 0: poly.append(br)
+	if not h10: poly.append(i10)
+
+	# Top edge: i10 → i00
+	if h10 != h00 and bt >= 0: poly.append(bt)
+
+	# Remove consecutive duplicates
+	var result: PackedInt32Array = []
+	for v in poly:
+		if result.is_empty() or result[result.size() - 1] != v:
+			result.append(v)
+
+	return result
+
+
+## Get or create a shared boundary vertex for an edge.
+## Returns -1 if the edge does not cross (both hole or both solid).
+static func _bvert(
+	key: String, edge_verts: Dictionary,
+	i_a: int, i_b: int,
+	ha: bool, hb: bool,
+	heights: PackedFloat32Array,
+	vertices: PackedVector3Array,
+	uvs: PackedVector2Array,
+	normals: PackedVector3Array,
+	b_verts: PackedVector3Array,
+	b_normals: PackedVector3Array,
+	b_uvs: PackedVector2Array,
+	base_off: int
+) -> int:
+	if ha == hb:
+		return -1
+	if edge_verts.has(key):
+		return edge_verts[key]
+
+	var idx = base_off + b_verts.size()
+
+	var i_s = i_a if not ha else i_b
+	var i_h = i_a if ha else i_b
+
+	var pa = vertices[i_s]
+	var pb = vertices[i_h]
+	var t = 0.5
+	var pos = pa.lerp(pb, t)
+	pos.y = heights[i_s] + (heights[i_h] - heights[i_s]) * t
+
+	var ua = uvs[i_s]
+	var ub = uvs[i_h]
+	var uv = ua.lerp(ub, t)
+
+	var na = normals[i_s]
+	var nb = normals[i_h]
+	var n = na.lerp(nb, t).normalized()
+
+	b_verts.append(pos)
+	b_normals.append(n)
+	b_uvs.append(uv)
+
+	edge_verts[key] = idx
+	return idx
