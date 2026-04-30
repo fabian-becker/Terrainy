@@ -986,53 +986,59 @@ func _on_chunk_generation_completed() -> void:
 func _update_chunk_collision(chunk: TerrainChunk) -> void:
 	if not chunk or not chunk.collision_shape:
 		return
-	
+
 	var start_time = Time.get_ticks_msec()
-	if generate_collision and chunk.heightmap:
+	if generate_collision and chunk.mesh_instance and chunk.mesh_instance.mesh:
 		chunk.static_body.visible = true
-		var height_shape = HeightMapShape3D.new()
-		var width = chunk.heightmap.get_width()
-		var depth = chunk.heightmap.get_height()
-		height_shape.map_width = width
-		height_shape.map_depth = depth
-		
-		var map_data: PackedFloat32Array = PackedFloat32Array()
-		map_data.resize(width * depth)
-		
-		var has_holes := chunk.hole_mask != null
-		var hole_data: PackedFloat32Array
-		if has_holes:
-			hole_data = chunk.hole_mask.get_data().to_float32_array()
-		
-		for z in range(depth):
-			for x in range(width):
-				var idx = z * width + x
-				if has_holes and hole_data[idx] >= 0.5:
-					map_data[idx] = -1000000.0  # Very negative value for holes
-				else:
-					map_data[idx] = chunk.heightmap.get_pixel(x, z).r
-		
-		height_shape.map_data = map_data
-		chunk.collision_shape.shape = height_shape
-		
-		chunk.collision_shape.scale = Vector3(
-			chunk.world_bounds.size.x / float(width - 1),
-			1.0,
-			chunk.world_bounds.size.y / float(depth - 1)
-		)
-		chunk.collision_shape.position = Vector3.ZERO
+
+		if chunk.hole_mask != null and _mask_has_holes(chunk.hole_mask):
+			# Chunk has actual hole pixels — use trimesh collision (respects hole geometry)
+			chunk.collision_shape.shape = chunk.mesh_instance.mesh.create_trimesh_shape()
+		elif chunk.heightmap:
+			# No holes in this chunk — use efficient HeightMapShape3D
+			var height_shape = HeightMapShape3D.new()
+			var w = chunk.heightmap.get_width()
+			var d = chunk.heightmap.get_height()
+			height_shape.map_width = w
+			height_shape.map_depth = d
+
+			var map_data: PackedFloat32Array = PackedFloat32Array()
+			map_data.resize(w * d)
+			for z in range(d):
+				for x in range(w):
+					map_data[z * w + x] = chunk.heightmap.get_pixel(x, z).r
+			height_shape.map_data = map_data
+			chunk.collision_shape.shape = height_shape
+
+			chunk.collision_shape.scale = Vector3(
+				chunk.world_bounds.size.x / float(w - 1),
+				1.0,
+				chunk.world_bounds.size.y / float(d - 1)
+			)
+			chunk.collision_shape.position = Vector3.ZERO
+		else:
+			chunk.static_body.visible = false
+			chunk.collision_shape.shape = null
+			return
+
 		var elapsed = Time.get_ticks_msec() - start_time
 		if elapsed >= CHUNK_LOG_THRESHOLD_MS:
-			push_warning("[TerrainComposer] Slow chunk collision: %dx%d in %d ms" % [width, depth, elapsed])
-	elif generate_collision and chunk.mesh_instance.mesh:
-		chunk.static_body.visible = true
-		chunk.collision_shape.shape = chunk.mesh_instance.mesh.create_trimesh_shape()
-		var elapsed = Time.get_ticks_msec() - start_time
-		if elapsed >= CHUNK_LOG_THRESHOLD_MS:
-			push_warning("[TerrainComposer] Slow chunk trimesh collision: %d ms" % elapsed)
+			push_warning("[TerrainComposer] Slow chunk collision: %d ms" % elapsed)
 	else:
 		chunk.static_body.visible = false
 		chunk.collision_shape.shape = null
+
+
+static func _mask_has_holes(mask: Image) -> bool:
+	if not mask:
+		return false
+	var data = mask.get_data()
+	var bytes_per_pixel = 4
+	for i in range(0, data.size(), bytes_per_pixel):
+		if data.decode_float(i) > 0.5:
+			return true
+	return false
+
 
 func _update_all_chunk_collisions() -> void:
 	for chunk in _chunks.values():

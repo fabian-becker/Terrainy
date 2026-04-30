@@ -45,6 +45,34 @@ func _ready() -> void:
 	if Engine.is_editor_hint():
 		name = "Hole"
 
+func _get_property_list() -> Array[Dictionary]:
+	var props: Array[Dictionary] = []
+	var hide := [
+		"edge_falloff",
+		"blend_mode",
+		"strength",
+		"smoothing",
+		"smoothing_radius",
+		"enable_terracing",
+		"terrace_levels",
+		"terrace_smoothness",
+		"enable_min_clamp",
+		"min_height",
+		"enable_max_clamp",
+		"max_height",
+		"mask_texture",
+		"mask_channel",
+		"mask_invert"
+	]
+	for name_prop in hide:
+		props.append({
+			"name": name_prop,
+			"type": TYPE_NIL,
+			"usage": PROPERTY_USAGE_NO_EDITOR,
+			"hint": PROPERTY_HINT_NONE
+		})
+	return props
+
 func prepare_evaluation_context() -> EvaluationContext:
 	var ctx = EvaluationContext.from_feature(self)
 	ctx.set_meta("is_hole", true)
