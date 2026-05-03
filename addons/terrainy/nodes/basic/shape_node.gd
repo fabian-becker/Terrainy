@@ -142,6 +142,17 @@ func get_gpu_param_pack() -> Dictionary:
 	])
 	return _build_gpu_param_pack(FeatureType.SHAPE, extra_floats, extra_ints)
 
+func _get_property_list() -> Array[Dictionary]:
+	var props: Array[Dictionary] = []
+	if shape_mode != ShapeMode.CUSTOM_MASK:
+		props.append({
+			"name": "shape_mask",
+			"type": TYPE_NIL,
+			"usage": PROPERTY_USAGE_NO_EDITOR,
+			"hint": PROPERTY_HINT_NONE
+		})
+	return props
+
 func _connect_mask_signal() -> void:
 	if shape_mask and not shape_mask.changed.is_connected(_on_shape_mask_changed):
 		shape_mask.changed.connect(_on_shape_mask_changed)

@@ -519,3 +519,27 @@ func get_water_surface_bounds() -> AABB:
 func get_carved_depth_at(world_pos: Vector3) -> float:
 	var ctx = prepare_evaluation_context()
 	return abs(get_height_at_safe(world_pos, ctx))
+
+## Returns true if the world position is within this water body's influence and below the water surface.
+func is_point_under_water(world_pos: Vector3) -> bool:
+	var ctx = prepare_evaluation_context()
+	var weight = ctx.get_influence_weight(world_pos)
+	if weight <= 0.0:
+		return false
+	return world_pos.y <= water_level
+
+## Returns the vertical water depth at a world position (distance from surface toward the carved bottom).
+## Returns 0 if the point is outside the water influence or above the surface.
+func get_water_depth_at(world_pos: Vector3) -> float:
+	var ctx = prepare_evaluation_context()
+	var weight = ctx.get_influence_weight(world_pos)
+	if weight <= 0.0 or world_pos.y > water_level:
+		return 0.0
+	var bottom = water_level - carve_depth
+	var depth = world_pos.y - bottom
+	return clampf(depth, 0.0, carve_depth) * weight
+
+## Returns the internal MeshInstance3D used for the water surface.
+## Useful if you want to attach custom scripts or replace materials at runtime.
+func get_water_mesh_instance() -> MeshInstance3D:
+	return _water_mesh_instance

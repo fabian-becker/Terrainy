@@ -945,3 +945,68 @@ func _calculate_lod_level(distance: float) -> int:
 		if distance < lod_distances[i]:
 			return i
 	return clampi(lod_distances.size(), 0, lod_scale_factors.size() - 1)
+
+# ---------------------------------------------------------------------------
+# Public Query APIs
+# ---------------------------------------------------------------------------
+
+## Returns the composed terrain height at a world position (includes all height features).
+## Returns [code]base_height[/code] if the terrain has not been built yet.
+func get_height_at_world_position(world_pos: Vector3) -> float:
+	if not _final_heightmap:
+		return base_height
+	var u = (world_pos.x - _terrain_bounds.position.x) / _terrain_bounds.size.x
+	var v = (world_pos.z - _terrain_bounds.position.y) / _terrain_bounds.size.y
+	if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+		return base_height
+	var img_w = _final_heightmap.get_width()
+	var img_h = _final_heightmap.get_height()
+	var px = clampf(u * (img_w - 1), 0.0, float(img_w - 1))
+	var py = clampf(v * (img_h - 1), 0.0, float(img_h - 1))
+	var x0 = int(floor(px))
+	var y0 = int(floor(py))
+	var x1 = mini(x0 + 1, img_w - 1)
+	var y1 = mini(y0 + 1, img_h - 1)
+	var dx = px - float(x0)
+	var dy = py - float(y0)
+	var h00 = _final_heightmap.get_pixel(x0, y0).r
+	var h10 = _final_heightmap.get_pixel(x1, y0).r
+	var h01 = _final_heightmap.get_pixel(x0, y1).r
+	var h11 = _final_heightmap.get_pixel(x1, y1).r
+	var h0 = lerp(h00, h10, dx)
+	var h1 = lerp(h01, h11, dx)
+	return lerp(h0, h1, dy) + base_height
+
+## Returns [code]true[/code] if the world position is inside a hole.
+func is_hole_at_world_position(world_pos: Vector3) -> bool:
+	if not _final_hole_mask:
+		return false
+	var u = (world_pos.x - _terrain_bounds.position.x) / _terrain_bounds.size.x
+	var v = (world_pos.z - _terrain_bounds.position.y) / _terrain_bounds.size.y
+	if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+		return false
+	var img_w = _final_hole_mask.get_width()
+	var img_h = _final_hole_mask.get_height()
+	var px = int(clampf(u * (img_w - 1), 0, img_w - 1))
+	var py = int(clampf(v * (img_h - 1), 0, img_h - 1))
+	return _final_hole_mask.get_pixel(px, py).r > 0.5
+
+## Returns the highest water level among [WaterNode]s affecting this position.
+## Returns [code]-INF[/code] if no water covers this position.
+func get_water_level_at_world_position(world_pos: Vector3) -> float:
+	var level = -INF
+	for feature in _feature_nodes:
+		if feature is WaterNode:
+			var water = feature as WaterNode
+			if water.is_point_under_water(world_pos):
+				level = max(level, water.water_level)
+	return level
+
+## Returns an array of all features whose influence area contains the world position.
+func get_features_at_world_position(world_pos: Vector3) -> Array[TerrainFeatureNode]:
+	var result: Array[TerrainFeatureNode] = []
+	for feature in _feature_nodes:
+		var ctx = feature.prepare_evaluation_context()
+		if feature.get_influence_weight_safe(world_pos, ctx) > 0.0:
+			result.append(feature)
+	return result
