@@ -58,6 +58,7 @@ var _redo_button: Button
 var _import_dialog: FileDialog
 var _brush_indicator: BrushIndicatorOverlay
 var _indicator_label: Label
+var _error_dialog: AcceptDialog
 var _last_mouse_canvas_pos: Vector2 = Vector2.ZERO
 var _mouse_in_canvas: bool = false
 var _last_stamp_img_pos: Vector2i = Vector2i(-1, -1)
@@ -68,18 +69,21 @@ const MAX_BRUSH_TEMPLATE_CACHE := 128
 
 func _ready() -> void:
 	title = "Shape Mask Editor"
-	min_size = Vector2i(420, 520)
+	min_size = Vector2i(340, 420)
 	ok_button_text = "Apply"
 	confirmed.connect(_on_apply_pressed)
 	canceled.connect(_on_cancel_pressed)
 	close_requested.connect(_on_cancel_pressed)
+	_error_dialog = AcceptDialog.new()
+	_error_dialog.title = "Import Error"
+	add_child(_error_dialog)
 	_build_ui()
 
 func edit_shape(shape_node: ShapeNode, editor_undo_redo: EditorUndoRedoManager) -> void:
 	target_shape_node = shape_node
 	undo_redo = editor_undo_redo
 	_load_target_image()
-	popup_centered_ratio(0.6)
+	popup_centered_clamped(Vector2i(340, 420), 0.6)
 
 func _build_ui() -> void:
 	var root = VBoxContainer.new()
@@ -216,7 +220,7 @@ func _build_ui() -> void:
 	root.add_child(canvas_label)
 
 	_canvas = TextureRect.new()
-	_canvas.custom_minimum_size = Vector2(320, 320)
+	_canvas.custom_minimum_size = Vector2(200, 200)
 	_canvas.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_canvas.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_canvas.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
@@ -283,7 +287,8 @@ func _build_ui() -> void:
 	_import_dialog.access = FileDialog.ACCESS_FILESYSTEM
 	_import_dialog.use_native_dialog = true
 	_import_dialog.add_filter("*.png", "PNG Image")
-	_import_dialog.add_filter("*.jpg,*.jpeg", "JPEG Image")
+	_import_dialog.add_filter("*.jpg", "JPEG Image")
+	_import_dialog.add_filter("*.jpeg", "JPEG Image")
 	_import_dialog.add_filter("*.webp", "WebP Image")
 	_import_dialog.add_filter("*.bmp", "BMP Image")
 	_import_dialog.add_filter("*.tga", "TGA Image")
@@ -390,9 +395,15 @@ func _on_import_file_selected(path: String) -> void:
 			imported = img
 	
 	if imported == null:
+		if _error_dialog:
+			_error_dialog.dialog_text = "Failed to import image '%s'.\nMake sure the file is a valid supported image format." % path
+			_error_dialog.popup_centered()
 		push_warning("Failed to import image '%s'." % path)
 		return
 	if imported.get_width() <= 0 or imported.get_height() <= 0:
+		if _error_dialog:
+			_error_dialog.dialog_text = "Imported image has invalid size."
+			_error_dialog.popup_centered()
 		push_warning("Imported image has invalid size.")
 		return
 	_push_undo_state()

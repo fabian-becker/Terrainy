@@ -27,6 +27,7 @@ enum EdgeType {
 ## Whether to use 3D influence calculation (for rotated holes).
 ## When true, considers the full 3D shape when rotated.
 ## When false, uses fast 2D approximation (ignores Y component).
+## [b]Note:[/b] This auto-enables when the node is rotated in the editor.
 @export var use_3d_influence: bool = false:
 	set(value):
 		use_3d_influence = value
@@ -44,6 +45,24 @@ func _ready() -> void:
 	super._ready()
 	if Engine.is_editor_hint():
 		name = "Hole"
+		_auto_enable_3d_influence_if_rotated()
+
+func _enter_tree() -> void:
+	_auto_enable_3d_influence_if_rotated()
+
+func _notification(what: int) -> void:
+	super._notification(what)
+	if what == NOTIFICATION_TRANSFORM_CHANGED:
+		if Engine.is_editor_hint() and is_node_ready() and not use_3d_influence:
+			if not global_transform.basis.is_equal_approx(Basis.IDENTITY):
+				use_3d_influence = true
+				push_warning("[%s] Auto-enabled 'use_3d_influence' because the hole is rotated. Disable manually if 2D projection is intended." % name)
+
+func _auto_enable_3d_influence_if_rotated() -> void:
+	if Engine.is_editor_hint() and not use_3d_influence:
+		if not global_transform.basis.is_equal_approx(Basis.IDENTITY):
+			use_3d_influence = true
+			push_warning("[%s] Auto-enabled 'use_3d_influence' because the hole is rotated. Disable manually if 2D projection is intended." % name)
 
 func _get_property_list() -> Array[Dictionary]:
 	var props: Array[Dictionary] = []
@@ -110,6 +129,10 @@ func _get_raw_influence_weight(world_pos: Vector3, context: EvaluationContext) -
 	
 	var shape_size = Vector3(influence_size.x, hole_depth, influence_size.y)
 	return context.get_influence_weight_3d(world_pos, shape_size)
+
+func is_point_inside_hole(world_pos: Vector3) -> bool:
+	var ctx = prepare_evaluation_context()
+	return get_influence_weight_safe(world_pos, ctx) > 0.5
 
 func get_gpu_param_pack() -> Dictionary:
 	var extra_floats := PackedFloat32Array([edge_bevel_width, hole_depth])
