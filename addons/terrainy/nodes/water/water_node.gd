@@ -136,17 +136,23 @@ signal water_mesh_updated
 		foam_texture = value
 		_update_water_shader_params()
 
+const REBUILD_DEBOUNCE_SEC := 0.3
+
 var _water_mesh_instance: MeshInstance3D = null
 var _water_shader_material: ShaderMaterial = null
 var _is_building_mesh: bool = false
 var _is_applying_material: bool = false
 var _composer: Node = null
 
+var _rebuild_timer: Timer = null
+var _pending_mesh_rebuild: bool = false
+
 func _ready() -> void:
 	super._ready()
 	if not parameters_changed.is_connected(_on_feature_parameters_changed):
 		parameters_changed.connect(_on_feature_parameters_changed)
 	_connect_to_composer()
+	_setup_rebuild_debounce_timer()
 	_create_water_mesh_instance()
 	_update_water_mesh()
 
@@ -157,10 +163,14 @@ func _exit_tree() -> void:
 	if _water_mesh_instance and is_instance_valid(_water_mesh_instance):
 		_water_mesh_instance.queue_free()
 		_water_mesh_instance = null
+	if _rebuild_timer and is_instance_valid(_rebuild_timer):
+		_rebuild_timer.queue_free()
+		_rebuild_timer = null
 
 func _enter_tree() -> void:
 	# Tool scripts can reload while the scene remains open; reconnect and rebuild.
 	_connect_to_composer()
+	_setup_rebuild_debounce_timer()
 	if is_inside_tree():
 		call_deferred("_ensure_water_mesh")
 
@@ -305,16 +315,29 @@ func _update_water_mesh() -> void:
 
 	if not _water_mesh_instance or not is_instance_valid(_water_mesh_instance):
 		_create_water_mesh_instance()
-	
+
+	# Debounce: don't rebuild more often than REBUILD_DEBOUNCE_SEC
+	if _rebuild_timer and _rebuild_timer.is_stopped() == false:
+		_pending_mesh_rebuild = true
+		return  # Timer already running, will pick up this change
+
 	if _is_building_mesh:
+		_pending_mesh_rebuild = true
 		return
-	
-	_is_building_mesh = true
-	call_deferred("_build_water_mesh")
+
+	# Start debounce timer
+	if _rebuild_timer:
+		_rebuild_timer.start()
+		_pending_mesh_rebuild = true
+	else:
+		# Fallback if no timer (shouldn't happen)
+		_is_building_mesh = true
+		call_deferred("_build_water_mesh")
 
 func _build_water_mesh() -> void:
 	if not is_inside_tree() or not _water_mesh_instance or not is_instance_valid(_water_mesh_instance):
 		_is_building_mesh = false
+		_pending_mesh_rebuild = false
 		return
 	
 	var size_x: float
@@ -426,6 +449,27 @@ func _build_water_mesh() -> void:
 	_is_building_mesh = false
 	_water_mesh_instance.visible = generate_water_mesh
 	water_mesh_updated.emit()
+
+	# If another rebuild was requested during this build, schedule it via timer
+	if _pending_mesh_rebuild:
+		_pending_mesh_rebuild = false
+		if _rebuild_timer:
+			_rebuild_timer.start()
+
+func _setup_rebuild_debounce_timer() -> void:
+	if not _rebuild_timer or not is_instance_valid(_rebuild_timer):
+		_rebuild_timer = Timer.new()
+		_rebuild_timer.one_shot = true
+		_rebuild_timer.wait_time = REBUILD_DEBOUNCE_SEC
+		_rebuild_timer.timeout.connect(_on_rebuild_timer_timeout)
+		add_child(_rebuild_timer)
+
+func _on_rebuild_timer_timeout() -> void:
+	if _pending_mesh_rebuild:
+		_pending_mesh_rebuild = false
+		if not _is_building_mesh:
+			_is_building_mesh = true
+			call_deferred("_build_water_mesh")
 
 func _ensure_water_mesh() -> void:
 	if not is_inside_tree():

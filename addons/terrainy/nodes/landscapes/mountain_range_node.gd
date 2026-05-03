@@ -53,6 +53,7 @@ func prepare_evaluation_context() -> LandscapeEvaluationContext:
 	var ctx = LandscapeEvaluationContext.from_landscape_feature(self, height, direction)
 	ctx.primary_noise = peak_noise
 	ctx.detail_noise = detail_noise
+	ctx.ridge_sharpness = ridge_sharpness
 	return ctx
 
 func get_height_at(world_pos: Vector3) -> float:

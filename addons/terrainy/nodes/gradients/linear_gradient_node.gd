@@ -16,6 +16,66 @@ const GradientNode = preload("res://addons/terrainy/nodes/gradients/gradient_nod
 		interpolation = value
 		_commit_parameter_change()
 
+func get_direction() -> Vector2:
+	return direction
+
+func _get_gizmo_handles() -> Array[GizmoHandle]:
+	var handles: Array[GizmoHandle] = []
+	var half_size = influence_size * 0.5
+	var dir_3d = Vector3(direction.x, 0, direction.y).normalized()
+	var grad_length = influence_size.x
+
+	# Handle 0: Size X (width / radius)
+	handles.append(GizmoHandle.new(
+		"Radius" if influence_shape == InfluenceShape.CIRCLE else "Width",
+		Vector3(half_size.x, 0, 0),
+		GizmoHandle.HandleType.SIZE_X
+	))
+
+	# Handle 1: Size Y (depth, for rectangle and ellipse)
+	if influence_shape != InfluenceShape.CIRCLE:
+		handles.append(GizmoHandle.new(
+			"Depth",
+			Vector3(0, 0, half_size.y),
+			GizmoHandle.HandleType.SIZE_Y
+		))
+
+	# Handle 2: Falloff (if exists)
+	if edge_falloff > 0.0:
+		var falloff_size = half_size.x * (1.0 - edge_falloff)
+		handles.append(GizmoHandle.new(
+			"Falloff",
+			Vector3(falloff_size, 0, 0),
+			GizmoHandle.HandleType.FALLOFF
+		))
+
+	# Start height handle (back along direction)
+	var back_pos = -dir_3d * grad_length
+	handles.append(GizmoHandle.new(
+		"Start Height",
+		back_pos + Vector3(0, start_height, 0),
+		GizmoHandle.HandleType.START_HEIGHT
+	))
+
+	# End height handle (front along direction)
+	var front_pos = dir_3d * grad_length
+	handles.append(GizmoHandle.new(
+		"End Height",
+		front_pos + Vector3(0, end_height, 0),
+		GizmoHandle.HandleType.END_HEIGHT
+	))
+
+	# Direction handle
+	var max_sz = max(influence_size.x, influence_size.y)
+	var arrow_length = max_sz * 0.7
+	handles.append(GizmoHandle.new(
+		"Direction",
+		dir_3d * arrow_length,
+		GizmoHandle.HandleType.DIRECTION
+	))
+
+	return handles
+
 func get_height_at(world_pos: Vector3) -> float:
 	var ctx = prepare_evaluation_context()
 	return get_height_at_safe(world_pos, ctx)

@@ -108,28 +108,8 @@ func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:
 
 	var heightmap := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, height_data.to_byte_array())
 
-	# Apply modifiers (GPU if available, CPU fallback)
-	if _has_any_modifiers():
-		var processor = _get_gpu_modifier_processor()
-		if processor and processor.is_available():
-			var modified = processor.apply_modifiers(
-				heightmap,
-				int(smoothing),
-				smoothing_radius,
-				enable_terracing,
-				terrace_levels,
-				terrace_smoothness,
-				enable_min_clamp,
-				min_height,
-				enable_max_clamp,
-				max_height
-			)
-			if modified:
-				heightmap = modified
-			else:
-				_apply_modifiers_cpu(heightmap, terrain_bounds)
-		else:
-			_apply_modifiers_cpu(heightmap, terrain_bounds)
+	# Apply modifiers through base class pipeline
+	heightmap = apply_modifiers_to_heightmap(heightmap, terrain_bounds)
 
 	_heightmap_dirty = false
 

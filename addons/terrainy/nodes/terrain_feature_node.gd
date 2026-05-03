@@ -3,7 +3,7 @@
 class_name TerrainFeatureNode
 extends Node3D
 
-const GpuHeightmapModifier = preload("res://addons/terrainy/helpers/gpu_heightmap_modifier.gd")
+const ModifierPipeline = preload("res://addons/terrainy/helpers/modifier_pipeline.gd")
 const EvaluationContext = preload("res://addons/terrainy/nodes/evaluation_context.gd")
 
 ## Base class for all terrain feature nodes that can be positioned and blended
@@ -121,14 +121,12 @@ enum FeatureType {
 @export var smoothing: SmoothingMode = SmoothingMode.NONE:
 	set(value):
 		smoothing = value
-		_smoothing_cache.clear()
 		_commit_parameter_change()
 
 ## Smoothing radius (in world units) - larger values = more smoothing
 @export_range(0.5, 10.0) var smoothing_radius: float = 2.0:
 	set(value):
 		smoothing_radius = value
-		_smoothing_cache.clear()
 		_commit_parameter_change()
 
 ## Enable terracing effect (creates stepped layers)
@@ -171,8 +169,8 @@ enum FeatureType {
 		max_height = value
 		_commit_parameter_change()
 
-# Cache for smoothed height values
-var _smoothing_cache: Dictionary = {}
+# Modifier pipeline (GPU + CPU modifier application)
+var _modifier_pipeline: ModifierPipeline = null
 
 # Internal cache for heightmap generation
 var _heightmap_dirty: bool = true
@@ -185,36 +183,22 @@ var _masktex_cache_data: PackedFloat32Array = PackedFloat32Array()
 var _masktex_cache_size: Vector2i = Vector2i.ZERO
 var _masktex_cache_dirty: bool = true
 
-# GPU modifier processor (shared across all features)
-static var _gpu_modifier_processor: GpuHeightmapModifier = null
-static var _feature_reference_count: int = 0
+
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
 		_disconnect_mask_texture()
-		_feature_reference_count -= 1
-		if _feature_reference_count <= 0 and _gpu_modifier_processor:
-			# Clean up GPU resources when last feature is destroyed
-			if _gpu_modifier_processor.has_method("cleanup"):
-				_gpu_modifier_processor.cleanup()
-			_gpu_modifier_processor = null
-			_feature_reference_count = 0
+		if _modifier_pipeline:
+			_modifier_pipeline.cleanup()
+			_modifier_pipeline = null
 	elif what == NOTIFICATION_TRANSFORM_CHANGED:
 		# Notify parent TerrainComposer when position/rotation/scale changes
 		_commit_parameter_change()
 
 func _ready() -> void:
-	_feature_reference_count += 1
 	set_notify_transform(true)
-
-static func _get_gpu_modifier_processor() -> GpuHeightmapModifier:
-	if not RenderingServer.get_rendering_device():
-		return null
-	if not _gpu_modifier_processor:
-		_gpu_modifier_processor = GpuHeightmapModifier.new()
-		if not _gpu_modifier_processor.is_available():
-			push_warning("[TerrainFeatureNode] GPU modifiers unavailable")
-	return _gpu_modifier_processor
+	if not _modifier_pipeline:
+		_modifier_pipeline = ModifierPipeline.new()
 
 ## Prepare an immutable evaluation context for thread-safe evaluation.
 ## Override this in derived classes to capture additional parameters.
@@ -333,30 +317,15 @@ func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:
 	var heightmap := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, height_data.to_byte_array())
 	
 	# Apply modifiers (GPU if available, CPU fallback)
-	if _has_any_modifiers():
-		var processor = _get_gpu_modifier_processor()
-		if processor and processor.is_available():
-			# Apply modifiers on GPU
-			var modified = processor.apply_modifiers(
-				heightmap,
-				int(smoothing),
-				smoothing_radius,
-				enable_terracing,
-				terrace_levels,
-				terrace_smoothness,
-				enable_min_clamp,
-				min_height,
-				enable_max_clamp,
-				max_height
-			)
-			if modified:
-				heightmap = modified
-			else:
-				# GPU failed, fall back to CPU
-				_apply_modifiers_cpu(heightmap, terrain_bounds)
-		else:
-			# No GPU, use CPU
-			_apply_modifiers_cpu(heightmap, terrain_bounds)
+	if _modifier_pipeline and _modifier_pipeline.has_any_modifiers(smoothing, enable_terracing, enable_min_clamp, enable_max_clamp):
+		heightmap = _modifier_pipeline.apply_modifiers(
+			heightmap, terrain_bounds, context,
+			smoothing, smoothing_radius,
+			enable_terracing, terrace_levels, terrace_smoothness,
+			enable_min_clamp, min_height,
+			enable_max_clamp, max_height,
+			true
+		)
 	
 	# Update cache
 	_cached_heightmap = heightmap
@@ -402,9 +371,16 @@ func generate_heightmap_with_context(resolution: Vector2i, terrain_bounds: Rect2
 	# Create heightmap image from packed array
 	var heightmap := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, height_data.to_byte_array())
 	
-	# Apply modifiers (CPU-only for thread safety)
-	if _has_any_modifiers():
-		_apply_modifiers_cpu(heightmap, terrain_bounds, context)
+	# Apply modifiers only on main thread — worker threads will have them applied later
+	if _modifier_pipeline and _modifier_pipeline.has_any_modifiers(smoothing, enable_terracing, enable_min_clamp, enable_max_clamp) and OS.get_thread_caller_id() == OS.get_main_thread_id():
+		heightmap = _modifier_pipeline.apply_modifiers(
+			heightmap, terrain_bounds, context,
+			smoothing, smoothing_radius,
+			enable_terracing, terrace_levels, terrace_smoothness,
+			enable_min_clamp, min_height,
+			enable_max_clamp, max_height,
+			true
+		)
 	
 	if Engine.is_editor_hint():
 		var elapsed = Time.get_ticks_msec() - start_time
@@ -444,63 +420,18 @@ func generate_heightmap_with_context_raw(resolution: Vector2i, terrain_bounds: R
 
 ## Apply modifiers to an existing heightmap (GPU if available, CPU fallback)
 func apply_modifiers_to_heightmap(heightmap: Image, terrain_bounds: Rect2, context: EvaluationContext = null) -> Image:
-	if not _has_any_modifiers():
+	if not _modifier_pipeline:
 		return heightmap
-
-	var processor = _get_gpu_modifier_processor()
-	if processor and processor.is_available():
-		var modified = processor.apply_modifiers(
-			heightmap,
-			int(smoothing),
-			smoothing_radius,
-			enable_terracing,
-			terrace_levels,
-			terrace_smoothness,
-			enable_min_clamp,
-			min_height,
-			enable_max_clamp,
-			max_height
-		)
-		if modified:
-			return modified
-
-	_apply_modifiers_cpu(heightmap, terrain_bounds, context)
-	return heightmap
-
-## Check if any modifiers are enabled
-func _has_any_modifiers() -> bool:
-	return smoothing != SmoothingMode.NONE or \
-		   enable_terracing or \
-		   enable_min_clamp or \
-		   enable_max_clamp
-
-## Apply modifiers on CPU (fallback)
-func _apply_modifiers_cpu(heightmap: Image, terrain_bounds: Rect2, context_override: EvaluationContext = null) -> void:
-	var resolution := Vector2i(heightmap.get_width(), heightmap.get_height())
-	var step_x := terrain_bounds.size.x / float(resolution.x - 1)
-	var step_y := terrain_bounds.size.y / float(resolution.y - 1)
-	var origin_x := terrain_bounds.position.x
-	var origin_z := terrain_bounds.position.y
-	
-	# Prepare context once for all pixels (use provided context when thread-safe)
-	var context = context_override if context_override != null else prepare_evaluation_context()
-	
-	# Read all heights at once
-	var height_data := heightmap.get_data().to_float32_array()
-	
-	var idx := 0
-	for y in resolution.y:
-		var world_z := origin_z + (y * step_y)
-		for x in resolution.x:
-			var world_x := origin_x + (x * step_x)
-			var world_pos := Vector3(world_x, 0, world_z)
-			
-			height_data[idx] = _apply_modifiers(world_pos, height_data[idx], context)
-			idx += 1
-	
-	# Create new image from modified data
-	var modified := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, height_data.to_byte_array())
-	heightmap.copy_from(modified)
+	if not _modifier_pipeline.has_any_modifiers(smoothing, enable_terracing, enable_min_clamp, enable_max_clamp):
+		return heightmap
+	return _modifier_pipeline.apply_modifiers(
+		heightmap, terrain_bounds, context,
+		smoothing, smoothing_radius,
+		enable_terracing, terrace_levels, terrace_smoothness,
+		enable_min_clamp, min_height,
+		enable_max_clamp, max_height,
+		true
+	)
 
 ## Mark heightmap as dirty (needs regeneration)
 func mark_dirty() -> void:
@@ -510,116 +441,6 @@ func mark_dirty() -> void:
 ## Check if heightmap needs regeneration
 func is_dirty() -> bool:
 	return _heightmap_dirty
-
-## Get the final blended height contribution at a position (for editor/gizmos)
-func get_blended_height_at(world_pos: Vector3) -> float:
-	var context = prepare_evaluation_context()
-	var height = get_height_at_safe(world_pos, context)
-	
-	# Apply modifiers
-	height = _apply_modifiers(world_pos, height, context)
-	
-	var weight = get_influence_weight_safe(world_pos, context)
-	return height * weight * strength
-
-## Apply all enabled modifiers to the height value
-func _apply_modifiers(world_pos: Vector3, base_height: float, context: EvaluationContext) -> float:
-	var height = base_height
-	
-	# Apply smoothing
-	if smoothing != SmoothingMode.NONE:
-		height = _apply_smoothing(world_pos, height, context)
-	
-	# Apply terracing
-	if enable_terracing:
-		height = _apply_terracing(height)
-	
-	# Apply height clamping
-	if enable_min_clamp:
-		height = max(height, min_height)
-	if enable_max_clamp:
-		height = min(height, max_height)
-	
-	return height
-
-## Apply smoothing to the height value
-func _apply_smoothing(world_pos: Vector3, center_height: float, context: EvaluationContext) -> float:
-	# Cache key based on position (rounded to improve cache hits)
-	var grid_size = smoothing_radius * 0.5
-	var cache_key = Vector3i(
-		int(world_pos.x / grid_size),
-		0,
-		int(world_pos.z / grid_size)
-	)
-	
-	if _smoothing_cache.has(cache_key):
-		return _smoothing_cache[cache_key]
-	
-	var sample_count: int
-	var sample_radius: float
-	
-	match smoothing:
-		SmoothingMode.LIGHT:
-			sample_count = 4
-			sample_radius = smoothing_radius * 0.5
-		SmoothingMode.MEDIUM:
-			sample_count = 8
-			sample_radius = smoothing_radius
-		SmoothingMode.HEAVY:
-			sample_count = 12
-			sample_radius = smoothing_radius * 1.5
-		_:
-			return center_height
-	
-	# Gather samples in a circle around the position
-	var total_height = center_height
-	var total_weight = 1.0
-	
-	for i in range(sample_count):
-		var angle = (i / float(sample_count)) * TAU
-		var offset = Vector3(
-			cos(angle) * sample_radius,
-			0,
-			sin(angle) * sample_radius
-		)
-		var sample_pos = world_pos + offset
-		
-		# Get raw height without smoothing to avoid infinite recursion
-		var sample_height = get_height_at_safe(sample_pos, context)
-		
-		# Weight samples by distance (closer = more weight)
-		var weight = 1.0 - (offset.length() / (sample_radius * 1.5))
-		weight = max(0.0, weight)
-		
-		total_height += sample_height * weight
-		total_weight += weight
-	
-	var smoothed_height = total_height / total_weight
-	_smoothing_cache[cache_key] = smoothed_height
-	
-	return smoothed_height
-
-## Apply terracing effect to create stepped layers
-func _apply_terracing(height: float) -> float:
-	if terrace_levels <= 1:
-		return height
-	
-	# Normalize height to 0-1 range for easier calculation
-	# Assuming typical height range - adjust if needed
-	var normalized_height = height / 100.0
-	
-	# Calculate which terrace level this falls into
-	var level = floor(normalized_height * terrace_levels)
-	var level_height = level / float(terrace_levels)
-	
-	if terrace_smoothness > 0.0:
-		# Smooth transition between levels
-		var next_level_height = (level + 1.0) / float(terrace_levels)
-		var t = (normalized_height * terrace_levels) - level
-		t = smoothstep(0.0, 1.0, t / terrace_smoothness)
-		level_height = lerp(level_height, next_level_height, t)
-	
-	return level_height * 100.0
 
 ## Get axis-aligned bounding box of influence area
 func get_influence_aabb() -> AABB:
@@ -655,11 +476,66 @@ func _is_gizmo_manipulating() -> bool:
 
 ## Helper to emit parameters_changed signal only when not manipulating via gizmo
 func _commit_parameter_change() -> void:
-	_smoothing_cache.clear()
 	_heightmap_dirty = true
 	_cached_heightmap = null
 	if not _is_gizmo_manipulating():
 		parameters_changed.emit()
+
+## Returns true if this feature is a hole (cut-out) feature.
+## Override in HoleNode.
+func is_hole_feature() -> bool:
+	return false
+
+
+## Returns the 3D influence mode for hole features.
+## Override in HoleNode.
+func get_hole_3d_influence() -> bool:
+	return false
+
+
+## Returns the hole depth for hole features.
+## Override in HoleNode.
+func get_hole_depth() -> float:
+	return 100.0
+
+
+## Returns the bevel edge extent for hole features.
+## Override in HoleNode.
+func get_hole_edge_extent() -> float:
+	return 0.0
+
+
+## Returns the direction vector for nodes that support it.
+## Override in LandscapeNode and LinearGradientNode.
+func get_direction() -> Vector2:
+	return Vector2(1, 0)
+
+
+## Returns metadata about gizmo handles this feature supports.
+## Override in subclasses to declare handles.
+func _get_gizmo_handles() -> Array[GizmoHandle]:
+	return []
+
+
+## Apply a gizmo handle value change. Called during drag.
+func _set_gizmo_handle_value(_handle_id: int, _value: Variant) -> void:
+	pass
+
+
+## Get current value for a gizmo handle (for undo restore).
+func _get_gizmo_handle_value(_handle_id: int) -> Variant:
+	return null
+
+
+## Commit a gizmo handle change (called on mouse release).
+func _commit_gizmo_handle(_handle_id: int) -> void:
+	_commit_parameter_change()
+
+
+## Override in derived classes to perform subclass-specific validation.
+func _validate_subclass() -> bool:
+	return true
+
 
 ## Validate node configuration
 func validate_configuration() -> bool:
@@ -673,10 +549,9 @@ func validate_configuration() -> bool:
 	if strength <= 0.0:
 		push_warning("[%s] Strength is zero or negative, feature will have no effect" % name)
 	
-	if "height" in self:
-		var height_value = get("height")
-		if abs(height_value) < 0.001:
-			push_warning("[%s] Height is near zero, feature may not be visible" % name)
+	# Delegate to subclass
+	if not _validate_subclass():
+		is_valid = false
 	
 	return is_valid
 

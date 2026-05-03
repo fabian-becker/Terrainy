@@ -51,29 +51,8 @@ static func from_gradient_feature(feature: TerrainFeatureNode, start_h: float, e
 	ctx.falloff_type = falloff
 	ctx.gradient_center = feature.global_position
 	
-	# Try to get gradient direction if available
-	if "direction" in feature:
-		var dir = feature.get("direction")
-		if dir is Vector2:
-			ctx.gradient_vector = dir.normalized()
-		elif dir is Vector3:
-			ctx.gradient_vector = Vector2(dir.x, dir.z).normalized()
-	else:
-		ctx.gradient_vector = Vector2(1, 0)  # Default to X-axis
-	
-	# Get radius/angle/height if available
-	if "gradient_radius" in feature:
-		ctx.gradient_radius = feature.get("gradient_radius")
-	if "cone_angle" in feature:
-		ctx.cone_angle = feature.get("cone_angle")
-	if "cone_height" in feature:
-		ctx.cone_height = feature.get("cone_height")
-	if "interpolation" in feature:
-		ctx.interpolation = feature.get("interpolation")
-	if "sharpness" in feature:
-		ctx.sharpness = feature.get("sharpness")
-	if "flatness" in feature:
-		ctx.flatness = feature.get("flatness")
+	# Default gradient vector (subclasses override via prepare_evaluation_context)
+	ctx.gradient_vector = Vector2(1, 0)
 	
 	return ctx
 

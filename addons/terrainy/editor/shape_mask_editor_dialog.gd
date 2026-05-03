@@ -60,6 +60,11 @@ var _brush_indicator: BrushIndicatorOverlay
 var _indicator_label: Label
 var _last_mouse_canvas_pos: Vector2 = Vector2.ZERO
 var _mouse_in_canvas: bool = false
+var _last_stamp_img_pos: Vector2i = Vector2i(-1, -1)
+
+# Brush template cache: brush_size -> PackedFloat32Array
+var _brush_templates: Dictionary = {}
+const MAX_BRUSH_TEMPLATE_CACHE := 128
 
 func _ready() -> void:
 	title = "Shape Mask Editor"
@@ -408,13 +413,26 @@ func _on_canvas_input(event: InputEvent) -> void:
 		_update_brush_indicator(event.position)
 		if _is_painting:
 			_push_undo_state()
-			if _stamp_at_canvas_pos(event.position):
+			var img_pos := _canvas_pos_to_image_pos(event.position)
+			if img_pos.x >= 0:
+				_last_stamp_img_pos = img_pos
+				_stamp_brush(img_pos)
 				_refresh_canvas()
+			else:
+				_last_stamp_img_pos = Vector2i(-1, -1)
+		else:
+			_last_stamp_img_pos = Vector2i(-1, -1)
 	elif event is InputEventMouseMotion and _is_painting and (event.button_mask & MOUSE_BUTTON_MASK_LEFT) != 0:
 		_last_mouse_canvas_pos = event.position
 		_mouse_in_canvas = true
 		_update_brush_indicator(event.position)
-		if _stamp_at_canvas_pos(event.position):
+		var img_pos := _canvas_pos_to_image_pos(event.position)
+		if img_pos.x >= 0:
+			if _last_stamp_img_pos.x >= 0:
+				_stamp_line(_last_stamp_img_pos, img_pos)
+			else:
+				_stamp_brush(img_pos)
+			_last_stamp_img_pos = img_pos
 			_refresh_canvas()
 	elif event is InputEventMouseMotion:
 		_last_mouse_canvas_pos = event.position
@@ -432,18 +450,24 @@ func _input(event: InputEvent) -> void:
 		elif event.keycode == KEY_Y:
 			_on_redo_pressed()
 
-func _stamp_at_canvas_pos(mouse_pos: Vector2) -> bool:
+func _canvas_pos_to_image_pos(mouse_pos: Vector2) -> Vector2i:
 	var draw_rect = _get_canvas_image_draw_rect()
 	if draw_rect.size.x <= 0.0 or draw_rect.size.y <= 0.0:
-		return false
+		return Vector2i(-1, -1)
 	if not draw_rect.has_point(mouse_pos):
-		return false
+		return Vector2i(-1, -1)
 	var local_pos = mouse_pos - draw_rect.position
 	var uv = Vector2(local_pos.x / draw_rect.size.x, local_pos.y / draw_rect.size.y)
 	uv = uv.clamp(Vector2.ZERO, Vector2.ONE)
-	var img_x = int(round(uv.x * float(_working_image.get_width() - 1)))
-	var img_y = int(round(uv.y * float(_working_image.get_height() - 1)))
-	_stamp_brush(Vector2i(img_x, img_y))
+	var img_x = int(round(clampf(uv.x, 0.0, 1.0) * float(_working_image.get_width() - 1)))
+	var img_y = int(round(clampf(uv.y, 0.0, 1.0) * float(_working_image.get_height() - 1)))
+	return Vector2i(img_x, img_y)
+
+func _stamp_at_canvas_pos(mouse_pos: Vector2) -> bool:
+	var img_pos := _canvas_pos_to_image_pos(mouse_pos)
+	if img_pos.x < 0:
+		return false
+	_stamp_brush(img_pos)
 	return true
 
 func _get_canvas_image_draw_rect() -> Rect2:
@@ -476,26 +500,34 @@ func _stamp_brush(center: Vector2i) -> void:
 		target_gray = clamp(1.0 - _paint_height, 0.0, 1.0)
 	var blend_mode = _brush_mode == BrushMode.BLEND
 	var replace_mode = _paint_method == PaintMethod.REPLACE
-	# Scale blend sampling with brush size so blending affects the painted area.
+
+	var template := _get_brush_template(radius)
+	var diameter = radius * 2 + 1
+
 	var blend_sample_radius := clampi(int(round(float(radius) * 0.2)), 1, 6)
 	var source_image: Image = null
 	if blend_mode:
 		source_image = _working_image.duplicate()
-	for y in range(center.y - radius, center.y + radius + 1):
-		if y < 0 or y >= _working_image.get_height():
+
+	var img_w = _working_image.get_width()
+	var img_h = _working_image.get_height()
+
+	for y in range(-radius, radius + 1):
+		var img_y = center.y + y
+		if img_y < 0 or img_y >= img_h:
 			continue
-		for x in range(center.x - radius, center.x + radius + 1):
-			if x < 0 or x >= _working_image.get_width():
+		for x in range(-radius, radius + 1):
+			var img_x = center.x + x
+			if img_x < 0 or img_x >= img_w:
 				continue
-			var offset = Vector2(float(x - center.x), float(y - center.y))
-			var dist = offset.length()
-			if dist > float(radius):
+			var t_idx = (y + radius) * diameter + (x + radius)
+			var falloff = template[t_idx]
+			if falloff < 0.0:
 				continue
-			var falloff = 1.0 - smoothstep(0.0, float(radius), dist)
-			var current = _working_image.get_pixel(x, y).r
+			var current = _working_image.get_pixel(img_x, img_y).r
 			var next = current
 			if blend_mode:
-				var neighborhood_mean = _sample_local_average(source_image, x, y, blend_sample_radius)
+				var neighborhood_mean = _sample_local_average(source_image, img_x, img_y, blend_sample_radius)
 				var blend_amount = _paint_flow * falloff
 				next = lerp(current, neighborhood_mean, blend_amount)
 			elif replace_mode:
@@ -503,7 +535,54 @@ func _stamp_brush(center: Vector2i) -> void:
 			else:
 				var amount = _paint_flow * falloff
 				next = lerp(current, target_gray, amount)
-			_working_image.set_pixel(x, y, Color(next, next, next, 1.0))
+			_working_image.set_pixel(img_x, img_y, Color(next, next, next, 1.0))
+
+func _stamp_line(start_pos: Vector2i, end_pos: Vector2i) -> void:
+	var dx = abs(end_pos.x - start_pos.x)
+	var dy = abs(end_pos.y - start_pos.y)
+	var sx = 1 if start_pos.x < end_pos.x else -1
+	var sy = 1 if start_pos.y < end_pos.y else -1
+	var err = dx - dy
+	var x = start_pos.x
+	var y = start_pos.y
+
+	while true:
+		_stamp_brush(Vector2i(x, y))
+		if x == end_pos.x and y == end_pos.y:
+			break
+		var e2 = 2 * err
+		if e2 > -dy:
+			err -= dy
+			x += sx
+		if e2 < dx:
+			err += dx
+			y += sy
+
+func _get_brush_template(radius: int) -> PackedFloat32Array:
+	var size = radius * 2 + 1
+	var key = size
+	if _brush_templates.has(key):
+		return _brush_templates[key]
+
+	var template := PackedFloat32Array()
+	template.resize(size * size)
+	var r_float = float(radius)
+	for yy in range(size):
+		for xx in range(size):
+			var dx = float(xx - radius)
+			var dy = float(yy - radius)
+			var dist = sqrt(dx * dx + dy * dy)
+			var idx = yy * size + xx
+			if dist > r_float:
+				template[idx] = -1.0  # outside brush
+			else:
+				template[idx] = 1.0 - smoothstep(0.0, r_float, dist)
+
+	# Cap cache size to avoid unbounded growth
+	if _brush_templates.size() >= MAX_BRUSH_TEMPLATE_CACHE:
+		_brush_templates.clear()
+	_brush_templates[key] = template
+	return template
 
 func _on_canvas_mouse_exited() -> void:
 	_mouse_in_canvas = false

@@ -29,7 +29,11 @@ func _ready() -> void:
 		noise.frequency = 0.01
 
 func prepare_evaluation_context() -> LandscapeEvaluationContext:
-	return LandscapeEvaluationContext.from_landscape_feature(self, height, direction)
+	var ctx = LandscapeEvaluationContext.from_landscape_feature(self, height, direction)
+	ctx.canyon_width = canyon_width
+	ctx.canyon_wall_slope = wall_slope
+	ctx.canyon_meander_strength = meander_strength
+	return ctx
 
 func get_height_at(world_pos: Vector3) -> float:
 	var ctx = prepare_evaluation_context()

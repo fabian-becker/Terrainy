@@ -10,6 +10,11 @@ const MIN_OVERLAP_SIZE := 0.01
 
 @export_group("Scatter")
 
+@export_enum("Individual Instances", "MultiMesh (GPU)") var render_mode: int = 0:
+	set(value):
+		render_mode = value
+		_commit_parameter_change()
+
 @export var scene: PackedScene:
 	set(value):
 		scene = value
