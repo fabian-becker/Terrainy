@@ -5,15 +5,75 @@ All notable changes to the Terrainy plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-05-03
+
+### Added
+
+#### Terrain Features
+
+- **WaterNode** — Creates water bodies that carve terrain depressions and render animated water surfaces with configurable wave displacement, foam, depth-based coloring, shore slopes, and optional custom materials
+- **HoleNode** — Creates passable openings in the terrain mesh with configurable edge types (sharp or beveled), bevel width controls, and 3D influence support for rotated holes
+- **ScatterNode** — Places PackedScene instances on the generated terrain with density controls, deterministic random seed, min/max instance clamps, AABB overlap rejection, and scope-aware placement (constrained to parent feature influence when nested)
+- **MaskTextureNode** — Non-destructive mask node that defines influence areas using a Texture2D; place as a parent of ScatterNodes or other features to restrict their influence to masked regions (white = full influence, black = none)
+- **LinearGradientNode** — Linear gradient feature for directional height falloff
+
+#### Editor & Tools
+
+- **Shape Mask Editor** — Built-in editor dialog for ShapeNode with brush-based mask painting (Draw, Erase, Blend modes), brush size/flow/height controls, Replace and Blend paint methods, undo/redo, and image import/export
+- **Terrain Baking** — Bake terrain to a standalone PackedScene via `BakeExporter`, exporting chunk meshes, collision shapes, water meshes, and scatter instances for optimized runtime performance
+- **ShapeNode Inspector Plugin** — Custom inspector integration for launching the Shape Mask Editor directly from the node inspector
+
+#### Helpers & Infrastructure
+
+- **ModifierPipeline** — Dedicated pipeline for applying terrain modifiers (smoothing, terracing, clamping) with improved performance and consistency
+- **ChunkManager** — Dedicated chunk lifecycle and dirty-state management system
+- **ScatterManager** — Dedicated helper for scatter placement, overlap rejection, and MultiMesh generation
+- **MultiMeshScatter** — GPU-instanced scatter rendering support for ScatterNode
+- **GizmoHandle** — Reusable gizmo handle component for cleaner gizmo plugin architecture
+- **ScriptUtils** — Shared editor script utilities
+
+#### Demo & Assets
+
+- New demo scene with character controller (`character_body_3d.gd`), sky environment, and sample placements
+- Organized demo textures for rock, rocky terrain, sand, and snow environments
+- `.gitattributes` configured to handle large demo texture files
+
+### Changed
+
+- Project upgraded to **Godot 4.6**
+- Demo scene moved from `terrainy_demo.tscn` to `addons/terrainy/demo/terrainy_demo.scn`
+- Demo textures reorganized into `addons/terrainy/demo/textures/`
+- **TerrainFeatureNode** refactored for improved modifier handling, mask texture support, and performance
+- **TerrainComposer** enhanced with hole depth sentinel, improved chunk handling, scatter rebuild scheduling, and bake integration
+- **TerrainMeshGenerator** enhanced with hole support and improved collision handling
+- **TerrainHeightmapBuilder** updated with improved extraction logic and chunk handling
+- Influence calculations refactored with renamed mask-related variables for consistency
+- **ShapeNode** and **ShapeEvaluationContext** enhanced with mask support and improved evaluation
+- **EvaluationContext** system expanded with helpers and GPU parameter packing improvements
+- **WaterShader** render mode and compatibility adjustments
+- **HeightmapNode** now supports `NoiseTexture2D`
+- Autoload reference updated to use UID
+
+### Fixed
+
+- Error handling in Shape Mask Editor for import and brush operations
+- 3D influence calculations for rotated terrain holes
+- Water shader render mode compatibility
+- Terrain node functionality edge cases
+
+[0.6.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.6.0
+
 ## [0.5.1] - 2026-02-12
 
 ### Fixed
+
 - Collision mesh offset causing collision to be positioned at chunk corner instead of center, mismatching the visual terrain mesh
 - Force rebuild now fully invalidates caches and marks all chunks dirty for a complete terrain refresh
 
 ## [0.5.0] - 2026-01-27
 
 ### Added
+
 - GPU feature evaluator with compute shader for all terrain features
 - GPU parameter packing system for thread-safe evaluation contexts
 - Raw heightmap generation method for improved multithreading workflow
@@ -23,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for gl_compatibility renderer mode
 
 ### Changed
+
 - Terrain composer now supports single-threaded mode for compatibility testing
 - Influence generator uses half-size for elliptical shape calculations
 - Terrain material shader now uses world-space normals for view-independent slope calculations
@@ -31,17 +92,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Autoload path uses UID reference instead of direct file path
 
 ### Fixed
+
 - View-dependent slope calculations in terrain material shader
 - Ellipse influence calculations now properly use half-size parameters
 - Ambient occlusion sampling compatibility issues in gl_compatibility mode
 
 ### Performance
+
 - GPU-accelerated feature evaluation for supported renderers
 - Improved multithreading workflow with raw heightmap generation
 
 ## [0.4.1] - 2026-01-24
 
 ### Changed
+
 - Gradient gizmo handles now use the gradient length for front/back controls
 - Gizmo manipulation begins on drag and commits parameter changes on release
 - Radial gradient safe sampling now uses influence radius and world-position distance
@@ -49,11 +113,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Texture layer height thresholds adjusted for rocky and rocky_terrain examples
 
 ### Fixed
+
 - Terrain feature smoothing cache now clears on parameter commits
 
 ## [0.3.0] - 2026-01-22
 
 ### Added
+
 - Chunked terrain rendering with per-chunk mesh instances
 - LOD controls for chunked terrains (distance thresholds and scale factors)
 - Terrain rebuild coordinator autoload for queued rebuilds
@@ -64,6 +130,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compatibility check to disable GPU composition on non-GPU renderers
 
 ### Changed
+
 - Refactored terrain mesh generation for improved performance and memory usage
 - Reworked terrain collision handling for chunked meshes
 - Improved terrain material updates and caching
@@ -73,19 +140,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Version bumped to 0.3.0
 
 ### Fixed
+
 - Rebuild scheduling to handle pending changes safely during chunk generation
 
 ### Performance
+
 - Multithreaded CPU heightmap composition with precomputed influence maps
 - Optimized GPU heightmap blending pipeline
 - Chunked mesh generation and LOD for large terrain scalability
 
 ### Removed
+
 - Constant terrain node
 
 ## [0.2.0] - 2026-01-18
 
 ### Added
+
 - GPU-accelerated heightmap compositor for massive performance improvements
 - GPU-accelerated heightmap modifiers system with CPU fallback
 - Terrain modifiers: Smoothing, Terracing, and Height Clamping
@@ -96,6 +167,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New GLSL shaders for heightmap composition and modifiers
 
 ### Changed
+
 - Refactored `influence_radius` to `influence_size` for more flexible area definitions
 - Optimized terrain mesh generation with pre-calculated heights and parallel processing
 - Enhanced triplanar normal mapping and weight calculations in terrain shader
@@ -109,12 +181,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Normalized blended normal vectors and improved texture sampling
 
 ### Fixed
+
 - Thread safety issues in terrain generation
 - Main thread blocking during mesh generation
 - Signal emission during gizmo manipulation
 - Normal vector blending in shader
 
 ### Performance
+
 - Significantly reduced terrain generation time through parallel mesh building
 - GPU acceleration for heightmap processing where available
 - Improved memory usage with optimized heightmap formats
@@ -123,13 +197,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-01-17
 
 ### Added
+
 - Initial release of Terrainy plugin for Godot 4
 - Hybrid node-based and spatial terrain editor with live preview
 - TerrainComposer node for managing terrain composition
 - TerrainFeatureNode base class for all terrain features
 
 #### Terrain Features
+
 **Primitives**
+
 - Hill node for creating simple elevation features
 - Mountain node for peak formations
 - Volcano node for crater-topped mountains
@@ -137,6 +214,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Island node for isolated landmass shapes
 
 **Gradients**
+
 - Radial Gradient for circular height falloff
 - Linear Gradient for directional height transitions
 - Cone shape for pointed elevation
@@ -144,17 +222,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Base Gradient node for custom gradient implementations
 
 **Landscapes**
+
 - Mountain Range for creating mountain chains
 - Canyon for valley and gorge formations
 - Dune Sea for desert-like sandy terrain
 
 **Procedural Generation**
+
 - Noise node for basic noise-based terrain
 - Voronoi node for cellular patterns
 - Shape node for geometric forms
 - Constant node for flat elevation values
 
 #### Features
+
 - Real-time terrain preview with live updates
 - Spatial positioning of terrain features in 3D viewport
 - Custom gizmo plugin for feature visualization
@@ -165,6 +246,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TerrainMeshGenerator for efficient mesh creation
 
 #### Texturing & Materials
+
 - Terrain texture layer system
 - Custom terrain shader with multi-layer support
 - PBR material workflow compatibility
