@@ -50,12 +50,6 @@ static func from_primitive_feature(feature: TerrainFeatureNode, feature_height: 
 	ctx.height = feature_height
 	ctx.shape_mode = shape
 	
-	# Try to get noise if the feature has it
-	if "noise" in feature and feature.get("noise") is FastNoiseLite:
-		ctx.noise = feature.get("noise")
-		if "noise_strength" in feature:
-			ctx.noise_strength = feature.get("noise_strength")
-	
 	return ctx
 
 ## Get noise detail value at a world position (thread-safe).

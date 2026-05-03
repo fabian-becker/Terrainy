@@ -53,29 +53,6 @@ static func from_landscape_feature(feature: TerrainFeatureNode, feature_height: 
 	ctx.direction = dir.normalized()
 	ctx.perpendicular = Vector2(-ctx.direction.y, ctx.direction.x)
 	
-	# Try to get noise generators
-	if "noise" in feature and feature.get("noise") is FastNoiseLite:
-		ctx.primary_noise = feature.get("noise")
-	
-	if "detail_noise" in feature and feature.get("detail_noise") is FastNoiseLite:
-		ctx.detail_noise = feature.get("detail_noise")
-	
-	# Copy additional parameters if they exist
-	if "ridge_sharpness" in feature:
-		ctx.ridge_sharpness = feature.get("ridge_sharpness")
-	if "peak_variation" in feature:
-		ctx.peak_variation = feature.get("peak_variation")
-	if "canyon_width" in feature:
-		ctx.canyon_width = feature.get("canyon_width")
-	if "wall_slope" in feature:
-		ctx.canyon_wall_slope = feature.get("wall_slope")
-	if "meander_strength" in feature:
-		ctx.canyon_meander_strength = feature.get("meander_strength")
-	if "dune_frequency" in feature:
-		ctx.dune_frequency = feature.get("dune_frequency")
-	if "asymmetry" in feature:
-		ctx.dune_asymmetry = feature.get("asymmetry")
-	
 	return ctx
 
 ## Get the distance along the directional axis (e.g., along a ridge or canyon).

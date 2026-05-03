@@ -82,6 +82,20 @@ func prepare_evaluation_context() -> EvaluationContext:
 	ctx.set_meta("hole_depth", hole_depth)
 	return ctx
 
+func is_hole_feature() -> bool:
+	return true
+
+func get_hole_3d_influence() -> bool:
+	return use_3d_influence
+
+func get_hole_depth() -> float:
+	return hole_depth
+
+func get_hole_edge_extent() -> float:
+	if edge_type == EdgeType.BEVELED:
+		return edge_bevel_width
+	return 0.0
+
 func get_height_at_safe(_world_pos: Vector3, _context: EvaluationContext) -> float:
 	return 0.0
 
@@ -101,8 +115,3 @@ func get_gpu_param_pack() -> Dictionary:
 	var extra_floats := PackedFloat32Array([edge_bevel_width, hole_depth])
 	var extra_ints := PackedInt32Array([edge_type, 1 if use_3d_influence else 0])
 	return _build_gpu_param_pack(FeatureType.HOLE, extra_floats, extra_ints)
-
-func get_hole_edge_extent() -> float:
-	if edge_type == EdgeType.BEVELED:
-		return edge_bevel_width
-	return 0.0

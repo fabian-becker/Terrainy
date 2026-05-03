@@ -196,7 +196,7 @@ func _exit_tree() -> void:
 	remove_custom_type("ScatterNode")
 
 func _handles(object: Object) -> bool:
-	return object is Node3D and object.get_script() == preload("res://addons/terrainy/nodes/terrain_composer.gd")
+	return object is Node3D and TerrainyScriptUtils.is_exact_script(object, "TerrainComposer")
 
 func _edit(object: Object) -> void:
 	if object and _handles(object):
@@ -360,33 +360,15 @@ func _clear_stuck_gizmo_flags(node: Node) -> bool:
 	return changed
 
 func _is_terrain_feature_node(node: Node) -> bool:
-	if not (node is Node3D):
-		return false
-	var script = node.get_script()
-	if not script:
-		return false
-	var base_script = script.get_base_script()
-	while base_script:
-		if base_script.resource_path == "res://addons/terrainy/nodes/terrain_feature_node.gd":
-			return true
-		base_script = base_script.get_base_script()
-	# Also check if the script itself is TerrainFeatureNode
-	return script.resource_path == "res://addons/terrainy/nodes/terrain_feature_node.gd"
+	return TerrainyScriptUtils.is_script_type(node, "TerrainFeatureNode")
 
 func _clear_all_gizmos(node: Node) -> void:
 	# Recursively clear gizmos from terrain feature nodes
-	if node is Node3D:
-		var script = node.get_script()
-		if script:
-			var base_script = script.get_base_script()
-			while base_script:
-				if base_script.resource_path == "res://addons/terrainy/nodes/terrain_feature_node.gd":
-					# Clear all gizmos from this node
-					# The node will request new gizmos on next update
-					if node.has_method("set_gizmo"):
-						node.set_gizmo(null)
-					break
-				base_script = base_script.get_base_script()
+	if node is Node3D and TerrainyScriptUtils.is_script_type(node, "TerrainFeatureNode"):
+		# Clear all gizmos from this node
+		# The node will request new gizmos on next update
+		if node.has_method("set_gizmo"):
+			node.set_gizmo(null)
 	
 	for child in node.get_children():
 		_clear_all_gizmos(child)

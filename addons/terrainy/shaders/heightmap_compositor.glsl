@@ -30,12 +30,12 @@ layout(std140, set = 0, binding = 4) uniform LayerData {
     vec4 blend_strength[32];  // x: blend_mode, y: strength, z-w: unused
 } layer_data;
 
-// Blend modes
+// Blend modes - must match TerrainFeatureNode.BlendMode in GDScript
 const int BLEND_ADD = 0;
 const int BLEND_SUBTRACT = 1;
-const int BLEND_MULTIPLY = 2;
-const int BLEND_MAX = 3;
-const int BLEND_MIN = 4;
+const int BLEND_MAX = 2;
+const int BLEND_MIN = 3;
+const int BLEND_MULTIPLY = 4;
 const int BLEND_AVERAGE = 5;
 
 float apply_blend_mode(float current_height, float feature_height, float weight, float strength, int blend_mode) {
@@ -52,7 +52,7 @@ float apply_blend_mode(float current_height, float feature_height, float weight,
     } else if (blend_mode == BLEND_MIN) {
         return min(current_height, feature_height * weight);
     } else if (blend_mode == BLEND_AVERAGE) {
-        return mix(current_height, feature_height * weight, strength * 0.5);
+        return (current_height + weighted_height) * 0.5;
     }
     return current_height + weighted_height;
 }
