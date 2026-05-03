@@ -12,23 +12,28 @@ A hybrid node-based and spatial terrain editor for Godot 4 with live preview and
 ### Terrain Features
 
 **Primitives**
+
 - Hills, Mountains, Volcanoes
 - Craters and Islands
 
 **Gradients**
+
 - Radial and Linear gradients
 - Cone and Hemisphere shapes
 
 **Landscapes**
+
 - Mountain Ranges
 - Canyons
 - Dune Seas
 
 **Procedural**
+
 - Perlin Noise
 - Voronoi patterns
 
 **Object Scattering**
+
 - Scatter packed scenes (grass, trees, props, buildings) after terrain generation
 - Deterministic placement with seed, density, and transform variation controls
 - Optional AABB overlap rejection
@@ -41,6 +46,7 @@ A hybrid node-based and spatial terrain editor for Godot 4 with live preview and
 All terrain features support modifiers that can be applied to adjust their appearance:
 
 **Smoothing**
+
 - **None**: No smoothing applied (default)
 - **Light**: Subtle smoothing for reducing sharp edges
 - **Medium**: Balanced smoothing for most use cases
@@ -49,11 +55,13 @@ All terrain features support modifiers that can be applied to adjust their appea
 Smoothing is particularly useful for reducing the spikiness of procedural terrain like mountains and noise patterns. Adjust the `smoothing_radius` to control the area of influence.
 
 **Terracing**
+
 - Creates stepped, layered terrain effects
 - Adjust `terrace_levels` for the number of steps
 - Control `terrace_smoothness` for hard edges vs smooth transitions
 
 **Height Clamping**
+
 - Limit minimum and/or maximum height values
 - Useful for creating plateaus or preventing extreme elevation changes
 
@@ -89,6 +97,7 @@ The addon now includes a minimal demo scene at:
 ## Configuration
 
 The `TerrainComposer` node provides several options:
+
 - **Terrain Size**: Overall dimensions of the terrain mesh
 - **Resolution**: Detail level (16-512)
 - **Auto Update**: Enable/disable automatic rebuilding
@@ -96,7 +105,7 @@ The `TerrainComposer` node provides several options:
 
 ## Version
 
-0.1.0
+0.6.0
 
 ## License
 
