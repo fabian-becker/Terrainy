@@ -92,7 +92,7 @@ If you are using the Compatibility renderer, GPU composition/modifiers are autom
 
 The addon now includes a minimal demo scene at:
 
-- [addons/terrainy/demo/terrainy_demo.tscn](addons/terrainy/demo/terrainy_demo.tscn)
+- [addons/terrainy/demo/terrainy_demo.scn](addons/terrainy/demo/terrainy_demo.scn)
 
 ## Configuration
 
