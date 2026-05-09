@@ -30,7 +30,11 @@ func export_terrain(
 
 		var chunk_pos := Vector3.ZERO
 		if chunk.root and is_instance_valid(chunk.root):
-			chunk_pos = Vector3(chunk.world_bounds.position.x, 0.0, chunk.world_bounds.position.y)
+			chunk_pos = Vector3(
+				chunk.world_bounds.position.x + chunk.world_bounds.size.x * 0.5,
+				0.0,
+				chunk.world_bounds.position.y + chunk.world_bounds.size.y * 0.5
+			)
 		chunk_root.position = chunk_pos
 
 		root_node.add_child(chunk_root)
@@ -60,29 +64,31 @@ func export_terrain(
 	for feature in feature_nodes:
 		if not is_instance_valid(feature):
 			continue
-		if not feature.get("generate_water_mesh"):
+		if not (feature is WaterNode):
 			continue
-		var water_mesh_prop = feature.get("_water_mesh_instance")
-		if not water_mesh_prop or not is_instance_valid(water_mesh_prop):
+		var water_node = feature as WaterNode
+		if not water_node.generate_water_mesh:
 			continue
-		var water_mesh_instance = water_mesh_prop as MeshInstance3D
+		var water_mesh_instance = water_node.get_water_mesh_instance()
+		if not water_mesh_instance or not is_instance_valid(water_mesh_instance):
+			continue
 		if not water_mesh_instance.mesh:
 			continue
 
-		var water_node := MeshInstance3D.new()
-		water_node.name = feature.name + "_Water"
-		water_node.mesh = water_mesh_instance.mesh.duplicate()
+		var baked_water_node := MeshInstance3D.new()
+		baked_water_node.name = feature.name + "_Water"
+		baked_water_node.mesh = water_mesh_instance.mesh.duplicate()
 		if water_mesh_instance.material_override:
-			water_node.material_override = water_mesh_instance.material_override
-		water_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			baked_water_node.material_override = water_mesh_instance.material_override
+		baked_water_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 		var feature_pos := Vector3.ZERO
 		if feature is Node3D:
 			feature_pos = (feature as Node3D).global_position
-		water_node.position = feature_pos
+		baked_water_node.position = feature_pos
 
-		root_node.add_child(water_node)
-		water_node.owner = root_node
+		root_node.add_child(baked_water_node)
+		baked_water_node.owner = root_node
 
 	# Export scatter instances
 	for scatter in scatter_nodes:
@@ -97,11 +103,11 @@ func export_terrain(
 			if child is MultiMeshInstance3D:
 				var mm = child as MultiMeshInstance3D
 				var baked_mm = MultiMeshInstance3D.new()
-				baked_mm.multimesh = mm.multimesh
+				baked_mm.multimesh = mm.multimesh.duplicate()
 				if mm.material_override:
 					baked_mm.material_override = mm.material_override
 				baked_mm.cast_shadow = mm.cast_shadow
-				baked_mm.transform = mm.transform
+				baked_mm.transform = mm.global_transform
 				baked_mm.name = scatter.name + "_MultiMesh"
 				root_node.add_child(baked_mm)
 				baked_mm.owner = root_node
