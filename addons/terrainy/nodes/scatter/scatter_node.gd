@@ -10,6 +10,9 @@ const MIN_OVERLAP_SIZE := 0.01
 
 @export_group("Scatter")
 
+## Individual Instances: spawns full Node3D scenes (supports scripts, animation, complex hierarchies).
+## MultiMesh (GPU): renders thousands of identical meshes in a single draw call. Only the first
+## MeshInstance3D mesh is used; per-instance scripts/animation and nested material overrides are lost.
 @export_enum("Individual Instances", "MultiMesh (GPU)") var render_mode: int = 0:
 	set(value):
 		render_mode = value
