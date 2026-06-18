@@ -533,25 +533,78 @@ void main() {
 		float ridge_sharpness = get_float(22);
 		float peak_freq = get_float(23);
 		float detail_freq = get_float(24);
+		float ridge_meander = get_float(25);
+		float peak_prominence = get_float(26);
+		float foothill_strength = get_float(27);
+		float peak_seed = float(get_int(2));
+		float detail_seed = float(get_int(3));
 		float normalized_distance = influence_normalized_distance(local_pos, influence_shape, influence_size);
 		if (normalized_distance >= 1.0) {
 			height = 0.0;
 		} else {
-			float lateral_distance = abs(dot(local_pos.xz, perp));
-			float ridge_width = max(max(influence_size.x, influence_size.y), 0.0001);
-			if (influence_shape == 0) {
-				ridge_width *= 0.5;
-			} else {
-				ridge_width = max(influence_size.y * 0.5, 0.0001);
-			}
-			float ridge_falloff = 1.0 - pow(lateral_distance / ridge_width, ridge_sharpness);
-			ridge_falloff = max(0.0, ridge_falloff);
-			height = range_height * ridge_falloff;
+			float perp_dist = dot(local_pos.xz, perp);
 			float along_ridge = dot(local_pos.xz, dir);
-			float peak_var = perlin2(vec2(along_ridge * peak_freq, 0.0), float(get_int(2)));
-			height *= 0.7 + peak_var * 0.3;
-			float detail = perlin2(vec2(world_x * detail_freq, world_z * detail_freq), float(get_int(3)));
-			height += height * detail * 0.2;
+
+			float half_x = influence_size.x * 0.5;
+			float half_y = influence_size.y * 0.5;
+			float ridge_width;
+			float half_length;
+			if (influence_shape == 0) {
+				ridge_width = max(max(influence_size.x, influence_size.y), 0.0001) * 0.5;
+				half_length = ridge_width;
+			} else if (influence_shape == 2) {
+				ridge_width = sqrt((half_x * perp.x) * (half_x * perp.x) + (half_y * perp.y) * (half_y * perp.y));
+				half_length = sqrt((half_x * dir.x) * (half_x * dir.x) + (half_y * dir.y) * (half_y * dir.y));
+			} else {
+				ridge_width = abs(half_x * perp.x) + abs(half_y * perp.y);
+				half_length = abs(half_x * dir.x) + abs(half_y * dir.y);
+			}
+			ridge_width = max(ridge_width, 0.0001);
+			half_length = max(half_length, 0.0001);
+			float crest_width = ridge_width * 0.55;
+
+			// Meander: wander the crest line laterally along its length
+			float meander_offset = 0.0;
+			if (ridge_meander > 0.0) {
+				float meander_noise = perlin2(vec2(along_ridge * 0.15 * peak_freq, 7777.0), peak_seed);
+				meander_offset = meander_noise * ridge_width * ridge_meander;
+			}
+			float lateral = abs(perp_dist - meander_offset);
+
+			// Main crest cross-profile (sharp pointed ridge)
+			float crest_t = clamp(lateral / crest_width, 0.0, 1.0);
+			float crest_falloff = max(0.0, 1.0 - pow(crest_t, ridge_sharpness));
+
+			// Peak / saddle profile along the ridge: smooth (non-cusped) even profiles
+			// blended by peak_prominence => rounded multi-vertex summits, not spikes.
+			float n_peak = perlin2(vec2(along_ridge * peak_freq, 0.0), peak_seed);
+			float rolling = 1.0 - 0.4 * n_peak * n_peak;
+			float serrated = 1.0 - smoothstep(0.0, 1.0, abs(n_peak));
+			float peak_profile = mix(rolling, serrated, peak_prominence);
+			float n_slow = perlin2(vec2(along_ridge * 0.4 * peak_freq, 333.0), peak_seed);
+			float height_scale = 0.55 + 0.45 * (0.5 + 0.5 * n_slow);
+			peak_profile = clamp(peak_profile * height_scale, 0.0, 1.0);
+			height = range_height * crest_falloff * (0.2 + peak_profile * 0.8);
+
+			// Foothills: subsidiary ridges in the outer flanks, following the meander
+			if (foothill_strength > 0.0) {
+				float flank_t = clamp(lateral / ridge_width, 0.0, 1.0);
+				float foothill_env = smoothstep(0.2, 0.55, flank_t) * (1.0 - smoothstep(0.75, 1.0, flank_t));
+				if (foothill_env > 0.0) {
+					float fh_noise = perlin2(vec2(world_x * 0.3 * detail_freq, world_z * 0.3 * detail_freq), detail_seed);
+					float fh_mod = 0.65 + abs(fh_noise) * 0.7;
+					height += range_height * foothill_strength * foothill_env * fh_mod * (0.35 + peak_profile * 0.65);
+				}
+			}
+
+			// Surface detail (world-space roughness)
+			float detail = perlin2(vec2(world_x * detail_freq, world_z * detail_freq), detail_seed);
+			height += height * detail * 0.12;
+
+			// Taper the ends of the range so it doesn't terminate in a cliff
+			float along_t = abs(along_ridge) / half_length;
+			float end_fade = 1.0 - smoothstep(0.82, 1.0, along_t);
+			height *= end_fade;
 		}
 	} else if (params.feature_type == FEATURE_LANDSCAPE_DUNE_SEA) {
 		float dune_height = get_float(19);

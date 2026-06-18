@@ -22,6 +22,9 @@ var detail_noise: FastNoiseLite
 
 ## Additional landscape-specific parameters
 var ridge_sharpness: float = 2.0
+var ridge_meander: float = 0.0
+var peak_prominence: float = 0.0
+var foothill_strength: float = 0.0
 var peak_variation: float = 0.5
 var canyon_width: float = 50.0
 var canyon_wall_slope: float = 1.0
@@ -68,6 +71,21 @@ func get_distance_perpendicular(local_pos: Vector3) -> float:
 ## Get the absolute lateral distance from the centerline.
 func get_lateral_distance(local_pos: Vector3) -> float:
 	return abs(get_distance_perpendicular(local_pos))
+
+## Half-extent of the influence shape projected onto a local 2D axis.
+## This is the support function of the shape along `axis`, i.e. how far the
+## shape reaches in that direction. Used for ridge width / range length that
+## stay correct no matter which way `direction` points.
+func get_extent_along(axis: Vector2) -> float:
+	var half_x = influence_size.x * 0.5
+	var half_y = influence_size.y * 0.5
+	match influence_shape:
+		TerrainFeatureNode.InfluenceShape.CIRCLE:
+			return influence_radius
+		TerrainFeatureNode.InfluenceShape.ELLIPSE:
+			return sqrt((half_x * axis.x) * (half_x * axis.x) + (half_y * axis.y) * (half_y * axis.y))
+		_:
+			return abs(half_x * axis.x) + abs(half_y * axis.y)
 
 ## Get normalized distance from center based on influence shape.
 ## Returns 0 at center, 1 at edge, >1 outside.
