@@ -182,9 +182,10 @@ func evaluate_single_feature_gpu(
 	var output_bytes := _rd.texture_get_data(output_texture, 0)
 	var result_image := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, output_bytes)
 
+	_rd.free_rid(uniform_set)
 	_rd.free_rid(output_texture)
 	_rd.free_rid(float_buffer)
 	_rd.free_rid(int_buffer)
 	_rd.free_rid(params_buffer)
-
+	
 	return result_image

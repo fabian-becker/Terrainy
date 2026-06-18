@@ -9,7 +9,7 @@ const GradientNode = preload("res://addons/terrainy/nodes/gradients/gradient_nod
 @export var sharpness: float = 1.0:
 	set(value):
 		sharpness = clamp(value, 0.1, 4.0)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 func get_height_at(world_pos: Vector3) -> float:
 	var ctx = prepare_evaluation_context()
@@ -25,7 +25,7 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 	var ctx = context as GradientEvaluationContext
 	var local_pos = ctx.to_local(world_pos)
 	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
-	var radius = ctx.influence_size.x
+	var radius = ctx.influence_radius
 	
 	if distance_2d >= radius:
 		return ctx.end_height

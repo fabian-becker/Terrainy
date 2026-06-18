@@ -365,24 +365,53 @@ void main() {
 		int mask_size_x = get_int(2);
 		int mask_size_y = get_int(3);
 		int data_offset = get_int(4);
+		int shape_mode = get_int(5);
 		vec2 half_size = vec2(max(influence_size.x * 0.5, 0.0001), max(influence_size.y * 0.5, 0.0001));
 		vec2 pos_2d = rotate2d(local_pos.xz, rotation);
 		float normalized_distance = max(abs(pos_2d.x) / half_size.x, abs(pos_2d.y) / half_size.y);
 		if (normalized_distance >= 1.0) {
 			height = 0.0;
 		} else {
-			vec2 uv = vec2(
-				(pos_2d.x / max(influence_size.x, 0.0001)) + 0.5,
-				(pos_2d.y / max(influence_size.y, 0.0001)) + 0.5
-			);
-			float mask_value = sample_shape_mask(data_offset, ivec2(mask_size_x, mask_size_y), uv);
-			if (mask_value <= 0.0) {
-				height = 0.0;
-			} else {
+			float mask_value = 0.0;
+			float boundary_nd = normalized_distance;
+			if (shape_mode == 0) { // CUSTOM_MASK
+				vec2 uv = vec2(
+					(pos_2d.x / max(influence_size.x, 0.0001)) + 0.5,
+					(pos_2d.y / max(influence_size.y, 0.0001)) + 0.5
+				);
+				mask_value = sample_shape_mask(data_offset, ivec2(mask_size_x, mask_size_y), uv);
+				if (mask_value <= 0.0) {
+					height = 0.0;
+				} else {
+					float edge_start = 1.0 - smoothness;
+					float height_factor = 1.0;
+					if (boundary_nd > edge_start && 1.0 > edge_start) {
+						float edge_t = (boundary_nd - edge_start) / max(1.0 - edge_start, 0.0001);
+						height_factor = 1.0 - smoothstep(0.0, 1.0, edge_t);
+					}
+					height = shape_height * mask_value * height_factor;
+				}
+			} else if (shape_mode == 1) { // CIRCLE
+				float radius = max(half_size.x, half_size.y);
+				boundary_nd = length(pos_2d) / max(radius, 0.0001);
+				if (boundary_nd >= 1.0) {
+					height = 0.0;
+				} else {
+					mask_value = 1.0;
+					float edge_start = 1.0 - smoothness;
+					float height_factor = 1.0;
+					if (boundary_nd > edge_start && 1.0 > edge_start) {
+						float edge_t = (boundary_nd - edge_start) / max(1.0 - edge_start, 0.0001);
+						height_factor = 1.0 - smoothstep(0.0, 1.0, edge_t);
+					}
+					height = shape_height * mask_value * height_factor;
+				}
+			} else { // RECTANGLE
+				mask_value = 1.0;
 				float edge_start = 1.0 - smoothness;
 				float height_factor = 1.0;
-				if (normalized_distance > edge_start && 1.0 > edge_start) {
-					float edge_t = (normalized_distance - edge_start) / max(1.0 - edge_start, 0.0001);
+				if (boundary_nd > edge_start && 1.0 > edge_start) {
+					float edge_t = (boundary_nd - edge_start) / max(1.0 - edge_start, 0.0001);
 					height_factor = 1.0 - smoothstep(0.0, 1.0, edge_t);
 				}
 				height = shape_height * mask_value * height_factor;

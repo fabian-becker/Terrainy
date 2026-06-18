@@ -96,7 +96,7 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 	var projected = pos_2d.dot(ctx.gradient_vector)
 	
 	# Normalize to influence radius
-	var radius = ctx.influence_size.x
+	var radius = ctx.influence_radius
 	var t = (projected + radius) / (radius * 2.0)
 	t = clamp(t, 0.0, 1.0)
 	

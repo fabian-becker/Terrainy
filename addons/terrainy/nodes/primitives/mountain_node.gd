@@ -64,7 +64,7 @@ func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:
 	var basis := inv_transform.basis
 	var inv_origin := inv_transform.origin
 
-	var radius := influence_size.x
+	var radius := EvaluationContext.get_influence_radius(influence_shape, influence_size)
 	var radius_sq := radius * radius
 
 	var idx := 0

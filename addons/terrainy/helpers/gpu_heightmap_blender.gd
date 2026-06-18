@@ -207,6 +207,7 @@ func generate_influence_map_gpu(
 	var influence_map := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, output_bytes)
 	
 	# Cleanup
+	_rd.free_rid(uniform_set)
 	_rd.free_rid(output_texture)
 	_rd.free_rid(params_buffer)
 	
@@ -383,6 +384,7 @@ func compose_gpu(
 	var final_image := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, output_bytes)
 	
 	# Cleanup
+	_rd.free_rid(uniform_set)
 	_rd.free_rid(output_texture)
 	_rd.free_rid(params_buffer)
 	_rd.free_rid(layer_buffer)

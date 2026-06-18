@@ -12,7 +12,7 @@ layout(r32f, set = 0, binding = 1) uniform restrict writeonly image2D output_hei
 // Modifier parameters
 layout(std140, set = 0, binding = 2) uniform ModifierParams {
     int smoothing_mode;      // 0=none, 1=light, 2=medium, 3=heavy
-    float smoothing_radius;
+    float smoothing_radius;  // in world units
     int enable_terracing;
     int terrace_levels;
     float terrace_smoothness;
@@ -22,6 +22,9 @@ layout(std140, set = 0, binding = 2) uniform ModifierParams {
     float max_height;
     int resolution_x;
     int resolution_y;
+    float step_x;           // world units per pixel (X)
+    float step_y;           // world units per pixel (Y)
+    float max_abs_height;   // actual height range for terracing normalization
 } params;
 
 // Sample heightmap with bounds checking
@@ -40,7 +43,7 @@ float apply_smoothing(ivec2 pixel_coords, float center_height) {
     }
     
     int sample_count;
-    float sample_radius;
+    float sample_radius;  // in world units
     
     if (params.smoothing_mode == 1) {  // LIGHT
         sample_count = 4;
@@ -53,6 +56,11 @@ float apply_smoothing(ivec2 pixel_coords, float center_height) {
         sample_radius = params.smoothing_radius * 1.5;
     }
     
+    // Convert world-unit radius to pixel offsets (matching CPU path)
+    float pixel_radius_x = sample_radius / max(params.step_x, 0.0001);
+    float pixel_radius_y = sample_radius / max(params.step_y, 0.0001);
+    float pixel_radius = max(pixel_radius_x, pixel_radius_y);
+    
     float total_height = center_height;
     float total_weight = 1.0;
     
@@ -60,14 +68,16 @@ float apply_smoothing(ivec2 pixel_coords, float center_height) {
     float angle_step = 6.28318530718 / float(sample_count);  // 2*PI
     for (int i = 0; i < sample_count; i++) {
         float angle = float(i) * angle_step;
-        vec2 offset = vec2(cos(angle), sin(angle)) * sample_radius;
-        ivec2 sample_coords = pixel_coords + ivec2(round(offset));
+        // Convert world-unit offset to pixel coordinates
+        float ox = cos(angle) * pixel_radius_x;
+        float oy = sin(angle) * pixel_radius_y;
+        ivec2 sample_coords = pixel_coords + ivec2(round(ox), round(oy));
         
         float sampled_height = sample_height(sample_coords);
         
-        // Weight by distance
-        float dist = length(offset);
-        float weight = 1.0 - (dist / (sample_radius * 1.5));
+        // Weight by distance in pixel space
+        float dist = sqrt(ox * ox + oy * oy);
+        float weight = 1.0 - (dist / (pixel_radius * 1.5));
         weight = max(0.0, weight);
         
         total_height += sampled_height * weight;
@@ -83,8 +93,11 @@ float apply_terracing(float height) {
         return height;
     }
     
-    // Normalize to 0-1 range
-    float normalized_height = height / 100.0;
+    // Use actual height range for normalization (matches CPU path)
+    float max_abs = max(params.max_abs_height, 0.001);
+    
+    // Normalize to 0-1 range using actual height range
+    float normalized_height = height / max_abs;
     
     // Calculate terrace level
     float level = floor(normalized_height * float(params.terrace_levels));
@@ -98,7 +111,7 @@ float apply_terracing(float height) {
         level_height = mix(level_height, next_level_height, t);
     }
     
-    return level_height * 100.0;
+    return level_height * max_abs;
 }
 
 // Apply height clamping

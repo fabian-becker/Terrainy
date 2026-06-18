@@ -152,14 +152,19 @@ func _build_scatter_instances(scatter: ScatterNode, container: Node3D, placement
 			instance.queue_free()
 			continue
 		var instance_3d = instance as Node3D
-		instance_3d.transform = placement["transform"]
 		container.add_child(instance_3d, false, Node.INTERNAL_MODE_BACK)
+		# Placement transforms are in world space; use global_transform so Godot
+		# converts them to the correct local transform relative to the container.
+		instance_3d.global_transform = placement["transform"]
 
 func _build_scatter_multimesh(scatter: ScatterNode, container: Node3D, placements: Array[Dictionary]) -> void:
+	# Placement transforms are in world space. MultiMesh instance_transforms are
+	# relative to the MultiMeshInstance3D node, so convert to container-local space.
+	var container_global_inv := container.global_transform.affine_inverse()
 	var transforms: Array[Transform3D] = []
 	transforms.resize(placements.size())
 	for i in placements.size():
-		transforms[i] = placements[i]["transform"]
+		transforms[i] = container_global_inv * placements[i]["transform"]
 
 	var mm_instance = MultiMeshScatter.build_multimesh(scatter, transforms)
 	if mm_instance:

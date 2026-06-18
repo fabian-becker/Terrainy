@@ -102,14 +102,16 @@ func compose(
 			if not has_mask and _should_use_gpu(use_gpu_composition) and _gpu_feature_evaluator:
 				if feature.has_method("get_gpu_param_pack"):
 					var pack = feature.get_gpu_param_pack()
-					var gpu_result = _gpu_feature_evaluator.evaluate_single_feature_gpu(resolution, terrain_bounds, pack)
-					if gpu_result:
-						if feature.has_method("apply_modifiers_to_heightmap"):
-							gpu_result = feature.apply_modifiers_to_heightmap(gpu_result, terrain_bounds, contexts.get(feature))
-						_store_heightmap(feature, gpu_result)
-						gpu_eval_count += 1
-						generated_count += 1
-						continue
+					# Check if this feature type is supported on GPU before calling evaluator
+					if GpuFeatureEvaluator.SUPPORTED_TYPES.has(pack.get("type", 0)):
+						var gpu_result = _gpu_feature_evaluator.evaluate_single_feature_gpu(resolution, terrain_bounds, pack)
+						if gpu_result:
+							if feature.has_method("apply_modifiers_to_heightmap"):
+								gpu_result = feature.apply_modifiers_to_heightmap(gpu_result, terrain_bounds, contexts.get(feature))
+							_store_heightmap(feature, gpu_result)
+							gpu_eval_count += 1
+							generated_count += 1
+							continue
 			# Launch parallel generation task (batched) or generate on main thread
 			var ctx = contexts.get(feature)
 			if use_multithreading and ctx:
@@ -332,15 +334,7 @@ func _compose_cpu(
 ) -> Dictionary:
 	var start_time = Time.get_ticks_msec()
 	
-	# Auto-prefer GPU for large workloads even if user disabled it
-	var pixel_count = resolution.x * resolution.y
-	if not use_gpu_composition and features.size() > 4 and pixel_count > 128 * 128:
-		if _gpu_compositor and _gpu_compositor.is_available():
-			push_warning("[TerrainHeightmapBuilder] Large workload detected (%d features, %d pixels), auto-enabling GPU composition" % [features.size(), pixel_count])
-			var gpu_result = _compose_gpu(features, contexts, resolution, terrain_bounds, base_height)
-			if gpu_result and gpu_result.has("heightmap"):
-				return gpu_result
-			push_warning("[TerrainHeightmapBuilder] Auto GPU composition failed, falling back to CPU")
+	# Respect user's explicit choice: do not auto-enable GPU when user disabled it
 	
 	# Create base heightmap
 	var final_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)

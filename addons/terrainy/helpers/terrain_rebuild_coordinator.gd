@@ -41,8 +41,8 @@ func rebuild_completed(composer) -> void:
 	_mutex.lock()
 	_active_rebuilds = max(0, _active_rebuilds - 1)
 	
-	# Start next queued rebuild if any
-	if _rebuild_queue.size() > 0:
+	# Start next valid queued rebuild (skip invalid composers without re-decrementing)
+	while not _rebuild_queue.is_empty():
 		var next_composer = _rebuild_queue.pop_front()
 		var remaining = _rebuild_queue.size()
 		_mutex.unlock()
@@ -50,11 +50,12 @@ func rebuild_completed(composer) -> void:
 		if is_instance_valid(next_composer) and next_composer.is_inside_tree():
 			print("[TerrainRebuildCoordinator] Processing next queued rebuild (%d remaining)" % remaining)
 			next_composer.call_deferred("rebuild_terrain")
-		else:
-			# Invalid composer, try next
-			rebuild_completed(null)
-	else:
-		_mutex.unlock()
+			return
+		
+		# Invalid composer — loop to try the next one
+		_mutex.lock()
+	
+	_mutex.unlock()
 
 ## Remove a composer from the queue (e.g., when freed)
 func cancel_rebuild(composer) -> void:

@@ -60,6 +60,7 @@ func cleanup() -> void:
 ## Apply modifiers to heightmap on GPU
 func apply_modifiers(
 	input_heightmap: Image,
+	terrain_bounds: Rect2,
 	smoothing_mode: int,
 	smoothing_radius: float,
 	enable_terracing: bool,
@@ -126,9 +127,22 @@ func apply_modifiers(
 	output_uniform.add_id(output_texture)
 	uniforms.append(output_uniform)
 	
+	# Compute step size (world units per pixel) for smoothing radius conversion
+	var step_x := terrain_bounds.size.x / float(max(resolution.x - 1, 1))
+	var step_y := terrain_bounds.size.y / float(max(resolution.y - 1, 1))
+	
+	# Compute max absolute height for terracing normalization (matches CPU path)
+	var max_abs_height := 0.0
+	if enable_terracing:
+		var height_data := input_heightmap.get_data().to_float32_array()
+		for h in height_data:
+			max_abs_height = max(max_abs_height, abs(h))
+		if max_abs_height < 0.001:
+			enable_terracing = false
+	
 	# Parameters buffer
 	var params_bytes := PackedByteArray()
-	params_bytes.resize(48)  # 12 fields * 4 bytes
+	params_bytes.resize(64)  # 15 fields + 1 padding (std140 requires 16-byte alignment)
 	params_bytes.encode_s32(0, smoothing_mode)
 	params_bytes.encode_float(4, smoothing_radius)
 	params_bytes.encode_s32(8, 1 if enable_terracing else 0)
@@ -140,7 +154,11 @@ func apply_modifiers(
 	params_bytes.encode_float(32, max_height)
 	params_bytes.encode_s32(36, resolution.x)
 	params_bytes.encode_s32(40, resolution.y)
-	params_bytes.encode_s32(44, 0)  # padding
+	params_bytes.encode_float(44, step_x)       # world units per pixel (X)
+	params_bytes.encode_float(48, step_y)       # world units per pixel (Y)
+	params_bytes.encode_float(52, max_abs_height)  # actual height range for terracing
+	params_bytes.encode_s32(56, 0)  # padding
+	params_bytes.encode_s32(60, 0)  # padding
 	
 	var params_buffer := _rd.uniform_buffer_create(params_bytes.size(), params_bytes)
 	
@@ -172,6 +190,7 @@ func apply_modifiers(
 	var result_image := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, output_bytes)
 	
 	# Cleanup
+	_rd.free_rid(uniform_set)
 	_rd.free_rid(input_texture)
 	_rd.free_rid(output_texture)
 	_rd.free_rid(params_buffer)

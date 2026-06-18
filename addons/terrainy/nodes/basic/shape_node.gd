@@ -2,7 +2,7 @@
 class_name ShapeNode
 extends TerrainFeatureNode
 
-const TerrainFeatureNode = "res://addons/terrainy/nodes/terrain_feature_node.gd"
+# TerrainFeatureNode is available globally via class_name
 const ShapeEvaluationContext = preload("res://addons/terrainy/nodes/basic/shape_evaluation_context.gd")
 const ShapeMaskResource = preload("res://addons/terrainy/resources/shape_mask_resource.gd")
 
@@ -138,7 +138,8 @@ func get_gpu_param_pack() -> Dictionary:
 		mask_size.x,
 		mask_size.y,
 		data_offset,
-		mask_data.size()
+		shape_mode,   # int[5]: 0=CUSTOM_MASK, 1=CIRCLE, 2=RECTANGLE
+		mask_data.size()  # int[6]: mask data count (unused in shader, kept for reference)
 	])
 	return _build_gpu_param_pack(FeatureType.SHAPE, extra_floats, extra_ints)
 

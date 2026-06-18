@@ -91,6 +91,8 @@ const HOLE_DEPTH_SENTINEL := -1000000.0  # Named constant for hole value
 @export var enable_lod: bool = true:
 	set(value):
 		enable_lod = value
+		if enable_lod and is_inside_tree() and _chunk_manager and _chunk_manager.get_chunks().size() > 0:
+			set_process(true)
 		if auto_update and is_inside_tree():
 			_request_rebuild()
 
@@ -230,8 +232,13 @@ func _process(_delta: float) -> void:
 
 func _exit_tree() -> void:
 	# Cancel any queued rebuild
-	if Engine.has_singleton("TerrainRebuildCoordinator"):
-		TerrainRebuildCoordinator.cancel_rebuild(self)
+	var _coord = Engine.get_singleton("TerrainRebuildCoordinator") if Engine.has_singleton("TerrainRebuildCoordinator") else null
+	if _coord:
+		_coord.cancel_rebuild(self)
+		# Release active rebuild slot if this composer was mid-rebuild
+		if _coordinator_rebuild_pending:
+			_coord.rebuild_completed(self)
+			_coordinator_rebuild_pending = false
 	
 	if _chunk_thread and _chunk_thread_started and _chunk_thread.is_alive():
 		# Wait with timeout to prevent editor hang (max 5 seconds)
@@ -332,7 +339,7 @@ func _scan_recursive(node: Node) -> void:
 		if child is TerrainFeatureNode:
 			if _feature_nodes.size() >= MAX_FEATURE_COUNT:
 				push_warning("[TerrainComposer] Maximum feature count (%d) reached, ignoring '%s'" % [MAX_FEATURE_COUNT, child.name])
-				break
+				continue
 			_feature_nodes.append(child)
 			_scan_recursive(child)
 		elif not (child is MeshInstance3D or child is StaticBody3D or child is CollisionShape3D):
@@ -480,8 +487,9 @@ func rebuild_terrain() -> void:
 		_bake_exporter = BakeExporter.new()
 	
 	# Check with rebuild coordinator if we can start
-	if Engine.has_singleton("TerrainRebuildCoordinator"):
-		if not TerrainRebuildCoordinator.request_rebuild(self):
+	var _coord = Engine.get_singleton("TerrainRebuildCoordinator") if Engine.has_singleton("TerrainRebuildCoordinator") else null
+	if _coord:
+		if not _coord.request_rebuild(self):
 			return  # Queued, will be called again when ready
 		_coordinator_rebuild_pending = true
 	
@@ -526,8 +534,9 @@ func rebuild_terrain() -> void:
 	if compose_result.is_empty() or not compose_result.has("heightmap"):
 		push_error("[TerrainComposer] Heightmap composition failed; aborting rebuild")
 		_is_generating = false
-		if _coordinator_rebuild_pending and Engine.has_singleton("TerrainRebuildCoordinator"):
-			TerrainRebuildCoordinator.rebuild_completed(self)
+		if _coordinator_rebuild_pending:
+			if _coord:
+				_coord.rebuild_completed(self)
 			_coordinator_rebuild_pending = false
 		return
 	
@@ -688,8 +697,10 @@ func _rebuild_chunks(full_rebuild: bool) -> void:
 		if _scatter_manager:
 			_scatter_manager.set_terrain_data(_final_heightmap, _terrain_bounds, base_height, resolution)
 			_scatter_manager.refresh_scatter(_scatter_nodes, _feature_nodes)
-		if _coordinator_rebuild_pending and Engine.has_singleton("TerrainRebuildCoordinator"):
-			TerrainRebuildCoordinator.rebuild_completed(self)
+		if _coordinator_rebuild_pending:
+			var _coord2 = Engine.get_singleton("TerrainRebuildCoordinator") if Engine.has_singleton("TerrainRebuildCoordinator") else null
+			if _coord2:
+				_coord2.rebuild_completed(self)
 			_coordinator_rebuild_pending = false
 		terrain_updated.emit()
 		return
@@ -758,6 +769,11 @@ func _apply_pending_chunk_results() -> void:
 	if _pending_chunk_results.is_empty():
 		return
 	
+	# Discard stale results from a previous rebuild
+	if _pending_chunk_rebuild_id != _rebuild_id:
+		_pending_chunk_results.clear()
+		return
+	
 	if not _chunk_manager:
 		return
 	
@@ -791,8 +807,10 @@ func _on_chunk_generation_completed() -> void:
 		_rebuild_start_msec = 0
 
 	# Signal rebuild completion to coordinator
-	if _coordinator_rebuild_pending and Engine.has_singleton("TerrainRebuildCoordinator"):
-		TerrainRebuildCoordinator.rebuild_completed(self)
+	if _coordinator_rebuild_pending:
+		var _coord2 = Engine.get_singleton("TerrainRebuildCoordinator") if Engine.has_singleton("TerrainRebuildCoordinator") else null
+		if _coord2:
+			_coord2.rebuild_completed(self)
 		_coordinator_rebuild_pending = false
 	terrain_updated.emit()
 
@@ -820,16 +838,15 @@ func _update_chunk_collision(chunk) -> void:
 
 	if chunk.hole_mask != null and _mask_has_holes(chunk.hole_mask):
 		# Chunk has actual hole pixels — use trimesh collision (respects hole geometry)
-		if not (chunk.collision_shape.shape is ConcavePolygonShape3D):
-			chunk.collision_shape.shape = chunk.mesh_instance.mesh.create_trimesh_shape()
+		# Always regenerate trimesh to match the current mesh (LOD/hole changes)
+		chunk.collision_shape.shape = chunk.mesh_instance.mesh.create_trimesh_shape()
 		chunk.collision_shape.scale = Vector3.ONE
 		chunk.collision_shape.position = Vector3.ZERO
 		return
 
 	if not chunk.heightmap:
 		# No heightmap available — fallback to trimesh
-		if not (chunk.collision_shape.shape is ConcavePolygonShape3D):
-			chunk.collision_shape.shape = chunk.mesh_instance.mesh.create_trimesh_shape()
+		chunk.collision_shape.shape = chunk.mesh_instance.mesh.create_trimesh_shape()
 		chunk.collision_shape.scale = Vector3.ONE
 		chunk.collision_shape.position = Vector3.ZERO
 		return
@@ -897,7 +914,10 @@ static func _mask_has_holes(mask: Image) -> bool:
 	if not mask:
 		return false
 	var data = mask.get_data()
-	var bytes_per_pixel = 4
+	var pixel_count = mask.get_width() * mask.get_height()
+	if pixel_count == 0:
+		return false
+	var bytes_per_pixel = data.size() / pixel_count
 	for i in range(0, data.size(), bytes_per_pixel):
 		if data.decode_float(i) > 0.5:
 			return true
