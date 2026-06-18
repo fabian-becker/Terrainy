@@ -33,19 +33,18 @@ float calculate_influence(vec2 local_pos_2d, int shape, vec2 size, float falloff
         }
     }
     else if (shape == 1) {
-        // RECTANGLE
+        // RECTANGLE — match CPU EvaluationContext: Chebyshev distance normalized by half-extents
         vec2 half_size = size * 0.5;
         half_size = max(half_size, vec2(MIN_INFLUENCE_SIZE));
         
-        if (abs(local_pos_2d.x) > half_size.x || abs(local_pos_2d.y) > half_size.y) {
+        float dx = abs(local_pos_2d.x) / half_size.x;
+        float dz = abs(local_pos_2d.y) / half_size.y;
+        distance = max(dx, dz);  // normalized distance: 0 at center, 1 at edge
+        max_distance = 1.0;
+        
+        if (distance >= max_distance) {
             return 0.0;
         }
-        
-        // Distance to nearest edge
-        float dist_x = half_size.x - abs(local_pos_2d.x);
-        float dist_y = half_size.y - abs(local_pos_2d.y);
-        distance = min(dist_x, dist_y);
-        max_distance = min(half_size.x, half_size.y);
     }
     else if (shape == 2) {
         // ELLIPSE
@@ -68,25 +67,13 @@ float calculate_influence(vec2 local_pos_2d, int shape, vec2 size, float falloff
         return 1.0;
     }
     
-    // Calculate falloff
-    if (shape == 1) {
-        // Rectangle falloff
-        float falloff_distance = max_distance * falloff;
-        if (distance > falloff_distance) {
-            return 1.0;
-        }
-        float t = distance / falloff_distance;
-        return smoothstep(0.0, 1.0, t);
+    // Calculate falloff — unified for all shapes (matches CPU EvaluationContext)
+    float falloff_start = max_distance * (1.0 - falloff);
+    if (distance < falloff_start) {
+        return 1.0;
     }
-    else {
-        // Circle and ellipse falloff
-        float falloff_start = max_distance * (1.0 - falloff);
-        if (distance < falloff_start) {
-            return 1.0;
-        }
-        float t = (distance - falloff_start) / (max_distance - falloff_start);
-        return 1.0 - smoothstep(0.0, 1.0, t);
-    }
+    float t = (distance - falloff_start) / (max_distance - falloff_start);
+    return 1.0 - smoothstep(0.0, 1.0, t);
 }
 
 void main() {

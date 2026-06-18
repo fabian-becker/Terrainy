@@ -231,7 +231,7 @@ void fragment() {
 				albedo *= sample_terrain_texture(albedo_textures, tex_idx, world_pos, uv_scale, uv_offset).rgb;
 			}
 			
-			// Sample normal with world-space mapping
+		// Sample normal with world-space mapping
 			if (tex_flags.y > 0.5) { // has_normal
 				vec3 layer_normal = sample_terrain_normal(normal_textures, tex_idx, world_pos, uv_scale, uv_offset);
 				
@@ -239,8 +239,10 @@ void fragment() {
 				float normal_strength = clamp(color_normal.w, 0.0, 2.0);
 				// Scale XY components by strength, keep Z
 				layer_normal.xy *= normal_strength;
-				// Accumulate normals additively (proper normal blending)
-				final_normal += layer_normal * weight;
+				// Accumulate XY perturbation weighted (UDN-style: blend detail, not add)
+				final_normal.xy += layer_normal.xy * weight;
+				// Track accumulated Z separately for reconstruction
+				final_normal.z += layer_normal.z * weight;
 			}
 			
 			// Sample roughness with world-space mapping
@@ -270,8 +272,12 @@ void fragment() {
 		
 		// Output
 		ALBEDO = final_albedo;
-		// Normalize accumulated normal, or use neutral if no normals were applied
-		if (length(final_normal) > 0.001) {
+		// Reconstruct normal from accumulated XY perturbation.
+		// UDN-style blending: the Z component is derived from the accumulated
+		// perturbation magnitude rather than simple addition, producing correct
+		// lighting at layer boundaries.
+		if (length(final_normal.xy) > 0.001) {
+			final_normal.z = sqrt(max(0.0, 1.0 - dot(final_normal.xy, final_normal.xy)));
 			NORMAL_MAP = normalize(final_normal);
 		} else {
 			NORMAL_MAP = vec3(0.0, 0.0, 1.0);  // Neutral tangent-space normal

@@ -200,13 +200,17 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		gizmo.add_lines(hole_lines, get_material("hole", gizmo))
 	
 	# Add handles
-	var handle_positions = PackedVector3Array()
-	var handle_ids = PackedInt32Array()
-	for i in handles.size():
-		handle_positions.push_back(handles[i].local_position)
-		handle_ids.push_back(i)
-	
-	gizmo.add_handles(handle_positions, get_material("handles", gizmo), handle_ids)
+	# Note: add_handles() always tries to create a handle-sphere mesh and assign a
+	# material to it. Calling it with empty position arrays raises
+	# "Index p_idx = 0 is out of bounds (surfaces.size() = 0)" from
+	# surface_set_material — so skip the call entirely when there are no handles.
+	if handles.size() > 0:
+		var handle_positions = PackedVector3Array()
+		var handle_ids = PackedInt32Array()
+		for i in handles.size():
+			handle_positions.push_back(handles[i].local_position)
+			handle_ids.push_back(i)
+		gizmo.add_handles(handle_positions, get_material("handles", gizmo), handle_ids)
 
 func _get_handle_name(gizmo: EditorNode3DGizmo, handle_id: int, secondary: bool) -> String:
 	var node = gizmo.get_node_3d() as TerrainFeatureNode

@@ -229,53 +229,6 @@ static func _compute_normal(
 	return Vector3(-dx, 1.0, -dz).normalized()
 
 
-## Check if a quad (2 triangles) is entirely inside a hole
-static func _quad_is_hole(is_hole_vertex: PackedByteArray, top_left_idx: int, width: int) -> bool:
-	var top_right := top_left_idx + 1
-	var bottom_left := top_left_idx + width
-	var bottom_right := top_left_idx + width + 1
-	
-	var max_idx := is_hole_vertex.size() - 1
-	if bottom_right > max_idx:
-		return false
-	
-	# Quad is inside hole if all 4 corners are in hole
-	return is_hole_vertex[top_left_idx] == 1 \
-		and is_hole_vertex[top_right] == 1 \
-		and is_hole_vertex[bottom_left] == 1 \
-		and is_hole_vertex[bottom_right] == 1
-
-
-## Check if a vertex is on a hole boundary (for bevel handling)
-static func _is_hole_boundary_vertex(
-	is_hole_vertex: PackedByteArray,
-	idx: int,
-	x: int,
-	z: int,
-	width: int,
-	height: int
-) -> bool:
-	var is_inside := is_hole_vertex[idx] == 1
-	if is_inside:
-		return false
-	
-	# Check neighbors - if any neighbor is in hole, this is a boundary vertex
-	var neighbors := [
-		Vector2i(x - 1, z), Vector2i(x + 1, z),  # left, right
-		Vector2i(x, z - 1), Vector2i(x, z + 1),  # up, down
-		Vector2i(x - 1, z - 1), Vector2i(x + 1, z - 1),  # diagonals
-		Vector2i(x - 1, z + 1), Vector2i(x + 1, z + 1)
-	]
-	
-	for n in neighbors:
-		if n.x >= 0 and n.x < width and n.y >= 0 and n.y < height:
-			var neighbor_idx = n.y * width + n.x
-			if is_hole_vertex[neighbor_idx] == 1:
-				return true
-	
-	return false
-
-
 ## Generate triangles for one grid cell using marching-squares on hole mask.
 ## Boundary vertices are deduplicated across adjacent cells via edge_verts dict.
 static func _cell_triangles(

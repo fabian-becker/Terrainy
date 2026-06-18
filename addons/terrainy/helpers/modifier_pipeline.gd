@@ -45,7 +45,7 @@ func apply_modifiers(
 	# Try GPU first
 	if use_gpu and _gpu_processor and _gpu_processor.is_available():
 		var modified = _gpu_processor.apply_modifiers(
-			heightmap, smoothing, smoothing_radius,
+			heightmap, terrain_bounds, smoothing, smoothing_radius,
 			enable_terracing, terrace_levels, terrace_smoothness,
 			enable_min_clamp, min_height, enable_max_clamp, max_height
 		)
