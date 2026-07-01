@@ -166,6 +166,9 @@ var _final_heightmap: Image
 var _final_hole_mask: Image
 var _terrain_bounds: Rect2
 
+# Cached evaluation contexts from last rebuild (for public query APIs)
+var _cached_feature_contexts: Dictionary = {}
+
 # Rebuild timing
 var _rebuild_start_msec: int = 0
 var _rebuild_id: int = 0
@@ -177,6 +180,10 @@ var _rebuild_timer: Timer = null
 var _pending_rebuild: bool = false
 var _rebuild_after_current: bool = false
 var _initial_rebuild_pending: bool = true
+
+# LOD camera position cache (skip per-frame iteration when camera is static)
+var _lod_last_camera_pos: Vector3 = Vector3.ZERO
+var _lod_last_camera_valid: bool = false
 
 func _ready() -> void:
 	set_process(false)  # Only enable when mesh generation is running
@@ -516,6 +523,7 @@ func rebuild_terrain() -> void:
 	for feature in _height_feature_nodes:
 		if is_instance_valid(feature) and feature.is_inside_tree() and feature.visible:
 			feature_contexts[feature] = feature.prepare_evaluation_context()
+	_cached_feature_contexts = feature_contexts  # Cache for public query APIs
 	var context_elapsed = Time.get_ticks_msec() - context_start
 	print("[TerrainComposer] Rebuild #%d prepared %d contexts in %d ms" % [_rebuild_id, feature_contexts.size(), context_elapsed])
 	
@@ -787,7 +795,7 @@ func _apply_pending_chunk_results() -> void:
 		chunk.heightmap = result["heightmap"]
 		chunk.hole_mask = result.get("hole_mask", null)
 		chunk.lod_level = result["lod_level"]
-		chunk.is_dirty = false
+		_chunk_manager.mark_chunk_clean(chunk)
 		_update_chunk_collision(chunk)
 	
 	_update_material()
@@ -913,13 +921,9 @@ func _update_chunk_collision(chunk) -> void:
 static func _mask_has_holes(mask: Image) -> bool:
 	if not mask:
 		return false
-	var data = mask.get_data()
-	var pixel_count = mask.get_width() * mask.get_height()
-	if pixel_count == 0:
-		return false
-	var bytes_per_pixel = data.size() / pixel_count
-	for i in range(0, data.size(), bytes_per_pixel):
-		if data.decode_float(i) > 0.5:
+	var float_data := mask.get_data().to_float32_array()
+	for i in float_data.size():
+		if float_data[i] > 0.5:
 			return true
 	return false
 
@@ -946,6 +950,18 @@ func _update_chunk_lod() -> void:
 		return
 	
 	var camera_pos = camera.global_position
+	
+	# Skip per-frame iteration when camera hasn't moved meaningfully
+	if _lod_last_camera_valid:
+		var movement = camera_pos.distance_to(_lod_last_camera_pos)
+		# Use 10% of the smallest LOD distance threshold as the movement threshold
+		var min_lod = lod_distances[0] if not lod_distances.is_empty() else 500.0
+		if movement < min_lod * 0.1:
+			return
+	
+	_lod_last_camera_pos = camera_pos
+	_lod_last_camera_valid = true
+	
 	for chunk in _chunk_manager.get_chunks().values():
 		var center = Vector3(
 			chunk.world_bounds.position.x + chunk.world_bounds.size.x * 0.5,
@@ -956,7 +972,7 @@ func _update_chunk_lod() -> void:
 		var new_lod = _calculate_lod_level(distance)
 		if new_lod != chunk.lod_level:
 			chunk.lod_level = new_lod
-			chunk.is_dirty = true
+			_chunk_manager.mark_chunk_dirty(chunk)
 
 func _calculate_lod_level(distance: float) -> int:
 	if lod_distances.is_empty() or lod_scale_factors.is_empty():
@@ -1023,10 +1039,14 @@ func get_water_level_at_world_position(world_pos: Vector3) -> float:
 	return level
 
 ## Returns an array of all features whose influence area contains the world position.
+## Uses cached evaluation contexts from the last rebuild when available to avoid
+## per-query context allocation overhead.
 func get_features_at_world_position(world_pos: Vector3) -> Array[TerrainFeatureNode]:
 	var result: Array[TerrainFeatureNode] = []
 	for feature in _feature_nodes:
-		var ctx = feature.prepare_evaluation_context()
+		var ctx = _cached_feature_contexts.get(feature)
+		if ctx == null:
+			ctx = feature.prepare_evaluation_context()
 		if feature.get_influence_weight_safe(world_pos, ctx) > 0.0:
 			result.append(feature)
 	return result

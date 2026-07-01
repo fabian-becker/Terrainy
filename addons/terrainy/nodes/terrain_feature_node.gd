@@ -454,9 +454,26 @@ func get_influence_aabb() -> AABB:
 		_:
 			half_size = influence_size * 0.5
 	
+	# Compute rotation-aware AABB by transforming influence shape corners
+	var corners = [
+		global_transform * Vector3(-half_size.x, 0, -half_size.y),
+		global_transform * Vector3(half_size.x, 0, -half_size.y),
+		global_transform * Vector3(half_size.x, 0, half_size.y),
+		global_transform * Vector3(-half_size.x, 0, half_size.y)
+	]
+	var min_x = INF
+	var min_z = INF
+	var max_x = -INF
+	var max_z = -INF
+	for corner in corners:
+		min_x = min(min_x, corner.x)
+		min_z = min(min_z, corner.z)
+		max_x = max(max_x, corner.x)
+		max_z = max(max_z, corner.z)
+	
 	return AABB(
-		global_position + Vector3(-half_size.x, -100, -half_size.y),
-		Vector3(half_size.x * 2.0, 200, half_size.y * 2.0)
+		Vector3(min_x, global_position.y - 100, min_z),
+		Vector3(max_x - min_x, 200, max_z - min_z)
 	)
 
 ## Helper to check if gizmo is currently manipulating this node

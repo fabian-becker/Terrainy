@@ -88,10 +88,57 @@ func compose(
 	var gpu_eval_count := 0
 	
 	# Separate features into: need generation vs cached
+	# Pre-pass: collect features for batch GPU evaluation to reduce submit+sync stalls
+	var gpu_batch_features: Array = []
+	var gpu_batch_packs: Array = []
 	for feature in features:
 		if not is_instance_valid(feature) or not feature.is_inside_tree() or not feature.visible:
 			if _has_heightmap_cached(feature):
 				_remove_cached_heightmap(feature)
+			continue
+		if not _has_heightmap_cached(feature) or feature.is_dirty():
+			var has_mask = feature.has_method("has_mask_texture") and feature.has_mask_texture()
+			if not has_mask and _should_use_gpu(use_gpu_composition) and _gpu_feature_evaluator:
+				if feature.has_method("get_gpu_param_pack"):
+					var pack = feature.get_gpu_param_pack()
+					if GpuFeatureEvaluator.SUPPORTED_TYPES.has(pack.get("type", 0)):
+						gpu_batch_features.append(feature)
+						gpu_batch_packs.append(pack)
+						continue  # Will be handled by batch evaluation
+	
+	# Batch GPU feature evaluation: single compute list, single submit+sync
+	if not gpu_batch_features.is_empty():
+		var batch_results = _gpu_feature_evaluator.evaluate_features_gpu_batch(resolution, terrain_bounds, gpu_batch_packs)
+		if batch_results.size() == gpu_batch_features.size():
+			for i in gpu_batch_features.size():
+				var feature = gpu_batch_features[i]
+				var gpu_result = batch_results[i]
+				if gpu_result and feature.has_method("apply_modifiers_to_heightmap"):
+					gpu_result = feature.apply_modifiers_to_heightmap(gpu_result, terrain_bounds, contexts.get(feature))
+				_store_heightmap(feature, gpu_result)
+				gpu_eval_count += 1
+				generated_count += 1
+		else:
+			push_warning("[TerrainHeightmapBuilder] Batch GPU evaluation returned %d results for %d features, falling back to per-feature" % [batch_results.size(), gpu_batch_features.size()])
+			# Fallback: evaluate individually
+			for i in gpu_batch_features.size():
+				var feature = gpu_batch_features[i]
+				var gpu_result = _gpu_feature_evaluator.evaluate_single_feature_gpu(resolution, terrain_bounds, gpu_batch_packs[i])
+				if gpu_result:
+					if feature.has_method("apply_modifiers_to_heightmap"):
+						gpu_result = feature.apply_modifiers_to_heightmap(gpu_result, terrain_bounds, contexts.get(feature))
+					_store_heightmap(feature, gpu_result)
+					gpu_eval_count += 1
+					generated_count += 1
+	
+	for feature in features:
+		if not is_instance_valid(feature) or not feature.is_inside_tree() or not feature.visible:
+			if _has_heightmap_cached(feature):
+				_remove_cached_heightmap(feature)
+			continue
+		
+		# Skip features already handled by batch GPU evaluation
+		if gpu_batch_features.has(feature):
 			continue
 		
 		# Check if we need to regenerate this feature's heightmap
@@ -235,6 +282,42 @@ func _compose_gpu(
 	var influence_generated_count = 0
 	var influence_cached_count = 0
 	
+	# First pass: identify features that need GPU influence map generation (uncached, no mask)
+	var batch_gpu_features: Array = []  # Features for batch GPU influence generation
+	var batch_feature_info: Array = []  # Parallel array with feature metadata for later lookup
+	
+	for feature in features:
+		if not _has_heightmap_cached(feature):
+			continue
+		var feature_map = _get_cached_heightmap(feature)
+		if feature_map.get_width() != resolution.x or feature_map.get_height() != resolution.y:
+			continue
+		var is_hole = feature.is_hole_feature()
+		if is_hole:
+			hole_features.append(feature)
+		var has_mask = feature.has_method("has_mask_texture") and feature.has_mask_texture()
+		var cache_key = _get_influence_cache_key(feature)
+		var is_cached = _influence_cache.has(feature) and _influence_cache_keys.get(feature) == cache_key
+		if not is_cached and not has_mask and not is_hole and _gpu_compositor and _gpu_compositor.is_available():
+			batch_gpu_features.append(feature)
+			batch_feature_info.append({"feature": feature, "cache_key": cache_key})
+		elif is_cached:
+			influence_cached_count += 1
+	
+	# Batch-generate all uncached GPU influence maps in a single compute list
+	if not batch_gpu_features.is_empty():
+		var inf_start = Time.get_ticks_msec()
+		var batch_results = _gpu_compositor.generate_influence_maps_gpu_batch(batch_gpu_features, resolution, terrain_bounds)
+		if batch_results.size() == batch_gpu_features.size():
+			for i in batch_results.size():
+				var info = batch_feature_info[i]
+				_influence_cache[info.feature] = batch_results[i]
+				_influence_cache_keys[info.feature] = info.cache_key
+				influence_generated_count += 1
+		else:
+			push_warning("[TerrainHeightmapBuilder] Batch GPU influence generation returned %d results for %d features" % [batch_results.size(), batch_gpu_features.size()])
+		influence_gen_time += Time.get_ticks_msec() - inf_start
+	
 	# Collect valid features
 	for feature in features:
 		if not _has_heightmap_cached(feature):
@@ -248,8 +331,6 @@ func _compose_gpu(
 		
 		# Check if this is a hole feature
 		var is_hole = feature.is_hole_feature()
-		if is_hole:
-			hole_features.append(feature)
 		
 		# Check if feature has a mask texture (GPU influence maps don't support textures)
 		var has_mask = feature.has_method("has_mask_texture") and feature.has_mask_texture()
@@ -260,7 +341,6 @@ func _compose_gpu(
 		
 		if _influence_cache.has(feature) and _influence_cache_keys.get(feature) == cache_key:
 			influence_map = _influence_cache[feature]
-			influence_cached_count += 1
 		else:
 			var inf_start = Time.get_ticks_msec()
 			# Use GPU to generate influence map for better performance (unless masked)
@@ -388,7 +468,8 @@ func _compose_cpu(
 			"heightmap": feature_map,
 			"influence": influence_map,
 			"blend_mode": feature.blend_mode,
-			"strength": feature.strength
+			"strength": feature.strength,
+			"active_bounds": _compute_influence_bounds(influence_map, resolution)
 		})
 	
 	# Step 2: Blend using optimized byte array operations (if there are non-hole features)
@@ -408,7 +489,8 @@ func _compose_cpu(
 		"hole_mask": hole_mask
 	}
 
-## Blend all features into final map using PackedFloat32Array operations
+## Blend all features into final map using PackedFloat32Array operations.
+## Iterates only the active (non-zero influence) pixel bounds per feature.
 func _blend_all_features(
 	final_map: Image,
 	blend_data: Array,
@@ -426,35 +508,69 @@ func _blend_all_features(
 		var influence_data := influence_map.get_data().to_float32_array()
 		var blend_mode: int = data["blend_mode"]
 		var strength: float = data["strength"]
+		var bounds: Rect2i = data.get("active_bounds", Rect2i(0, 0, width, height))
 		
-		# Process all pixels natively
-		for i in final_data.size():
-			var weight = influence_data[i]
-			if weight <= INFLUENCE_WEIGHT_THRESHOLD:
-				continue
-			
-			var feature_h = feature_data[i]
-			var current_h = final_data[i]
-			var weighted_h = feature_h * weight * strength
-			
-			match blend_mode:
-				TerrainFeatureNode.BlendMode.ADD:
-					final_data[i] = current_h + weighted_h
-				TerrainFeatureNode.BlendMode.SUBTRACT:
-					final_data[i] = current_h - weighted_h
-				TerrainFeatureNode.BlendMode.MAX:
-					final_data[i] = max(current_h, feature_h * weight)
-				TerrainFeatureNode.BlendMode.MIN:
-					final_data[i] = min(current_h, feature_h * weight)
-				TerrainFeatureNode.BlendMode.MULTIPLY:
-					final_data[i] = current_h * (1.0 + weighted_h)
-				TerrainFeatureNode.BlendMode.AVERAGE:
-					final_data[i] = (current_h + weighted_h) * 0.5
-				_:
-					final_data[i] = current_h + weighted_h
+		# Process only active pixels
+		var y_start = bounds.position.y
+		var y_end = bounds.position.y + bounds.size.y
+		var x_start = bounds.position.x
+		var x_end = bounds.position.x + bounds.size.x
+		
+		for y in range(y_start, y_end):
+			var row_offset = y * width
+			for x in range(x_start, x_end):
+				var i = row_offset + x
+				var weight = influence_data[i]
+				if weight <= INFLUENCE_WEIGHT_THRESHOLD:
+					continue
+				
+				var feature_h = feature_data[i]
+				var current_h = final_data[i]
+				var weighted_h = feature_h * weight * strength
+				
+				match blend_mode:
+					TerrainFeatureNode.BlendMode.ADD:
+						final_data[i] = current_h + weighted_h
+					TerrainFeatureNode.BlendMode.SUBTRACT:
+						final_data[i] = current_h - weighted_h
+					TerrainFeatureNode.BlendMode.MAX:
+						final_data[i] = max(current_h, feature_h * weight)
+					TerrainFeatureNode.BlendMode.MIN:
+						final_data[i] = min(current_h, feature_h * weight)
+					TerrainFeatureNode.BlendMode.MULTIPLY:
+						final_data[i] = current_h * (1.0 + weighted_h)
+					TerrainFeatureNode.BlendMode.AVERAGE:
+						final_data[i] = (current_h + weighted_h) * 0.5
+					_:
+						final_data[i] = current_h + weighted_h
 	
 	# Write back once
 	final_map.set_data(width, height, false, Image.FORMAT_RF, final_data.to_byte_array())
+
+## Compute the pixel-space bounding box of non-zero influence pixels.
+## Returns a Rect2i covering the active region; falls back to full resolution if all zeros.
+func _compute_influence_bounds(influence_map: Image, resolution: Vector2i) -> Rect2i:
+	var data := influence_map.get_data().to_float32_array()
+	var width = resolution.x
+	var height = resolution.y
+	var min_x: int = width
+	var min_y: int = height
+	var max_x: int = -1
+	var max_y: int = -1
+	
+	for y in height:
+		var row_offset = y * width
+		for x in width:
+			if data[row_offset + x] > INFLUENCE_WEIGHT_THRESHOLD:
+				if x < min_x: min_x = x
+				if x > max_x: max_x = x
+				if y < min_y: min_y = y
+				if y > max_y: max_y = y
+	
+	if max_x < 0:
+		return Rect2i(0, 0, 0, 0)  # No active pixels
+	
+	return Rect2i(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
 
 ## Generate influence map for a feature using context (thread-safe)
 func _generate_influence_map(
@@ -500,8 +616,6 @@ func _compose_hole_mask(
 	var hole_mask_data := hole_mask.get_data().to_float32_array()
 	var width = resolution.x
 	var height = resolution.y
-	
-	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
 	
 	for feature in hole_features:
 		if not is_instance_valid(feature):

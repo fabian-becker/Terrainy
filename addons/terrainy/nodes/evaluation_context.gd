@@ -64,10 +64,8 @@ static func from_feature(feature: TerrainFeatureNode) -> EvaluationContext:
 	ctx.strength = feature.strength
 	ctx.blend_mode = feature.blend_mode
 	
-	# Pre-compute AABB for spatial culling
-	var half_extents = get_influence_half_extents(ctx.influence_shape, ctx.influence_size)
-	var half_size = Vector3(half_extents.x, 1000.0, half_extents.y)
-	ctx.aabb = AABB(ctx.world_position - half_size, half_size * 2.0)
+	# Pre-compute AABB for spatial culling (rotation-aware)
+	ctx.aabb = compute_rotation_aware_aabb(feature.global_transform, ctx.world_position, ctx.influence_shape, ctx.influence_size)
 	
 	# Capture optional mask texture data for thread-safe sampling
 	if feature.has_method("has_mask_texture") and feature.has_mask_texture():
@@ -90,6 +88,29 @@ static func get_influence_half_extents(shape: int, size: Vector2) -> Vector2:
 static func get_influence_radius(shape: int, size: Vector2) -> float:
 	var half_extents = get_influence_half_extents(shape, size)
 	return max(half_extents.x, half_extents.y)
+
+## Compute a rotation-aware AABB by transforming influence shape corners through the feature's global transform.
+## Used for spatial culling and pixel-bounds clipping in influence map generation.
+static func compute_rotation_aware_aabb(global_transform: Transform3D, world_position: Vector3, shape: int, size: Vector2) -> AABB:
+	var half_extents = get_influence_half_extents(shape, size)
+	var corners = [
+		global_transform * Vector3(-half_extents.x, 0, -half_extents.y),
+		global_transform * Vector3(half_extents.x, 0, -half_extents.y),
+		global_transform * Vector3(half_extents.x, 0, half_extents.y),
+		global_transform * Vector3(-half_extents.x, 0, half_extents.y)
+	]
+	var min_x: float = INF
+	var min_z: float = INF
+	var max_x: float = -INF
+	var max_z: float = -INF
+	for corner in corners:
+		min_x = min(min_x, corner.x)
+		min_z = min(min_z, corner.z)
+		max_x = max(max_x, corner.x)
+		max_z = max(max_z, corner.z)
+	var half_size = Vector3(max_x - min_x, 2000.0, max_z - min_z) * 0.5
+	var center = Vector3((min_x + max_x) * 0.5, world_position.y, (min_z + max_z) * 0.5)
+	return AABB(center - half_size, half_size * 2.0)
 
 ## Convert world-space position to local-space without scene tree access.
 ## This is the thread-safe replacement for Node3D.to_local()

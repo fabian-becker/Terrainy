@@ -189,3 +189,145 @@ func evaluate_single_feature_gpu(
 	_rd.free_rid(params_buffer)
 	
 	return result_image
+
+## Evaluate multiple features on GPU in a single compute list with a single submit+sync.
+## Returns an array of Images (one per param_pack, same order as input).
+func evaluate_features_gpu_batch(
+	resolution: Vector2i,
+	terrain_bounds: Rect2,
+	param_packs: Array
+) -> Array:
+	if not _initialized:
+		push_error("[GpuFeatureEvaluator] GPU evaluator not initialized")
+		return []
+	if param_packs.is_empty():
+		return []
+	
+	var output_textures: Array[RID] = []
+	var uniform_sets: Array[RID] = []
+	var float_buffers: Array[RID] = []
+	var int_buffers: Array[RID] = []
+	var params_buffers: Array[RID] = []
+	
+	var output_format := RDTextureFormat.new()
+	output_format.width = resolution.x
+	output_format.height = resolution.y
+	output_format.format = RenderingDevice.DATA_FORMAT_R32_SFLOAT
+	output_format.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
+	
+	# Create all resources upfront
+	for pack in param_packs:
+		if not pack.has("floats") or not pack.has("ints") or not pack.has("type"):
+			push_error("[GpuFeatureEvaluator] Invalid parameter pack in batch")
+			# Cleanup already-created resources
+			for i in output_textures.size(): _rd.free_rid(output_textures[i])
+			for i in float_buffers.size(): _rd.free_rid(float_buffers[i])
+			for i in int_buffers.size(): _rd.free_rid(int_buffers[i])
+			for i in params_buffers.size(): _rd.free_rid(params_buffers[i])
+			for i in uniform_sets.size(): _rd.free_rid(uniform_sets[i])
+			return []
+		
+		var floats: PackedFloat32Array = pack["floats"]
+		var ints: PackedInt32Array = pack["ints"]
+		var feature_type: int = pack["type"]
+		
+		var output_texture := _rd.texture_create(output_format, RDTextureView.new())
+		if not output_texture.is_valid():
+			push_error("[GpuFeatureEvaluator] Failed to create output texture in batch")
+			for i in output_textures.size(): _rd.free_rid(output_textures[i])
+			for i in float_buffers.size(): _rd.free_rid(float_buffers[i])
+			for i in int_buffers.size(): _rd.free_rid(int_buffers[i])
+			for i in params_buffers.size(): _rd.free_rid(params_buffers[i])
+			for i in uniform_sets.size(): _rd.free_rid(uniform_sets[i])
+			return []
+		output_textures.append(output_texture)
+		
+		var float_bytes := floats.to_byte_array()
+		var int_bytes := PackedByteArray()
+		int_bytes.resize(ints.size() * 4)
+		for i in ints.size():
+			int_bytes.encode_s32(i * 4, ints[i])
+		
+		var float_buffer := _rd.storage_buffer_create(float_bytes.size(), float_bytes)
+		var int_buffer := _rd.storage_buffer_create(int_bytes.size(), int_bytes)
+		float_buffers.append(float_buffer)
+		int_buffers.append(int_buffer)
+		
+		var params_bytes := PackedByteArray()
+		params_bytes.resize(48)
+		params_bytes.encode_s32(0, resolution.x)
+		params_bytes.encode_s32(4, resolution.y)
+		params_bytes.encode_s32(8, feature_type)
+		params_bytes.encode_s32(12, floats.size())
+		params_bytes.encode_s32(16, ints.size())
+		params_bytes.encode_float(20, terrain_bounds.position.x)
+		params_bytes.encode_float(24, terrain_bounds.position.y)
+		params_bytes.encode_float(28, terrain_bounds.size.x)
+		params_bytes.encode_float(32, terrain_bounds.size.y)
+		params_bytes.encode_s32(36, 0)
+		params_bytes.encode_s32(40, 0)
+		params_bytes.encode_s32(44, 0)
+		
+		var params_buffer := _rd.uniform_buffer_create(params_bytes.size(), params_bytes)
+		params_buffers.append(params_buffer)
+		
+		var uniforms: Array[RDUniform] = []
+		var output_uniform := RDUniform.new()
+		output_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+		output_uniform.binding = 0
+		output_uniform.add_id(output_texture)
+		uniforms.append(output_uniform)
+		
+		var float_uniform := RDUniform.new()
+		float_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+		float_uniform.binding = 1
+		float_uniform.add_id(float_buffer)
+		uniforms.append(float_uniform)
+		
+		var int_uniform := RDUniform.new()
+		int_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+		int_uniform.binding = 2
+		int_uniform.add_id(int_buffer)
+		uniforms.append(int_uniform)
+		
+		var params_uniform := RDUniform.new()
+		params_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+		params_uniform.binding = 3
+		params_uniform.add_id(params_buffer)
+		uniforms.append(params_uniform)
+		
+		var uniform_set := _rd.uniform_set_create(uniforms, _shader, 0)
+		uniform_sets.append(uniform_set)
+	
+	# Dispatch all features in a single compute list
+	var compute_list := _rd.compute_list_begin()
+	_rd.compute_list_bind_compute_pipeline(compute_list, _pipeline)
+	
+	var dispatch_x := ceili(resolution.x / 8.0)
+	var dispatch_y := ceili(resolution.y / 8.0)
+	
+	for i in param_packs.size():
+		_rd.compute_list_bind_uniform_set(compute_list, uniform_sets[i], 0)
+		_rd.compute_list_dispatch(compute_list, dispatch_x, dispatch_y, 1)
+	
+	_rd.compute_list_end()
+	
+	# Single submit+sync for all dispatches
+	_rd.submit()
+	_rd.sync()
+	
+	# Read back all results
+	var results: Array = []
+	for i in output_textures.size():
+		var output_bytes := _rd.texture_get_data(output_textures[i], 0)
+		var result_image := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, output_bytes)
+		results.append(result_image)
+	
+	# Cleanup all resources
+	for i in uniform_sets.size(): _rd.free_rid(uniform_sets[i])
+	for i in output_textures.size(): _rd.free_rid(output_textures[i])
+	for i in float_buffers.size(): _rd.free_rid(float_buffers[i])
+	for i in int_buffers.size(): _rd.free_rid(int_buffers[i])
+	for i in params_buffers.size(): _rd.free_rid(params_buffers[i])
+	
+	return results

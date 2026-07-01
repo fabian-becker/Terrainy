@@ -158,6 +158,10 @@ func _apply_smoothing_pass(
 	var step_x := terrain_bounds.size.x / float(width - 1)
 	var step_y := terrain_bounds.size.y / float(height - 1)
 
+	# Precompute loop-invariant normalization factor
+	var inv_step_min: float = 1.0 / min(step_x, step_y)
+	var inv_norm: float = 1.0 / (sample_radius * inv_step_min * 1.5)
+
 	for y in height:
 		for x in width:
 			var idx := y * width + x
@@ -174,8 +178,7 @@ func _apply_smoothing_pass(
 				var sidx := sy * width + sx
 				var sample_h := data[sidx]
 				var dist := sqrt(float(ox * ox) + float(oy * oy))
-				var w: float = 1.0 - (dist / (sample_radius / min(step_x, step_y) * 1.5))
-				w = max(0.0, w)
+				var w: float = max(0.0, 1.0 - dist * inv_norm)
 				total_h += sample_h * w
 				total_w += w
 

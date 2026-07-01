@@ -92,7 +92,8 @@ func apply_modifiers(
 		if input_heightmap.get_format() != Image.FORMAT_RF:
 			input_heightmap.convert(Image.FORMAT_RF)
 	
-	var input_texture := _rd.texture_create(input_format, RDTextureView.new(), [input_heightmap.get_data()])
+	var height_bytes := input_heightmap.get_data()
+	var input_texture := _rd.texture_create(input_format, RDTextureView.new(), [height_bytes])
 	if not input_texture.is_valid():
 		push_error("[GpuHeightmapModifier] Failed to create input texture")
 		return null
@@ -132,9 +133,10 @@ func apply_modifiers(
 	var step_y := terrain_bounds.size.y / float(max(resolution.y - 1, 1))
 	
 	# Compute max absolute height for terracing normalization (matches CPU path)
+	# Only scan when terracing is enabled; reuse already-extracted byte data to avoid redundant get_data()
 	var max_abs_height := 0.0
 	if enable_terracing:
-		var height_data := input_heightmap.get_data().to_float32_array()
+		var height_data := height_bytes.to_float32_array()
 		for h in height_data:
 			max_abs_height = max(max_abs_height, abs(h))
 		if max_abs_height < 0.001:

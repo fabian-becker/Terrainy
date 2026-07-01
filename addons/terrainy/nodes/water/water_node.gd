@@ -386,12 +386,17 @@ func _build_water_mesh() -> void:
 					var radius = max(size_x, size_z) * 0.5
 					nd = Vector2(local_x, local_z).length() / max(radius, 0.0001)
 				InfluenceShape.ELLIPSE:
-					var half_x = size_x * 0.5
-					var half_z = size_z * 0.5
-					nd = sqrt((local_x / max(half_x, 0.0001)) * (local_x / max(half_x, 0.0001)) + (local_z / max(half_z, 0.0001)) * (local_z / max(half_z, 0.0001)))
+					var inv_half_x = 1.0 / max(size_x * 0.5, 0.0001)
+					var inv_half_z = 1.0 / max(size_z * 0.5, 0.0001)
+					var nx = local_x * inv_half_x
+					var nz = local_z * inv_half_z
+					var nd_sq = nx * nx + nz * nz
+					valid[vert_idx] = 1 if nd_sq <= 1.0404 else 0  # 1.02^2 = 1.0404
+					vert_idx += 1
+					continue
 				_:
 					nd = 0.0
-			
+		
 			valid[vert_idx] = 1 if nd <= 1.02 else 0
 			vert_idx += 1
 	
