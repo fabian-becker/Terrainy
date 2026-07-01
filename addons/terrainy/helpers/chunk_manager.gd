@@ -23,6 +23,7 @@ var _chunk_root: Node3D = null
 var _terrain_size: Vector2 = Vector2(100, 100)
 var _chunk_size: int = 512
 var _terrain_origin_world: Vector2 = Vector2.ZERO
+var _dirty_count: int = 0  # O(1) dirty chunk tracking
 
 func _init(parent: Node3D) -> void:
 	_chunk_root = Node3D.new()
@@ -68,28 +69,40 @@ func update_grid(terrain_size: Vector2, chunk_size: int, terrain_origin_world: V
 	return grid_changed
 
 func mark_all_dirty() -> void:
+	_dirty_count = _chunks.size()
 	for chunk in _chunks.values():
 		chunk.is_dirty = true
 
 func mark_dirty_for_bounds(bounds: Rect2) -> void:
 	for chunk in _chunks.values():
-		if chunk.world_bounds.intersects(bounds):
+		if chunk.world_bounds.intersects(bounds) and not chunk.is_dirty:
 			chunk.is_dirty = true
+			_dirty_count += 1
 
 func get_chunks() -> Dictionary:
 	return _chunks
 
 func has_dirty_chunks() -> bool:
-	for chunk in _chunks.values():
-		if chunk.is_dirty:
-			return true
-	return false
+	return _dirty_count > 0
+
+## Mark a single chunk as dirty (O(1), no-op if already dirty)
+func mark_chunk_dirty(chunk) -> void:
+	if not chunk.is_dirty:
+		chunk.is_dirty = true
+		_dirty_count += 1
+
+## Mark a single chunk as clean (O(1), no-op if already clean)
+func mark_chunk_clean(chunk) -> void:
+	if chunk.is_dirty:
+		chunk.is_dirty = false
+		_dirty_count -= 1
 
 func get_dirty_chunks() -> Array:
 	var result: Array = []
 	for chunk in _chunks.values():
 		if chunk.is_dirty:
 			result.append(chunk)
+	_dirty_count = result.size()  # Recalibrate count
 	return result
 
 func get_chunk_grid_size() -> Vector2i:

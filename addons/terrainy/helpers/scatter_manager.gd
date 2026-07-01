@@ -14,6 +14,11 @@ var _terrain_bounds: Rect2 = Rect2()
 var _base_height: float = 0.0
 var _resolution: int = 128
 
+# Pre-extracted heightmap data for fast sampling (avoids per-pixel get_pixel() overhead)
+var _heightmap_data: PackedFloat32Array = PackedFloat32Array()
+var _heightmap_w: int = 0
+var _heightmap_h: int = 0
+
 func _init(composer: Node3D) -> void:
 	_terrain_composer = composer
 
@@ -22,6 +27,14 @@ func set_terrain_data(heightmap: Image, bounds: Rect2, base_height: float, resol
 	_terrain_bounds = bounds
 	_base_height = base_height
 	_resolution = resolution
+	if _final_heightmap:
+		_heightmap_data = _final_heightmap.get_data().to_float32_array()
+		_heightmap_w = _final_heightmap.get_width()
+		_heightmap_h = _final_heightmap.get_height()
+	else:
+		_heightmap_data.clear()
+		_heightmap_w = 0
+		_heightmap_h = 0
 
 func refresh_scatter(scatter_nodes: Array, feature_nodes: Array[TerrainFeatureNode]) -> void:
 	for scatter in scatter_nodes:
@@ -231,7 +244,7 @@ func _find_parent_feature(scatter: ScatterNode) -> TerrainFeatureNode:
 	return null
 
 func _sample_height_at(world_x: float, world_z: float) -> float:
-	if _final_heightmap == null:
+	if _heightmap_data.is_empty():
 		return _base_height
 
 	var u = (world_x - _terrain_bounds.position.x) / max(_terrain_bounds.size.x, 0.0001)
@@ -239,11 +252,27 @@ func _sample_height_at(world_x: float, world_z: float) -> float:
 	u = clampf(u, 0.0, 1.0)
 	v = clampf(v, 0.0, 1.0)
 
-	var ix = int(round(u * float(_final_heightmap.get_width() - 1)))
-	var iy = int(round(v * float(_final_heightmap.get_height() - 1)))
+	# Bilinear interpolation for smooth height sampling (matches get_height_at_world_position)
+	var px = u * float(_heightmap_w - 1)
+	var py = v * float(_heightmap_h - 1)
+	var x0 = int(floor(px))
+	var y0 = int(floor(py))
+	var x1 = mini(x0 + 1, _heightmap_w - 1)
+	var y1 = mini(y0 + 1, _heightmap_h - 1)
+	var dx = px - float(x0)
+	var dy = py - float(y0)
+
+	var h00 = _heightmap_data[y0 * _heightmap_w + x0]
+	var h10 = _heightmap_data[y0 * _heightmap_w + x1]
+	var h01 = _heightmap_data[y1 * _heightmap_w + x0]
+	var h11 = _heightmap_data[y1 * _heightmap_w + x1]
+	var h0 = lerp(h00, h10, dx)
+	var h1 = lerp(h01, h11, dx)
+	var height = lerp(h0, h1, dy)
+
 	if _terrain_composer:
-		return _terrain_composer.global_position.y + _final_heightmap.get_pixel(ix, iy).r
-	return _final_heightmap.get_pixel(ix, iy).r
+		return _terrain_composer.global_position.y + height
+	return height
 
 func _sample_normal_at(world_x: float, world_z: float) -> Vector3:
 	var sample_step_x = max(_terrain_bounds.size.x / max(float(_resolution), 1.0), 0.5)

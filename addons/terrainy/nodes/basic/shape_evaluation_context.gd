@@ -42,9 +42,7 @@ static func from_shape_feature(
 	ctx.strength = feature.strength
 	ctx.blend_mode = feature.blend_mode
 
-	var half_extents = EvaluationContext.get_influence_half_extents(ctx.influence_shape, ctx.influence_size)
-	var half_size = Vector3(half_extents.x, 1000.0, half_extents.y)
-	ctx.aabb = AABB(ctx.world_position - half_size, half_size * 2.0)
+	ctx.aabb = EvaluationContext.compute_rotation_aware_aabb(feature.global_transform, ctx.world_position, ctx.influence_shape, ctx.influence_size)
 
 	# Add shape-specific properties
 	ctx.shape_height = height
