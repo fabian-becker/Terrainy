@@ -13,7 +13,8 @@ env:
 
 jobs:
   headless-tests:
-    name: Headless test suite (Godot ${{ env.GODOT_VERSION }})
+    # The `env` context is NOT available in `jobs.<job_id>.name`, so the version is literal here.
+    name: Headless test suite (Godot 4.7.2)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
