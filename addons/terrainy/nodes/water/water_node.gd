@@ -7,11 +7,16 @@ const WaterSettingsRes = preload("res://addons/terrainy/resources/water_settings
 
 ## A water body that carves terrain and renders a water surface.
 ## Creates depressions filled with water at a specified level.
+##
+## [member water_level] is a world-space height: the rendered surface sits exactly at
+## world Y = water_level regardless of where the node is placed, and the carving, the
+## query APIs and the surface mesh all use that same value.
 
 signal water_mesh_updated
 
 @export_group("Terrain Carving")
-## Height of the water surface in world coordinates
+## Height of the water surface in world coordinates. The water surface mesh is placed at
+## this world Y, so moving the node vertically does not move the surface.
 @export var water_level: float = 0.0:
 	set(value):
 		water_level = value
@@ -235,6 +240,7 @@ func _create_water_mesh_instance() -> void:
 		add_child(_water_mesh_instance, false, Node.INTERNAL_MODE_BACK)
 	
 	_setup_default_material()
+	_update_water_surface_height()
 
 func _setup_default_material() -> void:
 	if not _water_shader_material:
@@ -316,6 +322,10 @@ func _update_water_mesh() -> void:
 	if not _water_mesh_instance or not is_instance_valid(_water_mesh_instance):
 		_create_water_mesh_instance()
 
+	# The surface height is a cheap local offset, keep it current even when the mesh
+	# rebuild below gets debounced (e.g. the node is being dragged).
+	_update_water_surface_height()
+
 	# Debounce: don't rebuild more often than REBUILD_DEBOUNCE_SEC
 	if _rebuild_timer and _rebuild_timer.is_stopped() == false:
 		_pending_mesh_rebuild = true
@@ -354,7 +364,8 @@ func _build_water_mesh() -> void:
 			size_x = influence_size.x
 			size_z = influence_size.y
 	
-	var water_y = water_level - global_position.y
+	# The surface is flat in local space; the world height comes from the child offset.
+	_update_water_surface_height()
 	
 	var half_res_x = mesh_resolution / 2
 	var half_res_z = mesh_resolution / 2
@@ -377,7 +388,7 @@ func _build_water_mesh() -> void:
 			var local_x = (x - half_res_x) * step_x
 			var local_z = (z - half_res_z) * step_z
 			
-			all_vertices[vert_idx] = Vector3(local_x, water_y, local_z)
+			all_vertices[vert_idx] = Vector3(local_x, 0.0, local_z)
 			all_uvs[vert_idx] = Vector2(x / float(mesh_resolution), z / float(mesh_resolution))
 			
 			var nd: float
@@ -483,6 +494,14 @@ func _ensure_water_mesh() -> void:
 		_create_water_mesh_instance()
 	if generate_water_mesh and (_water_mesh_instance.mesh == null or not _water_mesh_instance.visible):
 		_update_water_mesh()
+
+## Keeps the water surface at [member water_level] in world space.
+## The mesh instance is a child of this node, so the difference between the world level and
+## the node's own Y position has to be applied as a local offset.
+func _update_water_surface_height() -> void:
+	if not _water_mesh_instance or not is_instance_valid(_water_mesh_instance):
+		return
+	_water_mesh_instance.position.y = water_level - global_position.y
 
 func _connect_to_composer() -> void:
 	_disconnect_from_composer()

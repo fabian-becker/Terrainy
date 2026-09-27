@@ -5,6 +5,55 @@ All notable changes to the Terrainy plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Runtime terrain queries** on `TerrainComposer`: `get_height_at_world_position()` (bilinear sample of the composed heightmap, world space, `base_height` included) and `is_hole_at_world_position()` (bilinear sample of the hole mask) for placing objects, water and gameplay logic without raycasts
+- **`noise_seed` export** on noise-based feature nodes (noise, primitives, landscapes). Terrain is deterministic by default: rebuilds, bakes and scene reloads reproduce the exact same noise
+- **GPU feature evaluation opt-in** on `TerrainComposer`: `use_gpu_feature_evaluation` (on) evaluates noise-free features with the compute kernels at CPU parity. Noise-based features always stay on the CPU, so the preview, the bake and the runtime terrain agree
+- **`texture_array_size`** (256–8192, default 2048) on `TerrainComposer` to control the resolution of the terrain texture `Texture2DArray`
+- **`debug_logging`** on `TerrainComposer`: per-rebuild timings, compose/feature cache statistics, GPU-vs-CPU feature evaluation counts and a one-line summary of every rebuild through `TerrainDiagnostics`
+- **`chunk_apply_budget_ms`** (0–100, default 8) on `TerrainComposer`: main-thread milliseconds a single frame may spend applying finished chunk meshes and collision shapes. Worker results are queued and drained over several frames instead of blocking the editor on one long frame; `0` applies every finished result in the frame it arrives (the behaviour before frame budgeting, useful for baking and tests)
+- **`collision_quality`** (`Exact`/`Balanced`/`Fast`) and **`collision_triangle_budget`** on `TerrainComposer`: the collision mesh of chunks that contain holes (which use a `ConcavePolygonShape3D`) is built from a triangle budget per chunk. Physics shape updates cost roughly 2 µs per triangle, so `Balanced` aims for 65 536 triangles per chunk and `Fast` for 8 192, while `Exact` (the default) keeps the visual geometry. The sample step has to divide the chunk resolution evenly, so a preset can overshoot its budget (on a 513² chunk, which has 524 288 triangles: `Balanced` → step 2 / 131 072 triangles, `Fast` → step 8 / 8 192). `collision_triangle_budget` overrides the preset with an explicit count
+- **Navigation bake hook** on `TerrainComposer`: `generate_navigation_mesh`, `navigation_mesh_template`, `navigation_triangle_budget`, `rebuild_navigation_mesh()`, `get_navigation_mesh()`, `is_baking_navigation_mesh()` and the `navigation_mesh_baked` signal bake a `NavigationMesh` from the terrain surface and keep it on an internal `NavigationRegion3D`. The source geometry is the decimated chunk surface with the holes carved out, so a bake costs a fraction of a bake from the visual meshes
+- **`is_rebuilding()`** on `TerrainComposer`: true while chunk jobs, a queued collision refresh or queued results are still in flight, so tools and gameplay code can wait for a settled terrain instead of counting frames
+- **Headless test suite** in `addons/terrainy/tests` (dependency-free, no GUT) covering heightmap composition, modifiers, material packing, scattering, seed determinism, world-space queries, GPU/CPU parity, collision shapes, navigation and diagnostics, plus a GitHub Actions workflow running it in CI
+
+### Changed
+
+- **Heightmap composition batches GPU work**: all feature heightmaps are evaluated in one compute submit, all influence maps in another, and all feature modifiers are applied in a single batch instead of one submit and one `RenderingDevice` per feature
+- **Modifiers are applied once, by the heightmap builder**, through the shared `ModifierPipeline` in the same order on both paths (smoothing → terracing → clamping, identical normalization and world-space radius semantics)
+- **Cache invalidation is input-driven**: feature bounds, influence maps and per-feature heightmaps are only discarded when an input that can change them is edited. Editing scatter placement settings (density, seed, scene) no longer recomposes the heightmap or regenerates chunk meshes, and cached heightmaps are discarded when the resolution or bounds of the grid change
+- **Scatter instances are only regenerated when their placement signature changes** (terrain content version, node parameters, parent feature revision, transform, scene, scope)
+- **Collision is applied by the rebuild pipeline, never by the setter**: assigning several collision properties in a row (loading a scene, dragging in the inspector) now costs one collision refresh, which is queued and lands over the following frames. Layer/mask changes are pure property writes and are applied before a refresh would be
+- **The composer is split into helpers**: chunk job dispatch and the result queues moved to `helpers/terrain_chunk_pipeline.gd`, the collision geometry to `helpers/terrain_collision_builder.gd`, the navigation source geometry to `helpers/terrain_navigation_builder.gd` and every threshold/report to `helpers/terrain_diagnostics.gd`. `TerrainComposer` keeps orchestration and the public API
+- Texture layers are capped at **32 per terrain material** (`MAX_LAYERS`); exceeding it now prints a warning instead of silently misrendering
+
+### Fixed
+
+- **WaterNode `water_level` is now a world-space height**: the water surface mesh is offset so it always sits at world Y = `water_level`, matching carving and the query APIs. Moving the node vertically no longer moves the surface
+- **CanyonNode meandering had no effect**: the evaluation context never received the node's noise, so `meander_strength` produced straight canyons on the CPU while the GPU kernel meandered. CPU, GPU and bakes now agree
+- **Scatter instances were duplicated on every rebuild**: the container's internal children were skipped when clearing, so each refresh stacked a new set of instances on top of the previous one
+- **A hidden or inactive ScatterNode aborted the whole scatter refresh** (a missing scope passed `null` into an argument typed as `Dictionary`), leaving every other scatter stale
+- **Normal maps are projected top-down**: the decoded map XY is a world XZ height gradient, not a tangent-space normal. The material now perturbs the geometric world normal with that gradient and re-expresses the result in the tangent frame, so slopes are lit correctly instead of as if they were flat
+- **Terrain material shader** now honors texture layer `blend_mode`: **Add** layers contribute additively using their raw height/slope weight and **Multiply** layers modulate the blended result (Normal layers, first-layer fallback, and existing all-Normal stacks behave exactly as before)
+- **GPU helpers crashed the driver in scenes with many Terrainy nodes**: every GPU helper instance (one per feature node owning a modifier pipeline, plus the compositor, feature evaluator and modifier of each builder) created its own local RenderingDevice and never released it. Drivers only allow a handful of logical devices per process, so the next `RenderingServer.create_local_rendering_device()` call died with an access violation, and each editor scene reload leaked another device. All helpers now share one process-wide device (`helpers/gpu_device.gd`)
+- **GPU modifier batching never actually dispatched**: heightmap uploads happened while a compute list was being recorded, which the rendering device rejects, so every batch failed and silently fell back to the CPU implementation. Resources are now prepared before the compute list is opened
+- **Chunk meshes were built off the main thread**, which corrupted the renderer's RID table (`Attempting to initialize the wrong RID`) and led to an intermittent access violation — on Windows usually a crash inside the graphics driver at load time or shutdown, and easier to hit the more chunk builds ran in parallel. Worker threads now only produce raw surface arrays; `ArrayMesh` creation moved to the main thread (`TerrainMeshGenerator.generate_surface_arrays()` / `mesh_from_arrays()`, ~10 ms per 513² chunk)
+- **Feature nodes emitted `changed` twice per edit**, so every parameter change triggered two rebuilds instead of one
+- **Surface normals along the heightmap border were half as steep as they should be**: the one-sided difference at the outer edges was scaled by `0.5 / step` like an interior central difference. Edge shading now matches the interior
+- **The "slow collision update" warning also covers trimesh collisions** and names the shape kind, triangle count and the budget-derived sample step, so the remaining main-thread cost of chunks with holes is visible
+- **Hole detection disagreed by one pixel**: the composer treated a heightmap pixel as a hole above `0.5` while the mesh generator carved from `HOLE_THRESHOLD` upwards, so a pixel at exactly the threshold produced a holed mesh with a hole-filling `HeightMapShape3D`. Both now use the same test
+
+### Performance
+
+- **Mesh builds are ~3.2× faster** (513² chunk: 1124 ms → 351 ms, 257²: 89 ms, 129²: 22 ms). `SurfaceTool.generate_tangents()`, which accounted for ~82 % of the build, is replaced by analytic tangents derived from the height gradient, so tangent generation no longer depends on surface-tool triangle adjacency
+- **Chunk meshes are built in parallel** with a `WorkerThreadPool` group task over a refcounted result holder instead of a serial loop (previously one mesh at a time). Four 513² chunks now finish within ~50 ms of each other instead of ~1.5 s apart, and a rebuild of the demo terrain dropped from ~13.5 s to ~5.2 s (collision shape generation on the main thread is now the dominant remaining cost)
+- **Collision shapes are built from worker-thread data**: the triangle soup of chunks with holes is produced by the same chunk job as the visual mesh (no extra `SurfaceTool`/`ArrayMesh` pass), the shapes are handed to the physics server incrementally and the `ConcavePolygonShape3D` instance is reused across rebuilds. The demo terrain's holed chunk went from ~1350 ms to ~630 ms at the default exact budget, and `collision_quality = Fast` cuts the whole main-thread collision cost to a few tens of milliseconds
+- **Applying a rebuild is frame-budgeted**: finished chunk meshes and collision shapes are drained over several frames (`chunk_apply_budget_ms`), so a large terrain no longer freezes the editor in one multi-second frame while the same work still gets done in the same overall time
+- **Navigation bakes reuse the collision decimation**: the bake is fed the decimated chunk surface instead of the visual meshes (500k+ triangles per 513² chunk that the rasteriser discards anyway), and it runs off the rebuild, on a worker thread when multithreading is on
+
 ## [0.6.0] - 2026-05-03
 
 ### Added
@@ -61,6 +110,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Water shader render mode compatibility
 - Terrain node functionality edge cases
 
+[Unreleased]: https://github.com/LuckyTeapot/terrainy/compare/v0.6.0...HEAD
 [0.6.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.6.0
 
 ## [0.5.1] - 2026-02-12

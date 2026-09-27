@@ -6,7 +6,20 @@ extends RefCounted
 
 const TerrainTextureLayer = preload("res://addons/terrainy/resources/terrain_texture_layer.gd")
 
+## Maximum number of texture array layers supported by the terrain shader.
+const MAX_LAYERS: int = 32
+## Smallest allowed texture array edge length.
+const MIN_ARRAY_SIZE: int = 16
+## Array edge length used when every layer is procedural (no source textures).
+const PROCEDURAL_ONLY_ARRAY_SIZE: int = 256
+
+## Edge length of the generated Texture2DArray. Larger source textures are downscaled to
+## this size; sources are never upscaled.
+var texture_array_size: int = 2048
+
 var _shader_material: ShaderMaterial = null
+## Signature of the last built texture arrays, used to skip redundant rebuilds.
+var _layer_signature: String = ""
 
 ## Update material on a mesh instance with texture layers
 func update_material(
@@ -27,6 +40,7 @@ func update_material(
 		_shader_material = ShaderMaterial.new()
 		var shader = load("res://addons/terrainy/shaders/terrain_material.gdshader")
 		_shader_material.shader = shader
+		_layer_signature = ""
 	# Compatibility renderer: disable AO if texture arrays behave inconsistently
 	_shader_material.set_shader_parameter(
 		"compatibility_disable_ao",
@@ -37,17 +51,98 @@ func update_material(
 	
 	# Update shader with texture layers
 	if texture_layers.is_empty():
-		_shader_material.set_shader_parameter("layer_count", 0)
+		if _layer_signature != "empty":
+			_shader_material.set_shader_parameter("layer_count", 0)
+			_layer_signature = "empty"
 		return
 	
+	# Rebuilding the arrays is expensive (image conversion + upload), so only do it when
+	# something that actually affects the result changed.
+	var signature := _compute_layer_signature(texture_layers)
+	if signature == _layer_signature:
+		return
+	_layer_signature = signature
+	
+	if texture_layers.size() > MAX_LAYERS:
+		push_error("[TerrainMaterialBuilder] %d texture layers found, only the first %d are used (shader limit)" % [
+			texture_layers.size(), MAX_LAYERS
+		])
+	
 	_build_texture_arrays(texture_layers)
+
+## Cheap content signature of all shader-relevant layer settings. Textures contribute their
+## instance id (a changed/regenerated texture resource is a new instance).
+func _compute_layer_signature(texture_layers: Array[TerrainTextureLayer]) -> String:
+	var layer_count := mini(texture_layers.size(), MAX_LAYERS)
+	var parts := PackedStringArray()
+	parts.append("size=%d" % texture_array_size)
+	parts.append("layers=%d" % layer_count)
+	for i in range(layer_count):
+		var layer = texture_layers[i]
+		if not layer:
+			parts.append("null")
+			continue
+		parts.append("|".join([
+			_texture_id(layer.albedo_texture),
+			_texture_id(layer.normal_texture),
+			_texture_id(layer.roughness_texture),
+			_texture_id(layer.metallic_texture),
+			_texture_id(layer.ao_texture),
+			str(layer.albedo_color),
+			str(layer.height_min),
+			str(layer.height_max),
+			str(layer.height_falloff),
+			str(layer.slope_min),
+			str(layer.slope_max),
+			str(layer.slope_falloff),
+			str(layer.layer_strength),
+			str(layer.blend_mode),
+			str(layer.uv_scale),
+			str(layer.uv_offset),
+			str(layer.normal_strength),
+			str(layer.roughness),
+			str(layer.metallic),
+			str(layer.ao_strength),
+		]))
+	return ",".join(parts)
+
+func _texture_id(texture: Texture2D) -> String:
+	if texture == null:
+		return "-"
+	return str(texture.get_instance_id())
+
+## Largest source texture edge among all layers, clamped to texture_array_size and floored
+## to a power of two so that mipmaps stay clean. Layers are never upscaled.
+func _resolve_array_size(texture_layers: Array[TerrainTextureLayer], layer_count: int) -> Vector2i:
+	var largest := 0
+	for i in range(layer_count):
+		var layer = texture_layers[i]
+		if not layer:
+			continue
+		for texture in [layer.albedo_texture, layer.normal_texture, layer.roughness_texture, layer.metallic_texture, layer.ao_texture]:
+			if texture == null:
+				continue
+			var tex_size = texture.get_size()
+			largest = maxi(largest, maxi(int(tex_size.x), int(tex_size.y)))
+	
+	if largest <= 0:
+		largest = PROCEDURAL_ONLY_ARRAY_SIZE
+	largest = mini(largest, texture_array_size)
+	largest = maxi(_floor_power_of_two(largest), MIN_ARRAY_SIZE)
+	return Vector2i(largest, largest)
+
+func _floor_power_of_two(value: int) -> int:
+	var result := 1
+	while result * 2 <= value:
+		result *= 2
+	return result
 
 ## Build texture arrays from layers
 func _build_texture_arrays(texture_layers: Array[TerrainTextureLayer]) -> void:
 	if texture_layers.is_empty():
 		return
 	
-	var layer_count = min(texture_layers.size(), 32)
+	var layer_count = mini(texture_layers.size(), MAX_LAYERS)
 	_shader_material.set_shader_parameter("layer_count", layer_count)
 	
 	# Prepare layer parameter arrays
@@ -66,7 +161,7 @@ func _build_texture_arrays(texture_layers: Array[TerrainTextureLayer]) -> void:
 	var metallic_images: Array[Image] = []
 	var ao_images: Array[Image] = []
 	
-	var texture_size = Vector2i(2048, 2048)
+	var texture_size = _resolve_array_size(texture_layers, layer_count)
 	
 	for i in range(layer_count):
 		var layer = texture_layers[i]
@@ -169,12 +264,14 @@ func _build_texture_arrays(texture_layers: Array[TerrainTextureLayer]) -> void:
 ## Get or create image from texture
 func _get_or_create_image(texture: Texture2D, size: Vector2i, default_color: Color) -> Image:
 	if texture:
-		var img = texture.get_image()
+		var source = texture.get_image()
+		if not source:
+			return _create_solid_image(size, default_color)
+		# Work on a copy: resizing/converting/generating mipmaps must not modify the
+		# user's texture resource (Texture2D.get_image() may return the internal image).
+		var img := source.duplicate() as Image
 		if not img:
-			var fallback = Image.create(size.x, size.y, true, Image.FORMAT_RGBA8)
-			fallback.fill(default_color)
-			fallback.generate_mipmaps()
-			return fallback
+			img = source
 		# Decompress if needed before any manipulations
 		if img.is_compressed():
 			img.decompress()
@@ -186,11 +283,13 @@ func _get_or_create_image(texture: Texture2D, size: Vector2i, default_color: Col
 		if not img.has_mipmaps():
 			img.generate_mipmaps()
 		return img
-	else:
-		var img = Image.create(size.x, size.y, true, Image.FORMAT_RGBA8)
-		img.fill(default_color)
-		img.generate_mipmaps()
-		return img
+	return _create_solid_image(size, default_color)
+
+func _create_solid_image(size: Vector2i, color: Color) -> Image:
+	var img = Image.create(size.x, size.y, true, Image.FORMAT_RGBA8)
+	img.fill(color)
+	img.generate_mipmaps()
+	return img
 
 ## Create texture array from images
 func _create_texture_array(images: Array[Image]) -> Texture2DArray:

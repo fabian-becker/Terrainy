@@ -5,18 +5,22 @@ extends LandscapeNode
 const LandscapeNode = preload("res://addons/terrainy/nodes/landscapes/landscape_node.gd")
 const LandscapeEvaluationContext = preload("res://addons/terrainy/nodes/landscapes/landscape_evaluation_context.gd")
 
-## A mountain range terrain feature with smooth, natural-looking peaks.
+## A mountain range terrain feature with a ridged, eroded silhouette.
 ##
-## Models a mountain range with three components:
+## Models a mountain range with four components:
 ## - A [b]crest line[/b] that wanders side-to-side ([member ridge_meander]).
-## - [b]Distinct rounded summits[/b] separated by low saddles/cols.  The
-##   cross-profile is a [i]Gaussian[/i] so the ridge top is always smooth —
-##   no single-vertex spikes, regardless of parameter values.
-## - [b]Foothills[/b] — subsidiary ridgelets flanking the main spine, elongated
-##   parallel to the crest.
+## - A [b]narrow arête crest[/b] rising from a broad concave skirt.  The
+##   cross-profile stacks a steep summit Gaussian on a wide base Gaussian, so
+##   the range reads as mountains rather than a smooth dome.
+## - [b]Ridged peaks and cols[/b] along the spine: arêtes at noise
+##   zero-crossings with rounded tops (zero slope at the apex — no
+##   single-vertex spikes, regardless of parameter values) and saddles between
+##   them.  Two octaves add smaller sub-summits between the main peaks.
+## - [b]Foothills[/b] — sub-ridgelets elongated parallel to the crest plus
+##   downslope gullies dissecting the flanks.
 ##
 ## [member ridge_sharpness] controls how narrow the crest is (higher = sharper
-## ridge, but still smooth — never a cusp).  [member peak_prominence] controls
+## ridge, but still smooth — never a needle).  [member peak_prominence] controls
 ## how distinct summits are from cols (0 = gentle rolling ridge, 1 = sharp
 ## contrast between peaks and saddles).
 
@@ -63,13 +67,13 @@ const LandscapeEvaluationContext = preload("res://addons/terrainy/nodes/landscap
 func _ready() -> void:
 	if not peak_noise:
 		peak_noise = FastNoiseLite.new()
-		peak_noise.seed = randi()
+		peak_noise.seed = noise_seed
 		peak_noise.frequency = 0.005
 		peak_noise.fractal_octaves = 3
 
 	if not detail_noise:
 		detail_noise = FastNoiseLite.new()
-		detail_noise.seed = randi() + 1000
+		detail_noise.seed = noise_seed + 1000
 		detail_noise.frequency = 0.04
 		detail_noise.fractal_octaves = 3
 
@@ -107,7 +111,6 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 
 	var ridge_width = max(ctx.get_extent_along(ctx.perpendicular), 0.0001)
 	var half_length = max(ctx.get_extent_along(ctx.direction), 0.0001)
-	var crest_width = ridge_width * 0.5
 
 	# --- Meander: wander the crest line laterally along its length ---
 	var meander_offset = 0.0
@@ -116,44 +119,62 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 		meander_offset = meander_noise * ridge_width * ctx.ridge_meander
 	var lateral = abs(perp_dist - meander_offset)
 
-	# --- Crest cross-profile: Gaussian ---
-	# Always C∞-smooth: zero slope at the ridge center (rounded top), no cusp
-	# at any parameter value.  ridge_sharpness controls the Gaussian width:
-	# higher = narrower/sharper crest, but the top is never a needle.
-	var crest_t = lateral / crest_width
-	var crest_falloff = exp(-crest_t * crest_t * (1.0 + ctx.ridge_sharpness * 3.0))
+	# --- Cross-profile: narrow arête crest + broad massif skirt ---
+	# Two stacked Gaussians give the silhouette real ranges have: a steep,
+	# narrow summit ridge and a wide, flattening base.  A single wide Gaussian
+	# (the old profile) just reads as a smooth molehill.
+	var t_core = lateral / max(ridge_width * 0.18, 0.0001)
+	var core = exp(-t_core * t_core * (1.0 + ctx.ridge_sharpness * 2.5))
+	var t_mass = lateral / max(ridge_width * 0.55, 0.0001)
+	var mass = exp(-t_mass * t_mass)
+	var cross_profile = (core + 0.35 * mass) / 1.35
 
-	# --- Peak / saddle profile along the ridge ---
-	# Peaks sit at noise MAXIMA — smooth domes with a single highest vertex —
-	# not at zero-crossings (which produced a dense crocodile-teeth ridge).
-	# peak_prominence blends between gentle rolling and contrasted summits.
-	var n_peak = ctx.get_primary_noise(Vector3(along_ridge, 0.0, 0.0))
-	var n_norm = clampf(n_peak * 0.5 + 0.5, 0.0, 1.0)
-	var base_profile = n_norm
-	var contrasted = pow(n_norm, 2.5)
-	var peak_profile = lerpf(base_profile, contrasted, ctx.peak_prominence)
+	# --- Peak / col relief along the spine ---
+	# Ridged multifractal: r = (1 - n̂²)² places arête peaks at noise
+	# zero-crossings with C∞-rounded tops (zero slope at the apex) and cols
+	# where |n| is large.  The noise is scaled up before ridging because
+	# Perlin rarely approaches ±1 — without the scale the cols never dip.
+	# A second, multiplicative octave adds smaller sub-summits and notches
+	# between the main peaks.  peak_prominence blends from gentle rolling (0)
+	# to contrasted summits and cols (1); the small floor keeps cols as
+	# elevated passes.
+	var n1 = ctx.get_primary_noise(Vector3(along_ridge, 0.0, 0.0))
+	var nn1 = clampf(n1 * 2.2, -1.0, 1.0)
+	var r1 = 1.0 - nn1 * nn1
+	r1 = r1 * r1
+	var n2 = ctx.get_primary_noise(Vector3(along_ridge * 2.6, 0.0, 431.0))
+	var nn2 = clampf(n2 * 2.2, -1.0, 1.0)
+	var r2 = 1.0 - nn2 * nn2
+	r2 = r2 * r2
+	# Multiplicative octaves (ridged multifractal): summits only where BOTH
+	# octaves ridge, so peaks are distinct and cols genuinely dip between them.
+	var relief = r1 * (0.35 + 0.65 * r2)
+	var rolling = 0.5 + 0.5 * n1
+	var relief_shaped = lerpf(rolling, maxf(pow(relief, 0.7), 0.06), ctx.peak_prominence)
 	# Slow overall summit-height variation so not every peak is identical
 	var n_slow = ctx.get_primary_noise(Vector3(along_ridge * 0.4, 0.0, 333.0))
-	var height_scale = 0.6 + 0.4 * (0.5 + 0.5 * n_slow)
-	peak_profile = clampf(peak_profile * height_scale, 0.0, 1.0)
-	# Small baseline keeps cols as elevated passes rather than sea-level gaps
-	var crest_height = ctx.height * crest_falloff * (0.15 + peak_profile * 0.85)
+	var height_scale = 0.65 + 0.35 * (0.5 + 0.5 * n_slow)
 
-	# --- Foothills: subsidiary ridgelets in the outer flanks ---
+	var crest_height = ctx.height * cross_profile * (0.18 + 0.82 * relief_shaped) * height_scale
+
+	# --- Foothills: flank ridgelets + downslope gullies ---
 	var foothills = 0.0
 	if ctx.foothill_strength > 0.0:
 		var flank_t = clampf(lateral / ridge_width, 0.0, 1.0)
-		var foothill_env = smoothstep(0.15, 0.4, flank_t) * (1.0 - smoothstep(0.8, 1.0, flank_t))
+		var foothill_env = smoothstep(0.12, 0.35, flank_t) * (1.0 - smoothstep(0.8, 0.98, flank_t))
 		if foothill_env > 0.0:
+			var fh_perp = perp_dist - meander_offset
 			# Anisotropic ridge-relative sampling: high frequency perpendicular,
 			# low frequency along, so sub-ridges elongate parallel to the crest.
 			# Ridge noise (1 - |n|)² gives ridgelets with valleys, not blobs.
-			var fh_perp = perp_dist - meander_offset
-			var fh_noise = ctx.get_detail_noise(Vector3(fh_perp * 0.8, 0.0, along_ridge * 0.15))
-			var fh_ridge = 1.0 - abs(fh_noise)
+			var fh_ridge = ctx.get_detail_noise(Vector3(fh_perp * 0.9, 0.0, along_ridge * 0.18))
+			fh_ridge = 1.0 - abs(fh_ridge)
 			fh_ridge = fh_ridge * fh_ridge
-			var fh_mod = 0.3 + fh_ridge * 1.0
-			foothills = ctx.height * ctx.foothill_strength * foothill_env * fh_mod * (0.3 + peak_profile * 0.7)
+			# Low frequency perpendicular, high frequency along breaks the
+			# flanks into gully-dissected spurs running down the slope.
+			var fh_gully = ctx.get_detail_noise(Vector3(fh_perp * 0.3, 0.0, along_ridge * 1.1))
+			var fh_mod = (0.3 + 0.7 * fh_ridge) * (0.8 + 0.2 * fh_gully)
+			foothills = ctx.height * ctx.foothill_strength * foothill_env * fh_mod * (0.35 + 0.65 * relief_shaped)
 
 	var result_height = crest_height + foothills
 

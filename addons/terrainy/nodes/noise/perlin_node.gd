@@ -14,7 +14,7 @@ const NoiseEvaluationContext = preload("res://addons/terrainy/nodes/noise/noise_
 func _ready() -> void:
 	if not noise:
 		noise = FastNoiseLite.new()
-		noise.seed = randi()
+		noise.seed = noise_seed
 		noise.frequency = 0.01  # Set a reasonable default
 		noise.noise_type = FastNoiseLite.TYPE_PERLIN
 

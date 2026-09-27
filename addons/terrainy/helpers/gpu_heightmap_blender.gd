@@ -1,6 +1,8 @@
 class_name GpuHeightmapBlender
 extends RefCounted
 
+const GpuDevice = preload("res://addons/terrainy/helpers/gpu_device.gd")
+
 ## GPU-accelerated heightmap blender using compute shaders
 ## Handles composition of multiple heightmaps with influence maps on the GPU
 
@@ -11,19 +13,23 @@ var _influence_shader: RID
 var _influence_pipeline: RID
 var _initialized: bool = false
 
+## Maximum number of simultaneously blended layers (compute shader limit).
+const MAX_LAYERS: int = 32
+
+## Number of features that had to be dropped because MAX_LAYERS was exceeded during the
+## last compose_gpu() call. Non-zero means the terrain silently lost features.
+var last_layer_overflow: int = 0
+
 const TerrainFeatureNode = preload("res://addons/terrainy/nodes/terrain_feature_node.gd")
 
 func _init() -> void:
 	print("[GpuHeightmapBlender] Initializing GPU blender...")
-	if not RenderingServer.get_rendering_device():
-		push_warning("[GpuHeightmapBlender] Compatibility renderer detected, GPU composition disabled")
-		return
-	_rd = RenderingServer.create_local_rendering_device()
+	_rd = GpuDevice.get_device()
 	if not _rd:
-		push_warning("[GpuHeightmapBlender] Failed to create RenderingDevice, GPU composition unavailable")
+		push_warning("[GpuHeightmapBlender] No RenderingDevice available (compatibility renderer?), GPU composition disabled")
 		return
 	
-	print("[GpuHeightmapBlender] RenderingDevice created successfully")
+	print("[GpuHeightmapBlender] RenderingDevice acquired")
 	_load_shaders()
 
 func _load_shaders() -> void:
@@ -393,33 +399,57 @@ func compose_gpu(
 		push_error("[HeightmapCompositor] Failed to create output texture")
 		return null
 	
-	# Clamp to 32 layers max (shader limitation)
-	var layer_count := mini(feature_heightmaps.size(), 32)
-	if feature_heightmaps.size() > 32:
-		push_warning("[HeightmapCompositor] Too many layers (%d), clamping to 32" % feature_heightmaps.size())
+	# Clamp to MAX_LAYERS (shader limitation)
+	var layer_count := mini(feature_heightmaps.size(), MAX_LAYERS)
+	last_layer_overflow = maxi(feature_heightmaps.size() - layer_count, 0)
+	if last_layer_overflow > 0:
+		push_error("[GpuHeightmapBlender] %d feature(s) were dropped: the GPU compositor blends at most %d heightmap-contributing layers at once. Exclude %d feature(s) or use a single blended feature/heightmap to avoid silently missing terrain." % [
+			last_layer_overflow, MAX_LAYERS, last_layer_overflow
+		])
 	
-	# Flatten heightmap data into single buffer using native array append
-	var heightmap_buffer_data := PackedFloat32Array()
-	
+	# Flatten heightmap data into single byte buffer. Feature images are R32F, so their raw
+	# bytes can be uploaded directly: no per-layer float conversion and no extra copies.
+	var expected_bytes := layer_count * resolution.x * resolution.y * 4
+	var heightmap_bytes := PackedByteArray()
+
 	for layer_idx in layer_count:
-		var layer_heights := feature_heightmaps[layer_idx].get_data().to_float32_array()
-		heightmap_buffer_data.append_array(layer_heights)
+		var layer_heights := feature_heightmaps[layer_idx].get_data()
+		if layer_heights.size() != resolution.x * resolution.y * 4:
+			push_error("[GpuHeightmapBlender] Heightmap layer %d has %d bytes, expected %d (R32F at %dx%d); using CPU composition instead" % [
+				layer_idx, layer_heights.size(), resolution.x * resolution.y * 4, resolution.x, resolution.y
+			])
+			_rd.free_rid(output_texture)
+			return null
+		heightmap_bytes.append_array(layer_heights)
 	
 	# Flatten influence data into single buffer
-	var influence_buffer_data := PackedFloat32Array()
-	
+	var influence_bytes := PackedByteArray()
+
 	for layer_idx in layer_count:
-		var layer_influence := influence_maps[layer_idx].get_data().to_float32_array()
-		influence_buffer_data.append_array(layer_influence)
+		var layer_influence := influence_maps[layer_idx].get_data()
+		if layer_influence.size() != resolution.x * resolution.y * 4:
+			push_error("[GpuHeightmapBlender] Influence layer %d has %d bytes, expected %d (R32F at %dx%d); using CPU composition instead" % [
+				layer_idx, layer_influence.size(), resolution.x * resolution.y * 4, resolution.x, resolution.y
+			])
+			_rd.free_rid(output_texture)
+			return null
+		influence_bytes.append_array(layer_influence)
+	
+	if heightmap_bytes.size() != expected_bytes or influence_bytes.size() != expected_bytes:
+		push_error("[GpuHeightmapBlender] Unexpected buffer size for %d layers at %dx%d" % [
+			layer_count, resolution.x, resolution.y
+		])
+		_rd.free_rid(output_texture)
+		return null
 	
 	# Create storage buffers
-	var heightmap_buffer := _rd.storage_buffer_create(heightmap_buffer_data.size() * 4, heightmap_buffer_data.to_byte_array())
+	var heightmap_buffer := _rd.storage_buffer_create(heightmap_bytes.size(), heightmap_bytes)
 	if not heightmap_buffer.is_valid():
 		push_error("[HeightmapCompositor] Failed to create heightmap buffer")
 		_rd.free_rid(output_texture)
 		return null
 	
-	var influence_buffer := _rd.storage_buffer_create(influence_buffer_data.size() * 4, influence_buffer_data.to_byte_array())
+	var influence_buffer := _rd.storage_buffer_create(influence_bytes.size(), influence_bytes)
 	if not influence_buffer.is_valid():
 		push_error("[HeightmapCompositor] Failed to create influence buffer")
 		_rd.free_rid(output_texture)

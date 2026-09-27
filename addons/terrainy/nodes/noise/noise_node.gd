@@ -19,6 +19,16 @@ const TerrainFeatureNode = "res://addons/terrainy/nodes/terrain_feature_node.gd"
 			noise.changed.connect(_on_noise_changed)
 		_commit_parameter_change()
 
+## Seed applied to the noise resource created by this node (and to [member noise] when the
+## value changes). Deterministic by default so rebuilds, bakes and reloads reproduce the
+## exact same terrain.
+@export var noise_seed: int = 0:
+	set(value):
+		noise_seed = value
+		if noise:
+			noise.seed = value
+		_commit_parameter_change()
+
 func _on_noise_changed() -> void:
 	_commit_parameter_change()
 

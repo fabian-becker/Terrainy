@@ -178,6 +178,9 @@ var _cached_heightmap: Image = null
 var _cached_resolution: Vector2i = Vector2i.ZERO
 var _cached_bounds: Rect2 = Rect2()
 
+## Bumped by every parameter change; see [method get_parameter_revision].
+var _parameter_revision: int = 0
+
 # Cache for mask texture data
 var _masktex_cache_data: PackedFloat32Array = PackedFloat32Array()
 var _masktex_cache_size: Vector2i = Vector2i.ZERO
@@ -433,6 +436,37 @@ func apply_modifiers_to_heightmap(heightmap: Image, terrain_bounds: Rect2, conte
 		true
 	)
 
+## Whether any modifier is enabled for this feature.
+func needs_modifiers() -> bool:
+	if not _modifier_pipeline:
+		_modifier_pipeline = ModifierPipeline.new()
+	return _modifier_pipeline.has_any_modifiers(smoothing, enable_terracing, enable_min_clamp, enable_max_clamp)
+
+## Modifier settings, used by the heightmap builder to apply modifiers for several
+## features in a single batched GPU submit.
+func get_modifier_settings() -> Dictionary:
+	return {
+		"smoothing": smoothing,
+		"smoothing_radius": smoothing_radius,
+		"enable_terracing": enable_terracing,
+		"terrace_levels": terrace_levels,
+		"terrace_smoothness": terrace_smoothness,
+		"enable_min_clamp": enable_min_clamp,
+		"min_height": min_height,
+		"enable_max_clamp": enable_max_clamp,
+		"max_height": max_height
+	}
+
+## Cache a heightmap that already has all modifiers applied and clear the dirty flag.
+## Used by the heightmap builder, which owns modifier application.
+func mark_heightmap_clean(heightmap: Image, resolution: Vector2i, bounds: Rect2) -> void:
+	if heightmap == null:
+		return
+	_cached_heightmap = heightmap
+	_cached_resolution = resolution
+	_cached_bounds = bounds
+	_heightmap_dirty = false
+
 ## Mark heightmap as dirty (needs regeneration)
 func mark_dirty() -> void:
 	_heightmap_dirty = true
@@ -495,8 +529,15 @@ func _is_gizmo_manipulating() -> bool:
 func _commit_parameter_change() -> void:
 	_heightmap_dirty = true
 	_cached_heightmap = null
+	_parameter_revision += 1
 	if not _is_gizmo_manipulating():
 		parameters_changed.emit()
+
+## Monotonically increasing counter bumped by every parameter change (including the
+## ones that do not affect the heightmap, such as scatter placement settings).
+## Consumers can use it as a cheap "did anything about this feature change" probe.
+func get_parameter_revision() -> int:
+	return _parameter_revision
 
 ## Returns true if this feature is a hole (cut-out) feature.
 ## Override in HoleNode.

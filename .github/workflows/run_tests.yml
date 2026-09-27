@@ -1,0 +1,57 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+    branches: [main, master, dev]
+  workflow_dispatch:
+
+env:
+  # Keep in sync with the Godot version the addon is developed against (plugin.cfg).
+  GODOT_VERSION: 4.7.2
+
+jobs:
+  headless-tests:
+    name: Headless test suite (Godot ${{ env.GODOT_VERSION }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Godot
+        id: godot-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/godot
+          key: godot-${{ env.GODOT_VERSION }}-linux-x86_64
+
+      - name: Download Godot
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/godot"
+          curl -sSL -o /tmp/godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q /tmp/godot.zip -d /tmp/godot
+          mv "/tmp/godot/Godot_v${GODOT_VERSION}-stable_linux.x86_64" "$HOME/godot/godot"
+          chmod +x "$HOME/godot/godot"
+          "$HOME/godot/godot" --version
+
+      - name: Import project
+        run: ~/godot/godot --headless --path . --import
+
+      - name: Run headless tests
+        run: |
+          set -o pipefail
+          ~/godot/godot --headless --path . \
+            --script res://addons/terrainy/tests/run_tests.gd 2>&1 | tee test_output.txt
+
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: headless-test-output
+          path: test_output.txt
+          if-no-files-found: ignore

@@ -29,11 +29,11 @@ layout(std140, set = 0, binding = 2) uniform ModifierParams {
 
 // Sample heightmap with bounds checking
 float sample_height(ivec2 coords) {
-    if (coords.x < 0 || coords.x >= params.resolution_x || 
-        coords.y < 0 || coords.y >= params.resolution_y) {
-        return 0.0;
-    }
-    return imageLoad(input_heightmap, coords).r;
+    // Clamp to the texture edges instead of returning 0 so the GPU path matches the CPU
+    // implementation (which clamps sample coordinates). Out-of-range imageLoad is
+    // undefined and previously darkened the heightmap borders.
+    ivec2 max_coords = ivec2(max(params.resolution_x - 1, 0), max(params.resolution_y - 1, 0));
+    return imageLoad(input_heightmap, clamp(coords, ivec2(0, 0), max_coords)).r;
 }
 
 // Apply smoothing (box blur with variable radius)

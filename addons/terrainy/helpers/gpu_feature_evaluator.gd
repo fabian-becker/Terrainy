@@ -1,8 +1,9 @@
 class_name GpuFeatureEvaluator
 extends RefCounted
 
-## GPU feature evaluator stub for upcoming GPU-first pipeline.
-## This initializes a compute pipeline but does not yet implement kernels.
+const GpuDevice = preload("res://addons/terrainy/helpers/gpu_device.gd")
+
+## GPU feature evaluator for the compute kernels in feature_evaluator.glsl.
 
 var _rd: RenderingDevice
 var _shader: RID
@@ -28,13 +29,32 @@ const SUPPORTED_TYPES := {
 	TerrainFeatureNode.FeatureType.NOISE_VORONOI: true
 }
 
+## Feature types whose kernel uses the shader's own pseudo-random noise instead of the
+## FastNoiseLite instance used by the CPU implementation. Their GPU results are
+## approximations and can never match the CPU/editor output exactly, so they are only
+## evaluated on the GPU when the user explicitly opts in.
+const NOISE_DEPENDENT_TYPES := {
+	TerrainFeatureNode.FeatureType.PRIMITIVE_MOUNTAIN: true,
+	TerrainFeatureNode.FeatureType.PRIMITIVE_ISLAND: true,
+	TerrainFeatureNode.FeatureType.LANDSCAPE_CANYON: true,
+	TerrainFeatureNode.FeatureType.LANDSCAPE_MOUNTAIN_RANGE: true,
+	TerrainFeatureNode.FeatureType.LANDSCAPE_DUNE_SEA: true,
+	TerrainFeatureNode.FeatureType.NOISE_PERLIN: true,
+	TerrainFeatureNode.FeatureType.NOISE_VORONOI: true
+}
+
+## Whether the GPU kernel for this feature type depends on shader-side noise.
+static func type_uses_noise(feature_type: int) -> bool:
+	return NOISE_DEPENDENT_TYPES.has(feature_type)
+
+## Whether the GPU kernel for this feature type is expected to match the CPU output.
+static func is_exact_for_type(feature_type: int) -> bool:
+	return SUPPORTED_TYPES.has(feature_type) and not NOISE_DEPENDENT_TYPES.has(feature_type)
+
 func _init() -> void:
-	if not RenderingServer.get_rendering_device():
-		push_warning("[GpuFeatureEvaluator] Compatibility renderer detected, GPU evaluation disabled")
-		return
-	_rd = RenderingServer.create_local_rendering_device()
+	_rd = GpuDevice.get_device()
 	if not _rd:
-		push_warning("[GpuFeatureEvaluator] Failed to create RenderingDevice")
+		push_warning("[GpuFeatureEvaluator] No RenderingDevice available (compatibility renderer?), GPU evaluation disabled")
 		return
 	_load_shader()
 
@@ -69,17 +89,16 @@ func cleanup() -> void:
 	_initialized = false
 	print("[GpuFeatureEvaluator] GPU resources cleaned up")
 
-## Stub for future GPU feature evaluation
-func evaluate_features_gpu(
-	resolution: Vector2i,
-	terrain_bounds: Rect2,
-	param_packs: Array
-) -> Image:
-	if not _initialized:
-		push_error("[GpuFeatureEvaluator] GPU evaluator not initialized")
-		return null
-	push_warning("[GpuFeatureEvaluator] evaluate_features_gpu is a stub (no kernels implemented)")
-	return null
+func _notification(what: int) -> void:
+	# RIDs are released inline rather than through cleanup(): calling a script method on an
+	# instance that is being deleted (NOTIFICATION_PREDELETE) fails at runtime.
+	if what == NOTIFICATION_PREDELETE:
+		if _initialized and _rd:
+			if _pipeline.is_valid():
+				_rd.free_rid(_pipeline)
+			if _shader.is_valid():
+				_rd.free_rid(_shader)
+		_rd = null
 
 ## Evaluate a single feature on GPU (initial support: PRIMITIVE_HILL)
 func evaluate_single_feature_gpu(
