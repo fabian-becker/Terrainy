@@ -5,7 +5,7 @@ All notable changes to the Terrainy plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-09-28
 
 ### Added
 
@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Navigation bake hook** on `TerrainComposer`: `generate_navigation_mesh`, `navigation_mesh_template`, `navigation_triangle_budget`, `rebuild_navigation_mesh()`, `get_navigation_mesh()`, `is_baking_navigation_mesh()` and the `navigation_mesh_baked` signal bake a `NavigationMesh` from the terrain surface and keep it on an internal `NavigationRegion3D`. The source geometry is the decimated chunk surface with the holes carved out, so a bake costs a fraction of a bake from the visual meshes
 - **`is_rebuilding()`** on `TerrainComposer`: true while chunk jobs, a queued collision refresh or queued results are still in flight, so tools and gameplay code can wait for a settled terrain instead of counting frames
 - **Headless test suite** in `addons/terrainy/tests` (dependency-free, no GUT) covering heightmap composition, modifiers, material packing, scattering, seed determinism, world-space queries, GPU/CPU parity, collision shapes, navigation and diagnostics, plus a GitHub Actions workflow running it in CI
+- **Mountain range shape controls** on `MountainRangeNode`: `ridge_meander` (how far the crest wanders across the range), `peak_prominence` (gentle rolling summits vs contrasted peaks) and `foothill_strength` (subsidiary ridgelets in the outer flanks). Wired through to the GPU evaluator so the preview, the bake and the CPU path agree
 
 ### Changed
 
@@ -29,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Collision is applied by the rebuild pipeline, never by the setter**: assigning several collision properties in a row (loading a scene, dragging in the inspector) now costs one collision refresh, which is queued and lands over the following frames. Layer/mask changes are pure property writes and are applied before a refresh would be
 - **The composer is split into helpers**: chunk job dispatch and the result queues moved to `helpers/terrain_chunk_pipeline.gd`, the collision geometry to `helpers/terrain_collision_builder.gd`, the navigation source geometry to `helpers/terrain_navigation_builder.gd` and every threshold/report to `helpers/terrain_diagnostics.gd`. `TerrainComposer` keeps orchestration and the public API
 - Texture layers are capped at **32 per terrain material** (`MAX_LAYERS`); exceeding it now prints a warning instead of silently misrendering
+- **Mountain range crest and foothills are profiled differently**: the crest cross-section is now a Gaussian whose width `ridge_sharpness` controls, so the top is rounded at every parameter value instead of ending in a cusp; peaks sit at noise maxima instead of zero-crossings (which produced a dense sawtooth ridge); and the foothills are sampled anisotropically (high frequency perpendicular to the crest, low frequency along it) so their sub-ridges run parallel to the range instead of appearing as blobs. Crest height, ridge width and range length are derived from the support function of the influence shape, so they stay correct whichever way `direction` points. Existing scenes keep their parameters but render a different mountain, since the underlying profile changed
+- **Influence maps are rasterised only inside the feature's bounds**: the pass used to walk every pixel of the terrain grid and write `0.0` outside the feature, so a feature covering 1 % of the terrain paid for 100 % of it. Both the flat and the 3D-hole generator now iterate just the pixels the feature can reach, leaving those outside at the image's initial `0.0`, which is exactly what the full pass wrote there. The clip rectangle comes from the context's rotation-aware AABB; holes tilted about X or Z use a conservative square from the squared half extents, because `compute_rotation_aware_aabb()` only transforms the four corners at `y = 0` and would otherwise truncate their vertical extent
 
 ### Fixed
 
@@ -53,6 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Collision shapes are built from worker-thread data**: the triangle soup of chunks with holes is produced by the same chunk job as the visual mesh (no extra `SurfaceTool`/`ArrayMesh` pass), the shapes are handed to the physics server incrementally and the `ConcavePolygonShape3D` instance is reused across rebuilds. The demo terrain's holed chunk went from ~1350 ms to ~630 ms at the default exact budget, and `collision_quality = Fast` cuts the whole main-thread collision cost to a few tens of milliseconds
 - **Applying a rebuild is frame-budgeted**: finished chunk meshes and collision shapes are drained over several frames (`chunk_apply_budget_ms`), so a large terrain no longer freezes the editor in one multi-second frame while the same work still gets done in the same overall time
 - **Navigation bakes reuse the collision decimation**: the bake is fed the decimated chunk surface instead of the visual meshes (500k+ triangles per 513² chunk that the rasteriser discards anyway), and it runs off the rebuild, on a worker thread when multithreading is on
+- **Influence maps are ~184–206× cheaper for small features** (513²: 662 ms → 3.6 ms, 1025²: 2637 ms → 12.8 ms; a feature spanning the whole grid still gains 1.2× at 873 ms → 733 ms). Clipping the pass to the feature bounds removes work that the previous loop spent writing zeroes over the rest of the terrain, and the resulting maps are bit-identical to the full-grid ones (12 flat cases plus 8 tilted 3D-hole cases, `maxdiff 0.0`)
+- **The smoothing pass is ~3.3× faster** (513², radius 2: 933 ms → 281 ms; radius 8: 2711 ms → 795 ms). The polar angle and the two world-space offsets built from `cos`/`sin` were recomputed per pixel and per sample although they only depend on the sample index; they are now precomputed once per call. The weights are kept as an untyped `Array` (Float64) rather than a `PackedFloat32Array`: storing them as f32 shifted the output by up to ~1.9e-6 on 7 of 9 configurations, while the f64 array reproduces the original bit for bit (19 of 19 configurations)
+- **A rebuild with nothing to regenerate is ~7.9× faster** (963 ms → 122 ms at 1025²). `_compute_influence_bounds()` scans an entire influence map to find its non-zero rectangle (~79 ms per feature) and ran on every compose, including the ones that hit the influence cache and regenerated nothing. The rectangle is a property of the image, so it is now memoized alongside it and dropped by every path that drops the image
+- **A cold compose of the demo terrain is ~1.7× faster** (1025²: 25.6 s → 14.9 s; 513²: 6.4 s → 3.7 s; 257²: 1.6 s → 0.9 s), and `invalidate_influence` went from 3.9 s to 1.3 s, as a result of the bounds clipping and the hoisted smoothing offsets
 
 ## [0.6.0] - 2026-05-03
 
@@ -301,6 +308,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom terrain shader with multi-layer support
 - PBR material workflow compatibility
 
+[0.7.0]: https://github.com/fabian-becker/Terrainy/releases/tag/0.7.0
 [0.5.1]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.5.1
 [0.5.0]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.5.0
 [0.4.1]: https://github.com/LuckyTeapot/terrainy/releases/tag/v0.4.1
