@@ -208,25 +208,43 @@ func _apply_smoothing_pass(
 	var inv_step_min: float = 1.0 / min(step_x, step_y)
 	var inv_norm: float = 1.0 / (sample_radius * inv_step_min * 1.5)
 
+	# The polar sample offsets and their weights depend only on `s`, not on the pixel, so they are
+	# computed once here instead of on every pixel. `cos`/`sin`/`sqrt` in the innermost loop cost
+	# about three quarters of the whole pass.
+	#
+	# The weights are kept in an untyped Array on purpose: a PackedFloat32Array would round them to
+	# 32-bit, while the original code held `w` in a local float (double). That rounding is visible
+	# in the output (~1e-6 on a few thousand pixels of a 513x513 map), so this stays a float64
+	# container to reproduce the previous result exactly.
+	var offsets_x := PackedInt32Array()
+	var offsets_y := PackedInt32Array()
+	var weights: Array = []
+	offsets_x.resize(sample_count)
+	offsets_y.resize(sample_count)
+	weights.resize(sample_count)
+	for s in sample_count:
+		var angle := (s / float(sample_count)) * TAU
+		var offset_x := (cos(angle) * sample_radius) / step_x
+		var offset_y := (sin(angle) * sample_radius) / step_y
+		# The integer pixel offset is what the sampling used; the distance below stays unrounded,
+		# matching the compute shader.
+		offsets_x[s] = int(round(offset_x))
+		offsets_y[s] = int(round(offset_y))
+		var dist := sqrt(offset_x * offset_x + offset_y * offset_y)
+		weights[s] = max(0.0, 1.0 - dist * inv_norm)
+
 	for y in height:
+		var row := y * width
 		for x in width:
-			var idx := y * width + x
-			var center_h := data[idx]
-			var total_h := center_h
+			var idx := row + x
+			var total_h := data[idx]
 			var total_w := 1.0
 
 			for s in sample_count:
-				var angle := (s / float(sample_count)) * TAU
-				var offset_x := (cos(angle) * sample_radius) / step_x
-				var offset_y := (sin(angle) * sample_radius) / step_y
-				var sx := clampi(x + int(round(offset_x)), 0, width - 1)
-				var sy := clampi(y + int(round(offset_y)), 0, height - 1)
-				var sidx := sy * width + sx
-				var sample_h := data[sidx]
-				# Distance uses the unrounded pixel offsets, matching the compute shader.
-				var dist := sqrt(offset_x * offset_x + offset_y * offset_y)
-				var w: float = max(0.0, 1.0 - dist * inv_norm)
-				total_h += sample_h * w
+				var sx := clampi(x + offsets_x[s], 0, width - 1)
+				var sy := clampi(y + offsets_y[s], 0, height - 1)
+				var w: float = weights[s]
+				total_h += data[sy * width + sx] * w
 				total_w += w
 
 			result[idx] = total_h / total_w
