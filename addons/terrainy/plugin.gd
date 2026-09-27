@@ -2,10 +2,13 @@
 extends EditorPlugin
 
 var rebuild_button: Button
+var bake_to_scene_button: Button
 # var gizmo_toggle_button: CheckButton
 var current_terrain_composer: Node3D
 var terrain_gizmo_plugin: EditorNode3DGizmoPlugin
 var _editor_selection: EditorSelection
+var _shape_node_inspector_plugin: EditorInspectorPlugin
+var _bake_to_scene_dialog: FileDialog
 
 func _enter_tree() -> void:
 	# Add rebuild coordinator autoload
@@ -53,14 +56,27 @@ func _enter_tree() -> void:
 	add_custom_type("PerlinNoiseNode", "Node3D", preload("res://addons/terrainy/nodes/noise/perlin_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	add_custom_type("VoronoiNode", "Node3D", preload("res://addons/terrainy/nodes/noise/voronoi_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	
+	# Water
+	add_custom_type("WaterNode", "Node3D", preload("res://addons/terrainy/nodes/water/water_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
+	
+	#Holes
+	add_custom_type("HoleNode", "Node3D", preload("res://addons/terrainy/nodes/hole_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
+
 	# Utility nodes
 	add_custom_type("ShapeNode", "Node3D", preload("res://addons/terrainy/nodes/basic/shape_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	add_custom_type("HeightmapNode", "Node3D", preload("res://addons/terrainy/nodes/basic/heightmap_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
+	add_custom_type("MaskTextureNode", "Node3D", preload("res://addons/terrainy/nodes/basic/mask_texture_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
+	add_custom_type("ScatterNode", "Node3D", preload("res://addons/terrainy/nodes/scatter/scatter_node.gd"), preload("res://addons/terrainy/icons/terrain_feature.svg"))
 	
 	# Add gizmo plugin
 	terrain_gizmo_plugin = preload("res://addons/terrainy/gizmos/terrain_feature_gizmo_plugin.gd").new()
 	terrain_gizmo_plugin.undo_redo = get_undo_redo()
 	add_node_3d_gizmo_plugin(terrain_gizmo_plugin)
+
+	# Add custom inspector for ShapeNode mask editing.
+	_shape_node_inspector_plugin = preload("res://addons/terrainy/editor/shape_node_inspector_plugin.gd").new()
+	_shape_node_inspector_plugin.host_plugin = self
+	add_inspector_plugin(_shape_node_inspector_plugin)
 	
 	# Refresh gizmos for existing nodes after a short delay
 	call_deferred("_refresh_existing_gizmos")
@@ -75,6 +91,11 @@ func _enter_tree() -> void:
 	rebuild_button.text = "Rebuild Terrain"
 	rebuild_button.pressed.connect(_on_rebuild_pressed)
 	add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, rebuild_button)
+
+	bake_to_scene_button = Button.new()
+	bake_to_scene_button.text = "Bake to Scene"
+	bake_to_scene_button.pressed.connect(_on_bake_to_scene_pressed)
+	add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, bake_to_scene_button)
 	
 	# gizmo_toggle_button = CheckButton.new()
 	# gizmo_toggle_button.text = "Show Gizmos"
@@ -106,6 +127,10 @@ func _exit_tree() -> void:
 	if rebuild_button:
 		remove_control_from_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, rebuild_button)
 		rebuild_button.queue_free()
+
+	if bake_to_scene_button:
+		remove_control_from_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, bake_to_scene_button)
+		bake_to_scene_button.queue_free()
 	
 	# if gizmo_toggle_button:
 	# 	remove_control_from_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, gizmo_toggle_button)
@@ -113,6 +138,10 @@ func _exit_tree() -> void:
 	
 	if terrain_gizmo_plugin:
 		remove_node_3d_gizmo_plugin(terrain_gizmo_plugin)
+
+	if _shape_node_inspector_plugin:
+		remove_inspector_plugin(_shape_node_inspector_plugin)
+		_shape_node_inspector_plugin = null
 
 	if _editor_selection and _editor_selection.selection_changed.is_connected(_on_selection_changed):
 		_editor_selection.selection_changed.disconnect(_on_selection_changed)
@@ -154,12 +183,20 @@ func _exit_tree() -> void:
 	remove_custom_type("PerlinNoiseNode")
 	remove_custom_type("VoronoiNode")
 	
+	# Water
+	remove_custom_type("WaterNode")
+
+	# Holes
+	remove_custom_type("HoleNode")
+	
 	# Utility
 	remove_custom_type("ShapeNode")
 	remove_custom_type("HeightmapNode")
+	remove_custom_type("MaskTextureNode")
+	remove_custom_type("ScatterNode")
 
 func _handles(object: Object) -> bool:
-	return object is Node3D and object.get_script() == preload("res://addons/terrainy/nodes/terrain_composer.gd")
+	return object is Node3D and TerrainyScriptUtils.is_exact_script(object, "TerrainComposer")
 
 func _edit(object: Object) -> void:
 	if object and _handles(object):
@@ -176,6 +213,8 @@ func _update_button_visibility() -> void:
 	
 	var has_terrain_composer = _find_terrain_composer_in_tree() != null
 	rebuild_button.visible = has_terrain_composer
+	if bake_to_scene_button:
+		bake_to_scene_button.visible = has_terrain_composer
 
 func _find_terrain_composer_in_tree() -> Node3D:
 	var edited_scene_root = get_tree().edited_scene_root
@@ -212,6 +251,39 @@ func _on_rebuild_pressed() -> void:
 	if target and is_instance_valid(target):
 		# Force a complete rebuild with all caches cleared
 		target.force_rebuild()
+
+func _on_bake_to_scene_pressed() -> void:
+	print("[Terrainy] Bake to Scene button pressed")
+
+	var target = current_terrain_composer
+	if not target or not is_instance_valid(target):
+		target = _find_terrain_composer_in_tree()
+
+	if not target or not is_instance_valid(target):
+		push_error("[Terrainy] No TerrainComposer found")
+		return
+
+	if not target.has_method("bake_to_scene"):
+		push_error("[Terrainy] TerrainComposer missing bake_to_scene method")
+		return
+
+	var dialog := FileDialog.new()
+	dialog.add_filter("*.scn", "Godot Binary Scene")
+	dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+	dialog.access = FileDialog.ACCESS_RESOURCES
+	dialog.title = "Save Baked Terrain Scene"
+	dialog.current_path = "res://baked_terrain.scn"
+
+	dialog.file_selected.connect(func(path: String):
+		var success = target.bake_to_scene(path)
+		if success:
+			get_editor_interface().get_resource_filesystem().scan()
+			get_editor_interface().open_scene_from_path(path)
+		dialog.queue_free()
+	)
+
+	get_editor_interface().get_base_control().add_child(dialog)
+	dialog.popup_centered_clamped(Vector2i(800, 600))
 
 func _rebuild_all_terrain_composers() -> void:
 	var edited_scene_root = get_tree().edited_scene_root
@@ -288,33 +360,15 @@ func _clear_stuck_gizmo_flags(node: Node) -> bool:
 	return changed
 
 func _is_terrain_feature_node(node: Node) -> bool:
-	if not (node is Node3D):
-		return false
-	var script = node.get_script()
-	if not script:
-		return false
-	var base_script = script.get_base_script()
-	while base_script:
-		if base_script.resource_path == "res://addons/terrainy/nodes/terrain_feature_node.gd":
-			return true
-		base_script = base_script.get_base_script()
-	# Also check if the script itself is TerrainFeatureNode
-	return script.resource_path == "res://addons/terrainy/nodes/terrain_feature_node.gd"
+	return TerrainyScriptUtils.is_script_type(node, "TerrainFeatureNode")
 
 func _clear_all_gizmos(node: Node) -> void:
 	# Recursively clear gizmos from terrain feature nodes
-	if node is Node3D:
-		var script = node.get_script()
-		if script:
-			var base_script = script.get_base_script()
-			while base_script:
-				if base_script.resource_path == "res://addons/terrainy/nodes/terrain_feature_node.gd":
-					# Clear all gizmos from this node
-					# The node will request new gizmos on next update
-					if node.has_method("set_gizmo"):
-						node.set_gizmo(null)
-					break
-				base_script = base_script.get_base_script()
+	if node is Node3D and TerrainyScriptUtils.is_script_type(node, "TerrainFeatureNode"):
+		# Clear all gizmos from this node
+		# The node will request new gizmos on next update
+		if node.has_method("set_gizmo"):
+			node.set_gizmo(null)
 	
 	for child in node.get_children():
 		_clear_all_gizmos(child)

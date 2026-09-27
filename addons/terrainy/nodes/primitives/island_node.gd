@@ -24,6 +24,16 @@ const PrimitiveEvaluationContext = preload("res://addons/terrainy/nodes/primitiv
 			noise.changed.connect(_on_noise_changed)
 		_commit_parameter_change()
 
+## Seed applied to the noise resource created by this node (and to [member noise] when the
+## value changes). Deterministic by default so rebuilds, bakes and reloads reproduce the
+## exact same terrain.
+@export var noise_seed: int = 0:
+	set(value):
+		noise_seed = value
+		if noise:
+			noise.seed = value
+		_commit_parameter_change()
+
 @export var noise_strength: float = 0.3:
 	set(value):
 		noise_strength = value
@@ -32,7 +42,7 @@ const PrimitiveEvaluationContext = preload("res://addons/terrainy/nodes/primitiv
 func _ready() -> void:
 	if not noise:
 		self.noise = FastNoiseLite.new()
-		noise.seed = randi()
+		noise.seed = noise_seed
 		noise.frequency = 0.05
 		noise.fractal_octaves = 3
 	

@@ -1,6 +1,8 @@
 class_name GpuHeightmapBlender
 extends RefCounted
 
+const GpuDevice = preload("res://addons/terrainy/helpers/gpu_device.gd")
+
 ## GPU-accelerated heightmap blender using compute shaders
 ## Handles composition of multiple heightmaps with influence maps on the GPU
 
@@ -11,19 +13,23 @@ var _influence_shader: RID
 var _influence_pipeline: RID
 var _initialized: bool = false
 
+## Maximum number of simultaneously blended layers (compute shader limit).
+const MAX_LAYERS: int = 32
+
+## Number of features that had to be dropped because MAX_LAYERS was exceeded during the
+## last compose_gpu() call. Non-zero means the terrain silently lost features.
+var last_layer_overflow: int = 0
+
 const TerrainFeatureNode = preload("res://addons/terrainy/nodes/terrain_feature_node.gd")
 
 func _init() -> void:
 	print("[GpuHeightmapBlender] Initializing GPU blender...")
-	if not RenderingServer.get_rendering_device():
-		push_warning("[GpuHeightmapBlender] Compatibility renderer detected, GPU composition disabled")
-		return
-	_rd = RenderingServer.create_local_rendering_device()
+	_rd = GpuDevice.get_device()
 	if not _rd:
-		push_warning("[GpuHeightmapBlender] Failed to create RenderingDevice, GPU composition unavailable")
+		push_warning("[GpuHeightmapBlender] No RenderingDevice available (compatibility renderer?), GPU composition disabled")
 		return
 	
-	print("[GpuHeightmapBlender] RenderingDevice created successfully")
+	print("[GpuHeightmapBlender] RenderingDevice acquired")
 	_load_shaders()
 
 func _load_shaders() -> void:
@@ -207,10 +213,153 @@ func generate_influence_map_gpu(
 	var influence_map := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, output_bytes)
 	
 	# Cleanup
+	_rd.free_rid(uniform_set)
 	_rd.free_rid(output_texture)
 	_rd.free_rid(params_buffer)
 	
 	return influence_map
+
+## Generate influence maps for multiple features on GPU in a single compute list.
+## Batches all dispatches before a single submit+sync to reduce GPU pipeline stalls.
+## Returns an array of Images (one per feature, same order as input).
+func generate_influence_maps_gpu_batch(
+	features: Array,
+	resolution: Vector2i,
+	terrain_bounds: Rect2
+) -> Array:
+	if not _initialized:
+		push_error("[GpuHeightmapBlender] GPU not initialized")
+		return []
+	
+	if features.is_empty():
+		return []
+	
+	var output_textures: Array[RID] = []
+	var uniform_sets: Array[RID] = []
+	var params_buffers: Array[RID] = []
+	
+	# Create output textures for all features
+	var output_format := RDTextureFormat.new()
+	output_format.width = resolution.x
+	output_format.height = resolution.y
+	output_format.format = RenderingDevice.DATA_FORMAT_R32_SFLOAT
+	output_format.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
+	
+	for feature in features:
+		var output_texture := _rd.texture_create(output_format, RDTextureView.new())
+		if not output_texture.is_valid():
+			push_error("[GpuHeightmapBlender] Failed to create output texture for batch influence map")
+			# Cleanup already-created resources
+			for i in output_textures.size():
+				_rd.free_rid(output_textures[i])
+			for i in params_buffers.size():
+				_rd.free_rid(params_buffers[i])
+			return []
+		output_textures.append(output_texture)
+	
+	# Build all uniform sets and params buffers
+	for i in features.size():
+		var feature = features[i]
+		var output_texture = output_textures[i]
+		
+		var global_transform = feature.global_transform
+		var inverse_transform = global_transform.affine_inverse()
+		
+		var params_bytes := PackedByteArray()
+		params_bytes.resize(16 + 16 + 16 + 16 + 64)
+		
+		var pos = global_transform.origin
+		params_bytes.encode_float(0, pos.x)
+		params_bytes.encode_float(4, pos.y)
+		params_bytes.encode_float(8, pos.z)
+		params_bytes.encode_float(12, 0.0)
+		
+		params_bytes.encode_float(16, terrain_bounds.position.x)
+		params_bytes.encode_float(20, terrain_bounds.position.y)
+		params_bytes.encode_float(24, terrain_bounds.size.x)
+		params_bytes.encode_float(28, terrain_bounds.size.y)
+		
+		params_bytes.encode_float(32, feature.influence_size.x)
+		params_bytes.encode_float(36, feature.influence_size.y)
+		params_bytes.encode_float(40, float(feature.influence_shape))
+		params_bytes.encode_float(44, feature.edge_falloff)
+		
+		params_bytes.encode_s32(48, resolution.x)
+		params_bytes.encode_s32(52, resolution.y)
+		params_bytes.encode_s32(56, 0)
+		params_bytes.encode_s32(60, 0)
+		
+		var basis = inverse_transform.basis
+		var origin = inverse_transform.origin
+		params_bytes.encode_float(64, basis.x.x)
+		params_bytes.encode_float(68, basis.x.y)
+		params_bytes.encode_float(72, basis.x.z)
+		params_bytes.encode_float(76, 0.0)
+		params_bytes.encode_float(80, basis.y.x)
+		params_bytes.encode_float(84, basis.y.y)
+		params_bytes.encode_float(88, basis.y.z)
+		params_bytes.encode_float(92, 0.0)
+		params_bytes.encode_float(96, basis.z.x)
+		params_bytes.encode_float(100, basis.z.y)
+		params_bytes.encode_float(104, basis.z.z)
+		params_bytes.encode_float(108, 0.0)
+		params_bytes.encode_float(112, origin.x)
+		params_bytes.encode_float(116, origin.y)
+		params_bytes.encode_float(120, origin.z)
+		params_bytes.encode_float(124, 1.0)
+		
+		var params_buffer := _rd.uniform_buffer_create(params_bytes.size(), params_bytes)
+		params_buffers.append(params_buffer)
+		
+		var uniforms: Array[RDUniform] = []
+		var output_uniform := RDUniform.new()
+		output_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+		output_uniform.binding = 0
+		output_uniform.add_id(output_texture)
+		uniforms.append(output_uniform)
+		
+		var params_uniform := RDUniform.new()
+		params_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+		params_uniform.binding = 1
+		params_uniform.add_id(params_buffer)
+		uniforms.append(params_uniform)
+		
+		var uniform_set := _rd.uniform_set_create(uniforms, _influence_shader, 0)
+		uniform_sets.append(uniform_set)
+	
+	# Dispatch all features in a single compute list
+	var compute_list := _rd.compute_list_begin()
+	_rd.compute_list_bind_compute_pipeline(compute_list, _influence_pipeline)
+	
+	var dispatch_x := ceili(resolution.x / 8.0)
+	var dispatch_y := ceili(resolution.y / 8.0)
+	
+	for i in features.size():
+		_rd.compute_list_bind_uniform_set(compute_list, uniform_sets[i], 0)
+		_rd.compute_list_dispatch(compute_list, dispatch_x, dispatch_y, 1)
+	
+	_rd.compute_list_end()
+	
+	# Single submit+sync for all dispatches
+	_rd.submit()
+	_rd.sync()
+	
+	# Read back all results
+	var results: Array = []
+	for i in features.size():
+		var output_bytes := _rd.texture_get_data(output_textures[i], 0)
+		var influence_map := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, output_bytes)
+		results.append(influence_map)
+	
+	# Cleanup all resources
+	for i in uniform_sets.size():
+		_rd.free_rid(uniform_sets[i])
+	for i in output_textures.size():
+		_rd.free_rid(output_textures[i])
+	for i in params_buffers.size():
+		_rd.free_rid(params_buffers[i])
+	
+	return results
 
 ## Compose heightmaps on GPU - returns final heightmap Image
 func compose_gpu(
@@ -250,40 +399,57 @@ func compose_gpu(
 		push_error("[HeightmapCompositor] Failed to create output texture")
 		return null
 	
-	# Clamp to 32 layers max (shader limitation)
-	var layer_count := mini(feature_heightmaps.size(), 32)
-	if feature_heightmaps.size() > 32:
-		push_warning("[HeightmapCompositor] Too many layers (%d), clamping to 32" % feature_heightmaps.size())
+	# Clamp to MAX_LAYERS (shader limitation)
+	var layer_count := mini(feature_heightmaps.size(), MAX_LAYERS)
+	last_layer_overflow = maxi(feature_heightmaps.size() - layer_count, 0)
+	if last_layer_overflow > 0:
+		push_error("[GpuHeightmapBlender] %d feature(s) were dropped: the GPU compositor blends at most %d heightmap-contributing layers at once. Exclude %d feature(s) or use a single blended feature/heightmap to avoid silently missing terrain." % [
+			last_layer_overflow, MAX_LAYERS, last_layer_overflow
+		])
 	
-	# Flatten heightmap data into single buffer using native array append
-	var total_pixels := resolution.x * resolution.y
-	var heightmap_buffer_data := PackedFloat32Array()
-	heightmap_buffer_data.resize(total_pixels * layer_count)
-	
+	# Flatten heightmap data into single byte buffer. Feature images are R32F, so their raw
+	# bytes can be uploaded directly: no per-layer float conversion and no extra copies.
+	var expected_bytes := layer_count * resolution.x * resolution.y * 4
+	var heightmap_bytes := PackedByteArray()
+
 	for layer_idx in layer_count:
-		var layer_heights := feature_heightmaps[layer_idx].get_data().to_float32_array()
-		var buffer_offset := layer_idx * total_pixels
-		for i in total_pixels:
-			heightmap_buffer_data[buffer_offset + i] = layer_heights[i]
+		var layer_heights := feature_heightmaps[layer_idx].get_data()
+		if layer_heights.size() != resolution.x * resolution.y * 4:
+			push_error("[GpuHeightmapBlender] Heightmap layer %d has %d bytes, expected %d (R32F at %dx%d); using CPU composition instead" % [
+				layer_idx, layer_heights.size(), resolution.x * resolution.y * 4, resolution.x, resolution.y
+			])
+			_rd.free_rid(output_texture)
+			return null
+		heightmap_bytes.append_array(layer_heights)
 	
 	# Flatten influence data into single buffer
-	var influence_buffer_data := PackedFloat32Array()
-	influence_buffer_data.resize(total_pixels * layer_count)
-	
+	var influence_bytes := PackedByteArray()
+
 	for layer_idx in layer_count:
-		var layer_influence := influence_maps[layer_idx].get_data().to_float32_array()
-		var buffer_offset := layer_idx * total_pixels
-		for i in total_pixels:
-			influence_buffer_data[buffer_offset + i] = layer_influence[i]
+		var layer_influence := influence_maps[layer_idx].get_data()
+		if layer_influence.size() != resolution.x * resolution.y * 4:
+			push_error("[GpuHeightmapBlender] Influence layer %d has %d bytes, expected %d (R32F at %dx%d); using CPU composition instead" % [
+				layer_idx, layer_influence.size(), resolution.x * resolution.y * 4, resolution.x, resolution.y
+			])
+			_rd.free_rid(output_texture)
+			return null
+		influence_bytes.append_array(layer_influence)
+	
+	if heightmap_bytes.size() != expected_bytes or influence_bytes.size() != expected_bytes:
+		push_error("[GpuHeightmapBlender] Unexpected buffer size for %d layers at %dx%d" % [
+			layer_count, resolution.x, resolution.y
+		])
+		_rd.free_rid(output_texture)
+		return null
 	
 	# Create storage buffers
-	var heightmap_buffer := _rd.storage_buffer_create(heightmap_buffer_data.size() * 4, heightmap_buffer_data.to_byte_array())
+	var heightmap_buffer := _rd.storage_buffer_create(heightmap_bytes.size(), heightmap_bytes)
 	if not heightmap_buffer.is_valid():
 		push_error("[HeightmapCompositor] Failed to create heightmap buffer")
 		_rd.free_rid(output_texture)
 		return null
 	
-	var influence_buffer := _rd.storage_buffer_create(influence_buffer_data.size() * 4, influence_buffer_data.to_byte_array())
+	var influence_buffer := _rd.storage_buffer_create(influence_bytes.size(), influence_bytes)
 	if not influence_buffer.is_valid():
 		push_error("[HeightmapCompositor] Failed to create influence buffer")
 		_rd.free_rid(output_texture)
@@ -383,6 +549,7 @@ func compose_gpu(
 	var final_image := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, output_bytes)
 	
 	# Cleanup
+	_rd.free_rid(uniform_set)
 	_rd.free_rid(output_texture)
 	_rd.free_rid(params_buffer)
 	_rd.free_rid(layer_buffer)

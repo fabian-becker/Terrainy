@@ -9,7 +9,7 @@ const GradientNode = preload("res://addons/terrainy/nodes/gradients/gradient_nod
 @export var flatness: float = 0.0:
 	set(value):
 		flatness = clamp(value, 0.0, 0.8)
-		parameters_changed.emit()
+		_commit_parameter_change()
 
 func get_height_at(world_pos: Vector3) -> float:
 	var ctx = prepare_evaluation_context()
@@ -25,7 +25,7 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 	var ctx = context as GradientEvaluationContext
 	var local_pos = ctx.to_local(world_pos)
 	var distance_2d = Vector2(local_pos.x, local_pos.z).length()
-	var radius = ctx.influence_size.x
+	var radius = ctx.influence_radius
 	
 	if distance_2d >= radius:
 		return ctx.end_height
@@ -33,7 +33,7 @@ func get_height_at_safe(world_pos: Vector3, context: EvaluationContext) -> float
 	var normalized_distance = distance_2d / radius
 	
 	# Spherical dome calculation
-	var height_factor = sqrt(1.0 - normalized_distance * normalized_distance)
+	var height_factor = sqrt(max(0.0, 1.0 - normalized_distance * normalized_distance))
 	
 	# Apply flatness (makes top more plateau-like)
 	if ctx.flatness > 0.0 and normalized_distance < ctx.flatness:

@@ -19,6 +19,16 @@ const PrimitiveEvaluationContext = preload("res://addons/terrainy/nodes/primitiv
 			noise.changed.connect(_on_noise_changed)
 		_commit_parameter_change()
 
+## Seed applied to the noise resource created by this node (and to [member noise] when the
+## value changes). Deterministic by default so rebuilds, bakes and reloads reproduce the
+## exact same terrain.
+@export var noise_seed: int = 0:
+	set(value):
+		noise_seed = value
+		if noise:
+			noise.seed = value
+		_commit_parameter_change()
+
 @export var noise_strength: float = 0.15:
 	set(value):
 		noise_strength = clamp(value, 0.0, 1.0)
@@ -27,7 +37,7 @@ const PrimitiveEvaluationContext = preload("res://addons/terrainy/nodes/primitiv
 func _ready() -> void:
 	if not noise:
 		self.noise = FastNoiseLite.new()
-		noise.seed = randi()
+		noise.seed = noise_seed
 		noise.frequency = 0.02
 		noise.noise_type = FastNoiseLite.TYPE_PERLIN
 	if noise and not noise.changed.is_connected(_on_noise_changed):
@@ -64,7 +74,7 @@ func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:
 	var basis := inv_transform.basis
 	var inv_origin := inv_transform.origin
 
-	var radius := influence_size.x
+	var radius := EvaluationContext.get_influence_radius(influence_shape, influence_size)
 	var radius_sq := radius * radius
 
 	var idx := 0
@@ -108,28 +118,8 @@ func generate_heightmap(resolution: Vector2i, terrain_bounds: Rect2) -> Image:
 
 	var heightmap := Image.create_from_data(resolution.x, resolution.y, false, Image.FORMAT_RF, height_data.to_byte_array())
 
-	# Apply modifiers (GPU if available, CPU fallback)
-	if _has_any_modifiers():
-		var processor = _get_gpu_modifier_processor()
-		if processor and processor.is_available():
-			var modified = processor.apply_modifiers(
-				heightmap,
-				int(smoothing),
-				smoothing_radius,
-				enable_terracing,
-				terrace_levels,
-				terrace_smoothness,
-				enable_min_clamp,
-				min_height,
-				enable_max_clamp,
-				max_height
-			)
-			if modified:
-				heightmap = modified
-			else:
-				_apply_modifiers_cpu(heightmap, terrain_bounds)
-		else:
-			_apply_modifiers_cpu(heightmap, terrain_bounds)
+	# Apply modifiers through base class pipeline
+	heightmap = apply_modifiers_to_heightmap(heightmap, terrain_bounds)
 
 	_heightmap_dirty = false
 

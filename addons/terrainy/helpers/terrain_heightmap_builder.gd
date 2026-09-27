@@ -7,6 +7,7 @@ extends RefCounted
 const TerrainFeatureNode = preload("res://addons/terrainy/nodes/terrain_feature_node.gd")
 const GpuHeightmapBlender = preload("res://addons/terrainy/helpers/gpu_heightmap_blender.gd")
 const GpuFeatureEvaluator = preload("res://addons/terrainy/helpers/gpu_feature_evaluator.gd")
+const ModifierPipeline = preload("res://addons/terrainy/helpers/modifier_pipeline.gd")
 
 # Constants
 const INFLUENCE_WEIGHT_THRESHOLD = 0.001
@@ -17,18 +18,68 @@ const CACHE_KEY_FALLOFF_PRECISION = 0.01
 var _heightmap_cache: Dictionary = {}  # feature -> Image
 var _influence_cache: Dictionary = {}  # feature -> Image
 var _influence_cache_keys: Dictionary = {}  # feature -> cache key
+# Holes use their own influence cache: their maps depend on hole-specific settings
+# (3D influence, depth) and must not evict the feature's blending influence map.
+var _hole_influence_cache: Dictionary = {}  # feature -> Image
+var _hole_influence_cache_keys: Dictionary = {}  # feature -> cache key
+# Active-pixel bounds per feature, keyed like the influence map itself. The bounds are a property
+# of the influence image, so they are dropped exactly when that image is, and a warm recompose
+# no longer rescans every influence map just to re-derive the same rectangle.
+var _influence_bounds_cache: Dictionary = {}  # feature -> Rect2i
 var _cached_resolution: Vector2i
 var _cached_bounds: Rect2
+
+# Thread safety
+var _task_mutex: Mutex = Mutex.new()
+var _cache_mutex: Mutex = Mutex.new()
 
 # GPU compositor
 var _gpu_compositor: GpuHeightmapBlender = null
 var _use_gpu: bool = true
 
-# GPU feature evaluator (stub)
+# GPU feature evaluator (raw heightmap evaluation for non-noise feature types)
 var _gpu_feature_evaluator: GpuFeatureEvaluator = null
+
+# Shared modifier pipeline (single RenderingDevice for every feature's modifiers)
+var _modifier_pipeline: ModifierPipeline = null
 
 # GPU parameter pack cache (debug/validation)
 var _last_gpu_param_packs: Array = []
+
+# Options (populated by compose())
+var use_gpu_feature_evaluation: bool = true
+var debug_logging: bool = false
+var _noise_fallback_reported: bool = false
+
+func _get_modifier_pipeline() -> ModifierPipeline:
+	if not _modifier_pipeline:
+		_modifier_pipeline = ModifierPipeline.new()
+	return _modifier_pipeline
+
+## Whether this feature is allowed to be evaluated by the GPU feature kernels.
+func _can_evaluate_on_gpu(feature: TerrainFeatureNode) -> bool:
+	if not use_gpu_feature_evaluation:
+		return false
+	if not _gpu_feature_evaluator or not _gpu_feature_evaluator.is_available():
+		return false
+	if not feature.has_method("has_mask_texture") or feature.has_mask_texture():
+		return false
+	if not feature.has_method("get_gpu_param_pack"):
+		return false
+	var pack = feature.get_gpu_param_pack()
+	var feature_type: int = pack.get("type", 0)
+	if not GpuFeatureEvaluator.SUPPORTED_TYPES.has(feature_type):
+		return false
+	if GpuFeatureEvaluator.type_uses_noise(feature_type):
+		# The compute kernels cannot reproduce FastNoiseLite samples (they use their own
+		# single-octave noise in world space), so noise-based features always stay on the CPU:
+		# an "approximate" mode would silently give a different terrain than the editor preview.
+		if not _noise_fallback_reported:
+			_noise_fallback_reported = true
+			if debug_logging:
+				print("[TerrainHeightmapBuilder] Noise-based features are evaluated on the CPU to match the editor preview exactly.")
+		return false
+	return true
 
 func _init() -> void:
 	_initialize_gpu_compositor()
@@ -56,7 +107,7 @@ func _initialize_gpu_feature_evaluator() -> void:
 	if not _gpu_feature_evaluator.is_available():
 		_gpu_feature_evaluator = null
 
-## Compose heightmaps from features
+## Compose heightmaps from features. Returns Dictionary with "heightmap" and "hole_mask".
 func compose(
 	features: Array[TerrainFeatureNode],
 	contexts: Dictionary,
@@ -65,50 +116,109 @@ func compose(
 	base_height: float,
 	use_gpu_composition: bool,
 	use_multithreading: bool = true,
-	max_worker_threads: int = 4
-) -> Image:
+	max_worker_threads: int = 4,
+	use_gpu_feature_eval: bool = true
+) -> Dictionary:
 	var total_start = Time.get_ticks_msec()
-	# Check if resolution or bounds changed (invalidate influence cache)
+	use_gpu_feature_evaluation = use_gpu_feature_eval
+	# The influence maps and the per-feature heightmaps are both sampled on the
+	# resolution/bounds grid, so a grid change invalidates them together. Keeping the
+	# cached heightmaps would reuse images sampled on the previous grid (or skip features
+	# whose size no longer matches, see _compose_cpu).
 	if _cached_resolution != resolution or _cached_bounds != terrain_bounds:
-		_influence_cache.clear()
+		clear_all_caches()
 		_cached_resolution = resolution
 		_cached_bounds = terrain_bounds
 	
 	# Step 1: Generate/update heightmaps for dirty features using contexts (PARALLEL)
 	var feature_gen_start = Time.get_ticks_msec()
 	var generated_count := 0
-	var reused_count := 0
 	var parallel_tasks := []
 	var pending_tasks := []
 	var task_results := {}  # Shared dictionary for worker results
 	var gpu_eval_count := 0
 	
 	# Separate features into: need generation vs cached
+	# Pre-pass: collect features for batch GPU evaluation to reduce submit+sync stalls
+	var gpu_batch_features: Array = []
+	var gpu_batch_packs: Array = []
+	var raw_results: Dictionary = {}  # feature -> raw (unmodified) Image
+	var reused_count := 0
 	for feature in features:
 		if not is_instance_valid(feature) or not feature.is_inside_tree() or not feature.visible:
-			if _heightmap_cache.has(feature):
-				_heightmap_cache.erase(feature)
+			if _has_heightmap_cached(feature):
+				_remove_cached_heightmap(feature)
+			continue
+		if not _has_heightmap_cached(feature) or feature.is_dirty():
+			if _should_use_gpu(use_gpu_composition) and _can_evaluate_on_gpu(feature):
+				gpu_batch_features.append(feature)
+				gpu_batch_packs.append(feature.get_gpu_param_pack())
+				continue  # Will be handled by batch evaluation
+		else:
+			reused_count += 1
+	
+	# Batch GPU feature evaluation: single compute list, single submit+sync
+	if not gpu_batch_features.is_empty():
+		var batch_results = _gpu_feature_evaluator.evaluate_features_gpu_batch(resolution, terrain_bounds, gpu_batch_packs)
+		if batch_results.size() == gpu_batch_features.size():
+			var failed_batch: Array = []
+			for i in gpu_batch_features.size():
+				var feature = gpu_batch_features[i]
+				var gpu_result = batch_results[i]
+				if gpu_result == null:
+					# Leave the feature for the CPU path below instead of caching null,
+					# which would null-dereference during composition.
+					push_warning("[TerrainHeightmapBuilder] Batch GPU evaluation produced no result for '%s', falling back to CPU" % feature.name)
+					failed_batch.append(feature)
+					continue
+				raw_results[feature] = gpu_result
+				gpu_eval_count += 1
+				generated_count += 1
+			for feature in failed_batch:
+				gpu_batch_features.erase(feature)
+		else:
+			push_warning("[TerrainHeightmapBuilder] Batch GPU evaluation returned %d results for %d features, falling back to per-feature" % [batch_results.size(), gpu_batch_features.size()])
+			# Fallback: evaluate individually
+			var failed_single: Array = []
+			for i in gpu_batch_features.size():
+				var feature = gpu_batch_features[i]
+				var gpu_result = _gpu_feature_evaluator.evaluate_single_feature_gpu(resolution, terrain_bounds, gpu_batch_packs[i])
+				if gpu_result:
+					raw_results[feature] = gpu_result
+					gpu_eval_count += 1
+					generated_count += 1
+				else:
+					failed_single.append(feature)
+			for feature in failed_single:
+				gpu_batch_features.erase(feature)
+	
+	for feature in features:
+		if not is_instance_valid(feature) or not feature.is_inside_tree() or not feature.visible:
+			if _has_heightmap_cached(feature):
+				_remove_cached_heightmap(feature)
+			continue
+		
+		# Skip features already handled by batch GPU evaluation
+		if gpu_batch_features.has(feature):
 			continue
 		
 		# Check if we need to regenerate this feature's heightmap
-		if not _heightmap_cache.has(feature) or feature.is_dirty():
-			# GPU feature evaluation (limited types)
-			if _should_use_gpu(use_gpu_composition) and _gpu_feature_evaluator:
-				if feature.has_method("get_gpu_param_pack"):
-					var pack = feature.get_gpu_param_pack()
-					var gpu_result = _gpu_feature_evaluator.evaluate_single_feature_gpu(resolution, terrain_bounds, pack)
-					if gpu_result:
-						if feature.has_method("apply_modifiers_to_heightmap"):
-							gpu_result = feature.apply_modifiers_to_heightmap(gpu_result, terrain_bounds, contexts.get(feature))
-						_heightmap_cache[feature] = gpu_result
-						gpu_eval_count += 1
-						generated_count += 1
-						continue
+		if not _has_heightmap_cached(feature) or feature.is_dirty():
+			# GPU feature evaluation (limited types, no mask textures, no noise divergence)
+			if _should_use_gpu(use_gpu_composition) and _can_evaluate_on_gpu(feature):
+				var gpu_result = _gpu_feature_evaluator.evaluate_single_feature_gpu(resolution, terrain_bounds, feature.get_gpu_param_pack())
+				if gpu_result:
+					raw_results[feature] = gpu_result
+					gpu_eval_count += 1
+					generated_count += 1
+					continue
 			# Launch parallel generation task (batched) or generate on main thread
 			var ctx = contexts.get(feature)
-			if use_multithreading and ctx:
+			if not ctx:
+				ctx = feature.prepare_evaluation_context()
+			if use_multithreading:
 				var task_id = WorkerThreadPool.add_task(
-					_generate_heightmap_worker.bind(feature, resolution, terrain_bounds, ctx, task_results)
+					_generate_heightmap_worker.bind(feature, resolution, terrain_bounds, ctx, task_results, _task_mutex)
 				)
 				parallel_tasks.append({"feature": feature, "task_id": task_id})
 				pending_tasks.append({"feature": feature, "task_id": task_id})
@@ -119,43 +229,64 @@ func compose(
 						WorkerThreadPool.wait_for_task_completion(task.task_id)
 					pending_tasks.clear()
 			else:
-				# Fallback: generate on main thread (or no context)
-				if not ctx:
-					push_warning("[TerrainHeightmapBuilder] No context for feature '%s', generating on main thread" % feature.name)
-					_heightmap_cache[feature] = feature.generate_heightmap(resolution, terrain_bounds)
-				else:
-					_heightmap_cache[feature] = feature.generate_heightmap_with_context_raw(resolution, terrain_bounds, ctx)
-				if is_instance_valid(feature) and feature.has_method("apply_modifiers_to_heightmap"):
-					_heightmap_cache[feature] = feature.apply_modifiers_to_heightmap(
-						_heightmap_cache[feature],
-						terrain_bounds,
-						ctx
-					)
+				raw_results[feature] = feature.generate_heightmap_with_context_raw(resolution, terrain_bounds, ctx)
 			generated_count += 1
-		else:
-			reused_count += 1
 	
 	# Wait for any remaining parallel tasks to complete
 	for task in pending_tasks:
 		WorkerThreadPool.wait_for_task_completion(task.task_id)
 	
-	# Retrieve results from shared dictionary and cache them
+	# Take snapshot of shared results under lock
+	_task_mutex.lock()
+	var local_results = task_results.duplicate()
+	_task_mutex.unlock()
+	
+	# Retrieve results from snapshot
 	for task in parallel_tasks:
 		var feature = task.feature
-		if task_results.has(feature):
-			var heightmap = task_results[feature]
-			var ctx = contexts.get(feature)
-			if is_instance_valid(feature) and feature.has_method("apply_modifiers_to_heightmap"):
-				heightmap = feature.apply_modifiers_to_heightmap(heightmap, terrain_bounds, ctx)
-			_heightmap_cache[feature] = heightmap
+		if local_results.has(feature):
+			raw_results[feature] = local_results[feature]
 		else:
 			push_error("[TerrainHeightmapBuilder] Failed to generate heightmap for feature '%s'" % feature.name)
 	
+	# Step 1b: Apply modifiers to every freshly generated heightmap in a single batched
+	# pass. This keeps modifications off the worker threads, uses one GPU submit for all
+	# features, and guarantees modifiers are applied exactly once.
+	var modifier_items: Array = []
+	var modifier_features: Array = []
+	for feature in raw_results.keys():
+		if not is_instance_valid(feature):
+			continue
+		var raw_image: Image = raw_results[feature]
+		if raw_image == null:
+			push_error("[TerrainHeightmapBuilder] No heightmap produced for feature '%s'" % feature.name)
+			continue
+		if feature.has_method("needs_modifiers") and feature.needs_modifiers():
+			var settings: Dictionary = feature.get_modifier_settings()
+			settings["heightmap"] = raw_image
+			settings["bounds"] = terrain_bounds
+			settings["context"] = contexts.get(feature)
+			modifier_items.append(settings)
+			modifier_features.append(feature)
+		else:
+			_store_heightmap(feature, raw_image)
+	
+	if not modifier_items.is_empty():
+		var modified_images: Array = _get_modifier_pipeline().apply_modifiers_batch(modifier_items)
+		for i in modifier_features.size():
+			var feature = modifier_features[i]
+			var modified: Image = modified_images[i] if i < modified_images.size() else null
+			if modified == null:
+				push_warning("[TerrainHeightmapBuilder] Modifiers failed for feature '%s', keeping unmodified heightmap" % feature.name)
+				modified = raw_results[feature]
+			_store_heightmap(feature, modified)
+	
 	var feature_gen_elapsed = Time.get_ticks_msec() - feature_gen_start
-	if generated_count > 0:
-		print("[TerrainHeightmapBuilder] Feature heightmaps: %d generated (%d GPU, %d CPU), %d cached in %d ms" % [generated_count, gpu_eval_count, generated_count - gpu_eval_count, reused_count, feature_gen_elapsed])
-	else:
-		print("[TerrainHeightmapBuilder] Feature heightmaps: all %d cached (0 generated)" % reused_count)
+	if debug_logging:
+		if generated_count > 0:
+			print("[TerrainHeightmapBuilder] Feature heightmaps: %d generated (%d GPU, %d CPU), %d cached in %d ms" % [generated_count, gpu_eval_count, generated_count - gpu_eval_count, reused_count, feature_gen_elapsed])
+		else:
+			print("[TerrainHeightmapBuilder] Feature heightmaps: all %d cached (0 generated)" % reused_count)
 	
 	# Step 2: Compose all heightmaps
 	if _should_use_gpu(use_gpu_composition):
@@ -163,14 +294,16 @@ func compose(
 		var result = _compose_gpu(features, contexts, resolution, terrain_bounds, base_height)
 		if result:
 			var total_elapsed = Time.get_ticks_msec() - total_start
-			print("[TerrainHeightmapBuilder] Compose total time: %d ms" % total_elapsed)
+			if debug_logging:
+				print("[TerrainHeightmapBuilder] Compose total time: %d ms" % total_elapsed)
 			return result
 		# GPU failed, fall back to CPU
 		push_warning("[TerrainHeightmapBuilder] GPU composition failed, falling back to CPU")
 	
-	var cpu_result = _compose_cpu(features, contexts, resolution, terrain_bounds, base_height)
+	var cpu_result = _compose_cpu(features, contexts, resolution, terrain_bounds, base_height, use_gpu_composition)
 	var total_elapsed = Time.get_ticks_msec() - total_start
-	print("[TerrainHeightmapBuilder] Compose total time: %d ms" % total_elapsed)
+	if debug_logging:
+		print("[TerrainHeightmapBuilder] Compose total time: %d ms" % total_elapsed)
 	return cpu_result
 
 ## Collect GPU parameter packs for validation and future GPU kernels
@@ -198,39 +331,84 @@ func _should_use_gpu(user_wants_gpu: bool) -> bool:
 		return false
 	return true
 
-## Compose final heightmap using GPU
+## Compose final heightmap using GPU. Returns Dictionary with "heightmap" and "hole_mask".
 func _compose_gpu(
 	features: Array[TerrainFeatureNode],
 	contexts: Dictionary,
 	resolution: Vector2i,
 	terrain_bounds: Rect2,
 	base_height: float
-) -> Image:
+) -> Dictionary:
 	var start_time = Time.get_ticks_msec()
 	if not _gpu_compositor or not _gpu_compositor.is_available():
 		push_error("[TerrainHeightmapBuilder] GPU compositor not initialized")
-		return null
+		return {}
 	
 	# Prepare data arrays
 	var feature_heightmaps: Array[Image] = []
 	var influence_maps: Array[Image] = []
 	var blend_modes := PackedInt32Array()
 	var strengths := PackedFloat32Array()
+	var hole_features: Array = []  # Track hole features separately
 	
 	var influence_gen_time = 0
 	var influence_generated_count = 0
 	var influence_cached_count = 0
 	
+	# First pass: identify features that need GPU influence map generation (uncached, no mask)
+	var batch_gpu_features: Array = []  # Features for batch GPU influence generation
+	var batch_feature_info: Array = []  # Parallel array with feature metadata for later lookup
+	
+	for feature in features:
+		if not _has_heightmap_cached(feature):
+			continue
+		var feature_map = _get_cached_heightmap(feature)
+		if feature_map.get_width() != resolution.x or feature_map.get_height() != resolution.y:
+			continue
+		var is_hole = feature.is_hole_feature()
+		if is_hole:
+			hole_features.append(feature)
+		var has_mask = feature.has_method("has_mask_texture") and feature.has_mask_texture()
+		var cache_key = _get_influence_cache_key(feature)
+		var is_cached = _influence_cache.has(feature) and _influence_cache_keys.get(feature) == cache_key
+		if not is_cached and not has_mask and not is_hole and _gpu_compositor and _gpu_compositor.is_available():
+			batch_gpu_features.append(feature)
+			batch_feature_info.append({"feature": feature, "cache_key": cache_key})
+		elif is_cached:
+			influence_cached_count += 1
+	
+	# Batch-generate all uncached GPU influence maps in a single compute list
+	if not batch_gpu_features.is_empty():
+		var inf_start = Time.get_ticks_msec()
+		var batch_results = _gpu_compositor.generate_influence_maps_gpu_batch(batch_gpu_features, resolution, terrain_bounds)
+		if batch_results.size() == batch_gpu_features.size():
+			for i in batch_results.size():
+				var info = batch_feature_info[i]
+				_influence_cache[info.feature] = batch_results[i]
+				_influence_cache_keys[info.feature] = info.cache_key
+				influence_generated_count += 1
+		else:
+			push_warning("[TerrainHeightmapBuilder] Batch GPU influence generation returned %d results for %d features" % [batch_results.size(), batch_gpu_features.size()])
+		influence_gen_time += Time.get_ticks_msec() - inf_start
+	
 	# Collect valid features
 	for feature in features:
-		if not _heightmap_cache.has(feature):
+		if not _has_heightmap_cached(feature):
 			continue
 		
-		var feature_map = _heightmap_cache[feature]
+		# Hole features only need the dedicated hole mask (composed separately) - their
+		# influence map is never used for blending, so don't generate it here.
+		if feature.is_hole_feature():
+			continue
+		
+		var feature_map = _get_cached_heightmap(feature)
 		
 		# Validate resolution match
 		if feature_map.get_width() != resolution.x or feature_map.get_height() != resolution.y:
 			continue
+		
+		# Check if feature has a mask texture (GPU influence maps don't support textures)
+		var has_mask = feature.has_method("has_mask_texture") and feature.has_mask_texture()
 		
 		# Get or generate cached influence map
 		var influence_map: Image
@@ -238,13 +416,14 @@ func _compose_gpu(
 		
 		if _influence_cache.has(feature) and _influence_cache_keys.get(feature) == cache_key:
 			influence_map = _influence_cache[feature]
-			influence_cached_count += 1
 		else:
 			var inf_start = Time.get_ticks_msec()
-			# Use GPU to generate influence map for better performance
-			if _gpu_compositor and _gpu_compositor.is_available():
+			# Use GPU to generate influence map for better performance (unless masked)
+			if debug_logging:
+				if has_mask:
+					print("[TerrainHeightmapBuilder] Skipping GPU influence map for '%s' — mask textures require CPU path" % feature.name)
+			if not has_mask and _gpu_compositor and _gpu_compositor.is_available():
 				influence_map = _gpu_compositor.generate_influence_map_gpu(feature, resolution, terrain_bounds)
-				print("[TerrainHeightmapBuilder] Generated influence map for '%s' on GPU in %d ms" % [feature.name, Time.get_ticks_msec() - inf_start])
 			else:
 				# Get context for thread-safe influence calculation
 				var ctx = contexts.get(feature)
@@ -253,54 +432,66 @@ func _compose_gpu(
 				else:
 					push_warning("[TerrainHeightmapBuilder] No context for feature '%s', using fallback" % feature.name)
 					influence_map = _generate_influence_map(feature, null, resolution, terrain_bounds)
-				print("[TerrainHeightmapBuilder] Generated influence map for '%s' on CPU in %d ms" % [feature.name, Time.get_ticks_msec() - inf_start])
+				if debug_logging:
+					print("[TerrainHeightmapBuilder] Generated influence map for '%s' on CPU in %d ms" % [feature.name, Time.get_ticks_msec() - inf_start])
 			influence_gen_time += Time.get_ticks_msec() - inf_start
 			influence_generated_count += 1
 			_influence_cache[feature] = influence_map
 			_influence_cache_keys[feature] = cache_key
 		
+		# Collect blending input
 		feature_heightmaps.append(feature_map)
 		influence_maps.append(influence_map)
 		blend_modes.append(feature.blend_mode)
 		strengths.append(feature.strength)
 	
-	# If no features, return base height
+	# If no features (heightmap-contributing), create base height
+	var final_heightmap: Image
 	if feature_heightmaps.is_empty():
-		var base_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
-		base_map.fill(Color(base_height, 0, 0, 1))
-		return base_map
+		final_heightmap = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
+		final_heightmap.fill(Color(base_height, 0, 0, 1))
+	else:
+		# Compose on GPU
+		final_heightmap = _gpu_compositor.compose_gpu(
+			resolution,
+			base_height,
+			feature_heightmaps,
+			influence_maps,
+			blend_modes,
+			strengths
+		)
 	
-	# Compose on GPU
-	var result = _gpu_compositor.compose_gpu(
-		resolution,
-		base_height,
-		feature_heightmaps,
-		influence_maps,
-		blend_modes,
-		strengths
-	)
+	# Compose hole mask
+	var hole_mask = _compose_hole_mask(hole_features, contexts, resolution, terrain_bounds)
 	
 	var elapsed = Time.get_ticks_msec() - start_time
-	if influence_gen_time > 0:
-		print("[TerrainHeightmapBuilder] GPU composed %d features in %d ms (%d generated, %d cached, %d ms influence generation)" % [
-			feature_heightmaps.size(), elapsed, influence_generated_count, influence_cached_count, influence_gen_time
-		])
-	else:
-		print("[TerrainHeightmapBuilder] GPU composed %d features in %d ms (all %d influence maps cached)" % [
-			feature_heightmaps.size(), elapsed, influence_cached_count
-		])
+	if debug_logging:
+		if influence_gen_time > 0:
+			print("[TerrainHeightmapBuilder] GPU composed %d features in %d ms (%d generated, %d cached, %d ms influence generation)" % [
+				feature_heightmaps.size(), elapsed, influence_generated_count, influence_cached_count, influence_gen_time
+			])
+		else:
+			print("[TerrainHeightmapBuilder] GPU composed %d features in %d ms (all %d influence maps cached)" % [
+				feature_heightmaps.size(), elapsed, influence_cached_count
+			])
 	
-	return result
+	return {
+		"heightmap": final_heightmap,
+		"hole_mask": hole_mask
+	}
 
-## Compose final heightmap using CPU
+## Compose final heightmap using CPU. Returns Dictionary with "heightmap" and "hole_mask".
 func _compose_cpu(
 	features: Array[TerrainFeatureNode],
 	contexts: Dictionary,
 	resolution: Vector2i,
 	terrain_bounds: Rect2,
-	base_height: float
-) -> Image:
+	base_height: float,
+	use_gpu_composition: bool = false
+) -> Dictionary:
 	var start_time = Time.get_ticks_msec()
+	
+	# Respect user's explicit choice: do not auto-enable GPU when user disabled it
 	
 	# Create base heightmap
 	var final_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
@@ -308,31 +499,46 @@ func _compose_cpu(
 	
 	# Step 1: Pre-compute all influence maps on main thread (avoids to_local() issues in threads)
 	var blend_data = []
+	var hole_features: Array = []  # Track hole features separately
+	
 	for feature in features:
-		if not _heightmap_cache.has(feature):
+		if not _has_heightmap_cached(feature):
 			continue
 		
-		var feature_map = _heightmap_cache[feature]
+		var feature_map = _get_cached_heightmap(feature)
 		
 		# Validate resolution match
 		if feature_map.get_width() != resolution.x or feature_map.get_height() != resolution.y:
 			push_warning("[TerrainHeightmapBuilder] Feature '%s' heightmap size mismatch, skipping" % feature.name)
 			continue
 		
+		# Check if this is a hole feature
+		var is_hole = feature.is_hole_feature()
+		if is_hole:
+			hole_features.append(feature)
+			continue  # Holes don't contribute to heightmap blending
+		
 		# Get or generate cached influence map
 		var influence_map: Image
 		var cache_key = _get_influence_cache_key(feature)
-		
+		var has_mask = feature.has_method("has_mask_texture") and feature.has_mask_texture()
+
 		if _influence_cache.has(feature) and _influence_cache_keys.get(feature) == cache_key:
 			influence_map = _influence_cache[feature]
 		else:
-			# Get context for thread-safe influence calculation
-			var ctx = contexts.get(feature)
-			if ctx:
-				influence_map = _generate_influence_map(feature, ctx, resolution, terrain_bounds)
-			else:
-				push_warning("[TerrainHeightmapBuilder] No context for feature '%s', using fallback" % feature.name)
-				influence_map = _generate_influence_map(feature, null, resolution, terrain_bounds)
+			# GPU influence maps ignore mask textures, so masked features must use the CPU
+			if use_gpu_composition and not has_mask and _gpu_compositor and _gpu_compositor.is_available():
+				influence_map = _gpu_compositor.generate_influence_map_gpu(feature, resolution, terrain_bounds)
+			
+			if not influence_map:
+				# Fallback to CPU
+				var ctx = contexts.get(feature)
+				if ctx:
+					influence_map = _generate_influence_map(feature, ctx, resolution, terrain_bounds)
+				else:
+					push_warning("[TerrainHeightmapBuilder] No context for feature '%s', using fallback" % feature.name)
+					influence_map = _generate_influence_map(feature, null, resolution, terrain_bounds)
+			
 			_influence_cache[feature] = influence_map
 			_influence_cache_keys[feature] = cache_key
 		
@@ -340,89 +546,131 @@ func _compose_cpu(
 			"heightmap": feature_map,
 			"influence": influence_map,
 			"blend_mode": feature.blend_mode,
-			"strength": feature.strength
+			"strength": feature.strength,
+			"active_bounds": _influence_bounds_for(feature, influence_map, resolution)
 		})
 	
-	if blend_data.is_empty():
-		var elapsed = Time.get_ticks_msec() - start_time
-		print("[TerrainHeightmapBuilder] CPU composed 0 features in %d ms" % elapsed)
-		return final_map
+	# Step 2: Blend using optimized byte array operations (if there are non-hole features)
+	if not blend_data.is_empty():
+		_blend_all_features(final_map, blend_data, resolution)
 	
-	# Step 2: Blend using optimized byte array operations
-	# Note: GDScript PackedByteArray cannot be safely shared across threads,
-	# so we use single-threaded processing with optimized byte operations
-	_blend_all_features(final_map, blend_data, resolution)
+	# Step 3: Compose hole mask
+	var hole_mask = _compose_hole_mask(hole_features, contexts, resolution, terrain_bounds)
 	
 	var elapsed = Time.get_ticks_msec() - start_time
-	print("[TerrainHeightmapBuilder] CPU composed %d features in %d ms" % [
-		blend_data.size(), elapsed
-	])
+	if debug_logging:
+		print("[TerrainHeightmapBuilder] CPU composed %d features in %d ms" % [
+			blend_data.size(), elapsed
+		])
 	
-	return final_map
+	return {
+		"heightmap": final_map,
+		"hole_mask": hole_mask
+	}
 
-## Blend all features into final map using optimized byte array operations
+## Blend all features into final map using PackedFloat32Array operations.
+## Iterates only the active (non-zero influence) pixel bounds per feature.
 func _blend_all_features(
 	final_map: Image,
 	blend_data: Array,
 	resolution: Vector2i
 ) -> void:
-	var final_data = final_map.get_data()
-	var bytes_per_pixel = 4  # FORMAT_RF = 4 bytes (float32)
+	var final_data := final_map.get_data().to_float32_array()
 	var width = resolution.x
 	var height = resolution.y
 	
 	# Process each feature
 	for data in blend_data:
 		var feature_map: Image = data["heightmap"]
+		var feature_data := feature_map.get_data().to_float32_array()
 		var influence_map: Image = data["influence"]
+		var influence_data := influence_map.get_data().to_float32_array()
 		var blend_mode: int = data["blend_mode"]
 		var strength: float = data["strength"]
+		var bounds: Rect2i = data.get("active_bounds", Rect2i(0, 0, width, height))
 		
-		# Get byte buffers for feature and influence
-		var feature_data = feature_map.get_data()
-		var influence_data = influence_map.get_data()
+		# Process only active pixels
+		var y_start = bounds.position.y
+		var y_end = bounds.position.y + bounds.size.y
+		var x_start = bounds.position.x
+		var x_end = bounds.position.x + bounds.size.x
 		
-		# Process all pixels
-		for y in range(height):
-			for x in range(width):
-				var pixel_index = y * width + x
-				var offset = pixel_index * bytes_per_pixel
-				
-				# Read influence weight
-				var weight = influence_data.decode_float(offset)
+		for y in range(y_start, y_end):
+			var row_offset = y * width
+			for x in range(x_start, x_end):
+				var i = row_offset + x
+				var weight = influence_data[i]
 				if weight <= INFLUENCE_WEIGHT_THRESHOLD:
 					continue
 				
-				# Read heights
-				var current_height = final_data.decode_float(offset)
-				var feature_height = feature_data.decode_float(offset)
-				var weighted_height = feature_height * weight * strength
+				var feature_h = feature_data[i]
+				var current_h = final_data[i]
+				var weighted_h = feature_h * weight * strength
 				
-				# Apply blend mode
-				var new_height: float
 				match blend_mode:
 					TerrainFeatureNode.BlendMode.ADD:
-						new_height = current_height + weighted_height
+						final_data[i] = current_h + weighted_h
 					TerrainFeatureNode.BlendMode.SUBTRACT:
-						new_height = current_height - weighted_height
-					TerrainFeatureNode.BlendMode.MULTIPLY:
-						new_height = current_height * (1.0 + weighted_height)
+						final_data[i] = current_h - weighted_h
 					TerrainFeatureNode.BlendMode.MAX:
-						new_height = max(current_height, feature_height * weight)
+						final_data[i] = max(current_h, feature_h * weight)
 					TerrainFeatureNode.BlendMode.MIN:
-						new_height = min(current_height, feature_height * weight)
+						final_data[i] = min(current_h, feature_h * weight)
+					TerrainFeatureNode.BlendMode.MULTIPLY:
+						final_data[i] = current_h * (1.0 + weighted_h)
 					TerrainFeatureNode.BlendMode.AVERAGE:
-						new_height = (current_height + weighted_height) * 0.5
+						final_data[i] = (current_h + weighted_h) * 0.5
 					_:
-						new_height = current_height + weighted_height
-				
-				# Write new height
-				final_data.encode_float(offset, new_height)
+						final_data[i] = current_h + weighted_h
 	
-	# Update image with modified data
-	final_map.set_data(width, height, false, Image.FORMAT_RF, final_data)
+	# Write back once
+	final_map.set_data(width, height, false, Image.FORMAT_RF, final_data.to_byte_array())
+
+## Active-pixel bounds of a feature's influence map, computed once and reused.
+##
+## _compute_influence_bounds walks the whole influence map (~79 ms at 1025x1025 for one feature),
+## and it used to run on every compose, including ones that hit the influence cache and did not
+## regenerate anything. That made a warm recompose pay a full scan per feature for a rectangle that
+## had not changed. The result is now cached alongside the map it describes; every path that drops
+## the influence image also drops its bounds here, so a stale rectangle cannot survive.
+func _influence_bounds_for(feature: TerrainFeatureNode, influence_map: Image, resolution: Vector2i) -> Rect2i:
+	if _influence_bounds_cache.has(feature):
+		return _influence_bounds_cache[feature]
+	var bounds := _compute_influence_bounds(influence_map, resolution)
+	_influence_bounds_cache[feature] = bounds
+	return bounds
+
+## Compute the pixel-space bounding box of non-zero influence pixels.
+## Returns a Rect2i covering the active region; falls back to full resolution if all zeros.
+func _compute_influence_bounds(influence_map: Image, resolution: Vector2i) -> Rect2i:
+	var data := influence_map.get_data().to_float32_array()
+	var width = resolution.x
+	var height = resolution.y
+	var min_x: int = width
+	var min_y: int = height
+	var max_x: int = -1
+	var max_y: int = -1
+	
+	for y in height:
+		var row_offset = y * width
+		for x in width:
+			if data[row_offset + x] > INFLUENCE_WEIGHT_THRESHOLD:
+				if x < min_x: min_x = x
+				if x > max_x: max_x = x
+				if y < min_y: min_y = y
+				if y > max_y: max_y = y
+	
+	if max_x < 0:
+		return Rect2i(0, 0, 0, 0)  # No active pixels
+	
+	return Rect2i(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
 
 ## Generate influence map for a feature using context (thread-safe)
+##
+## Only the pixels inside the feature's rotation-aware bounds are evaluated: a feature covering a
+## small part of the terrain used to walk every pixel of the grid and write 0.0 into almost all of
+## them. Everything outside the clip region stays at the image's initial 0.0, which is exactly what
+## the full pass wrote there, so the resulting map is unchanged.
 func _generate_influence_map(
 	feature: TerrainFeatureNode,
 	context,
@@ -430,45 +678,229 @@ func _generate_influence_map(
 	terrain_bounds: Rect2
 ) -> Image:
 	var influence_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
-	var influence_data = influence_map.get_data()
-	var bytes_per_pixel = 4  # FORMAT_RF = 4 bytes (float32)
+
+	var bounds := _influence_pixel_bounds(feature, context, resolution, terrain_bounds)
+	if bounds.size.x <= 0 or bounds.size.y <= 0:
+		# Nothing of the feature overlaps the terrain; the zero-filled image is the answer.
+		return influence_map
+
+	var influence_data := influence_map.get_data().to_float32_array()
 	
 	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
 	
-	for y in range(resolution.y):
+	for y in range(bounds.position.y, bounds.position.y + bounds.size.y):
 		var world_z = terrain_bounds.position.y + (y * step.y)
-		for x in range(resolution.x):
+		var row := y * resolution.x
+		for x in range(bounds.position.x, bounds.position.x + bounds.size.x):
 			var world_x = terrain_bounds.position.x + (x * step.x)
 			var world_pos = Vector3(world_x, 0, world_z)
 			
 			# Use thread-safe context-based influence calculation
 			var weight = feature.get_influence_weight_safe(world_pos, context)
-			var pixel_index = y * resolution.x + x
-			var offset = pixel_index * bytes_per_pixel
-			influence_data.encode_float(offset, weight)
+			var pixel_index = row + x
+			influence_data[pixel_index] = weight
 	
 	# Update image with computed data
-	influence_map.set_data(resolution.x, resolution.y, false, Image.FORMAT_RF, influence_data)
+	influence_map.set_data(resolution.x, resolution.y, false, Image.FORMAT_RF, influence_data.to_byte_array())
 	
+	return influence_map
+
+
+## Pixel rectangle the influence pass of [param feature] has to cover.
+##
+## Reads the clip region from the feature's rotation-aware AABB. Features that override their weight
+## computation (holes with 3D influence) get a conservative square instead, because their shape
+## extends in Y and the 4-corner AABB would not contain it once the feature is tilted.
+func _influence_pixel_bounds(
+	feature: TerrainFeatureNode,
+	context,
+	resolution: Vector2i,
+	terrain_bounds: Rect2
+) -> Rect2i:
+	var aabb: AABB
+	var uses_3d := context != null \
+		and feature.has_method("get_hole_3d_influence") \
+		and feature.get_hole_3d_influence()
+	if uses_3d:
+		var half_extent := EvaluationContext.conservative_xz_half_extent(
+			context.influence_shape,
+			context.influence_size,
+			feature.get_hole_depth() * 0.5
+		)
+		var center: Vector3 = context.world_position
+		aabb = AABB(
+			Vector3(center.x - half_extent, center.y - 2000.0, center.z - half_extent),
+			Vector3(half_extent * 2.0, 4000.0, half_extent * 2.0)
+		)
+	elif context != null:
+		aabb = context.aabb
+	else:
+		aabb = feature.get_influence_aabb()
+	return EvaluationContext.compute_pixel_bounds(aabb, terrain_bounds, resolution)
+
+## Compose hole mask from hole features. Returns Image where 1.0 = hole, 0.0 = solid.
+func _compose_hole_mask(
+	hole_features: Array,
+	contexts: Dictionary,
+	resolution: Vector2i,
+	terrain_bounds: Rect2
+) -> Image:
+	var hole_mask = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
+	hole_mask.fill(Color(0, 0, 0, 1))  # 0 = solid terrain
+	
+	if hole_features.is_empty():
+		return hole_mask
+	
+	var hole_mask_data := hole_mask.get_data().to_float32_array()
+	var width = resolution.x
+	var height = resolution.y
+	
+	for feature in hole_features:
+		if not is_instance_valid(feature):
+			continue
+		
+		var use_3d = feature.get_hole_3d_influence()
+		var hole_depth_val = feature.get_hole_depth()
+		var cache_key = _get_hole_influence_cache_key(feature)
+		
+		var influence_map: Image
+		
+		if _hole_influence_cache.has(feature) and _hole_influence_cache_keys.get(feature) == cache_key:
+			influence_map = _hole_influence_cache[feature]
+		else:
+			var ctx = contexts.get(feature)
+			if use_3d:
+				influence_map = _generate_hole_influence_map_3d(feature, ctx, resolution, terrain_bounds, hole_depth_val)
+			else:
+				influence_map = _generate_influence_map(feature, ctx, resolution, terrain_bounds)
+			_hole_influence_cache[feature] = influence_map
+			_hole_influence_cache_keys[feature] = cache_key
+		
+		var influence_data := influence_map.get_data().to_float32_array()
+		var strength = feature.strength
+		
+		for y in range(height):
+			for x in range(width):
+				var pixel_index = y * width + x
+				
+				var influence = influence_data[pixel_index]
+				if influence > INFLUENCE_WEIGHT_THRESHOLD:
+					var current_hole = hole_mask_data[pixel_index]
+					hole_mask_data[pixel_index] = max(current_hole, influence * strength)
+	
+	hole_mask.set_data(width, height, false, Image.FORMAT_RF, hole_mask_data.to_byte_array())
+	return hole_mask
+
+## Generate influence map for holes with 3D rotation support.
+## Uses full 3D local coordinates to properly handle rotated holes.
+##
+## Clipped to the same pixel bounds as the flat variant; see [method _influence_pixel_bounds] for
+## why a 3D hole uses a conservative square instead of the 4-corner AABB.
+func _generate_hole_influence_map_3d(
+	feature: TerrainFeatureNode,
+	context,
+	resolution: Vector2i,
+	terrain_bounds: Rect2,
+	hole_depth: float
+) -> Image:
+	var influence_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
+
+	var bounds := _influence_pixel_bounds(feature, context, resolution, terrain_bounds)
+	if bounds.size.x <= 0 or bounds.size.y <= 0:
+		return influence_map
+
+	var influence_data := influence_map.get_data().to_float32_array()
+	
+	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
+	var shape_size = Vector3(feature.influence_size.x, hole_depth, feature.influence_size.y)
+	
+	for y in range(bounds.position.y, bounds.position.y + bounds.size.y):
+		var world_z = terrain_bounds.position.y + (y * step.y)
+		var row := y * resolution.x
+		for x in range(bounds.position.x, bounds.position.x + bounds.size.x):
+			var world_x = terrain_bounds.position.x + (x * step.x)
+			var world_pos = Vector3(world_x, 0, world_z)
+			
+			var weight: float
+			if context:
+				weight = context.get_influence_weight_3d(world_pos, shape_size)
+			else:
+				weight = feature.get_influence_weight_safe(world_pos, context)
+			
+			var pixel_index = row + x
+			influence_data[pixel_index] = weight
+	
+	influence_map.set_data(resolution.x, resolution.y, false, Image.FORMAT_RF, influence_data.to_byte_array())
 	return influence_map
 
 ## Generate cache key for influence map
 func _get_influence_cache_key(feature: TerrainFeatureNode) -> String:
-	# Only include properties that affect influence calculation
 	var pos_rounded = (feature.global_position / CACHE_KEY_POSITION_PRECISION).round() * CACHE_KEY_POSITION_PRECISION
 	var size_rounded = (feature.influence_size / CACHE_KEY_POSITION_PRECISION).round() * CACHE_KEY_POSITION_PRECISION
 	var falloff_rounded = snappedf(feature.edge_falloff, CACHE_KEY_FALLOFF_PRECISION)
-	return "%s_%s_%d_%f" % [
+	var rot = feature.global_rotation
+	var rot_rounded = "%d_%d_%d" % [
+		int(round(rot.x * 100.0)),
+		int(round(rot.y * 100.0)),
+		int(round(rot.z * 100.0))
+	]
+	# The mask texture contributes to the influence map, so include its identity and
+	# inversion flag in the key (otherwise mask changes would reuse a stale map).
+	var mask_signature := "nomask"
+	if feature.mask_texture != null:
+		mask_signature = "%s_%d" % [
+			str(feature.mask_texture.get_instance_id()),
+			int(1 if feature.mask_invert else 0)
+		]
+	return "%s_%s_%d_%f_%s_%s" % [
 		pos_rounded,
 		size_rounded,
 		int(feature.influence_shape),
-		falloff_rounded
+		falloff_rounded,
+		rot_rounded,
+		mask_signature
 	]
+
+## Cache key for the hole influence cache (influence key + hole specific settings)
+func _get_hole_influence_cache_key(feature: TerrainFeatureNode) -> String:
+	return "%s_%d_%.0f_hole" % [
+		_get_influence_cache_key(feature),
+		1 if feature.get_hole_3d_influence() else 0,
+		feature.get_hole_depth()
+	]
+
+## Thread-safe helpers for _heightmap_cache
+func _has_heightmap_cached(feature: TerrainFeatureNode) -> bool:
+	_cache_mutex.lock()
+	var has = _heightmap_cache.has(feature)
+	_cache_mutex.unlock()
+	return has
+
+func _get_cached_heightmap(feature: TerrainFeatureNode) -> Image:
+	_cache_mutex.lock()
+	var img = _heightmap_cache.get(feature)
+	_cache_mutex.unlock()
+	return img
+
+func _store_heightmap(feature: TerrainFeatureNode, heightmap: Image) -> void:
+	if heightmap == null:
+		push_error("[TerrainHeightmapBuilder] Refusing to cache a null heightmap for '%s'" % feature.name)
+		return
+	_cache_mutex.lock()
+	_heightmap_cache[feature] = heightmap
+	_cache_mutex.unlock()
+	# Keep the feature's own cache metadata in sync. Without this the feature stays
+	# "dirty" forever and every rebuild regenerates (and re-uploads) every heightmap.
+	feature.mark_heightmap_clean(heightmap, _cached_resolution, _cached_bounds)
+
+func _remove_cached_heightmap(feature: TerrainFeatureNode) -> void:
+	_cache_mutex.lock()
+	_heightmap_cache.erase(feature)
+	_cache_mutex.unlock()
 
 ## Invalidate heightmap cache for a feature
 func invalidate_heightmap(feature: TerrainFeatureNode) -> void:
-	if _heightmap_cache.has(feature):
-		_heightmap_cache.erase(feature)
+	_remove_cached_heightmap(feature)
 
 ## Invalidate influence cache for a feature
 func invalidate_influence(feature: TerrainFeatureNode) -> void:
@@ -476,12 +908,42 @@ func invalidate_influence(feature: TerrainFeatureNode) -> void:
 		_influence_cache.erase(feature)
 	if _influence_cache_keys.has(feature):
 		_influence_cache_keys.erase(feature)
+	if _hole_influence_cache.has(feature):
+		_hole_influence_cache.erase(feature)
+	if _hole_influence_cache_keys.has(feature):
+		_hole_influence_cache_keys.erase(feature)
+	# The bounds describe the influence image that was just dropped, so they go with it.
+	if _influence_bounds_cache.has(feature):
+		_influence_bounds_cache.erase(feature)
+
+## Invalidate the influence caches for a feature only when their cache keys actually
+## changed (e.g. the feature moved, was resized or got a new mask). Height/strength edits
+## reuse the cached influence map instead of regenerating it.
+## Returns [code]true[/code] when an entry was dropped or was already missing.
+func invalidate_influence_if_changed(feature: TerrainFeatureNode) -> bool:
+	var influence_key = _get_influence_cache_key(feature)
+	var hole_key = _get_hole_influence_cache_key(feature)
+	var changed: bool = _influence_cache_keys.get(feature, "") != influence_key
+	if _hole_influence_cache_keys.get(feature, "") != hole_key:
+		changed = true
+	if changed:
+		invalidate_influence(feature)
+	return changed
+
+## Clear all influence caches (heightmaps are kept)
+func clear_influence_cache() -> void:
+	_influence_cache.clear()
+	_influence_cache_keys.clear()
+	_hole_influence_cache.clear()
+	_hole_influence_cache_keys.clear()
+	_influence_bounds_cache.clear()
 
 ## Clear all caches
 func clear_all_caches() -> void:
+	_cache_mutex.lock()
 	_heightmap_cache.clear()
-	_influence_cache.clear()
-	_influence_cache_keys.clear()
+	_cache_mutex.unlock()
+	clear_influence_cache()
 
 ## Worker thread function for parallel heightmap generation
 ## Writes result to shared dictionary instead of returning (WorkerThreadPool limitation with complex objects)
@@ -490,10 +952,13 @@ func _generate_heightmap_worker(
 	resolution: Vector2i,
 	terrain_bounds: Rect2,
 	context,
-	results: Dictionary
+	results: Dictionary,
+	mutex: Mutex
 ) -> void:
 	var heightmap = feature.generate_heightmap_with_context_raw(resolution, terrain_bounds, context)
+	mutex.lock()
 	results[feature] = heightmap
+	mutex.unlock()
 
 ## Cleanup GPU resources
 func cleanup() -> void:

@@ -25,11 +25,22 @@ const LandscapeEvaluationContext = preload("res://addons/terrainy/nodes/landscap
 func _ready() -> void:
 	if not noise:
 		noise = FastNoiseLite.new()
-		noise.seed = randi()
+		noise.seed = noise_seed
 		noise.frequency = 0.01
 
 func prepare_evaluation_context() -> LandscapeEvaluationContext:
-	return LandscapeEvaluationContext.from_landscape_feature(self, height, direction)
+	if not noise:
+		noise = FastNoiseLite.new()
+		noise.seed = noise_seed
+		noise.frequency = 0.01
+	var ctx = LandscapeEvaluationContext.from_landscape_feature(self, height, direction)
+	# Without this the meander noise resolves to 0.0 on the CPU path, so meander_strength
+	# would silently do nothing (the GPU kernel reads the seed from the parameter pack).
+	ctx.primary_noise = noise
+	ctx.canyon_width = canyon_width
+	ctx.canyon_wall_slope = wall_slope
+	ctx.canyon_meander_strength = meander_strength
+	return ctx
 
 func get_height_at(world_pos: Vector3) -> float:
 	var ctx = prepare_evaluation_context()

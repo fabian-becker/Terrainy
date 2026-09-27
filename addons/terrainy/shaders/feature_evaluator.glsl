@@ -148,22 +148,36 @@ vec2 rotate2d(vec2 p, float angle) {
 	return vec2(p.x * c - p.y * s, p.x * s + p.y * c);
 }
 
-float shape_distance(vec2 pos, int shape_type, float radius) {
-	vec2 abs_pos = abs(pos);
-	if (shape_type == 0) {
-		return length(pos);
-	} else if (shape_type == 1) {
-		return max(abs_pos.x, abs_pos.y);
-	} else if (shape_type == 2) {
-		return abs_pos.x + abs_pos.y;
-	} else if (shape_type == 3) {
-		float angle = atan(pos.y, pos.x);
-		float star_radius = radius * (0.6 + 0.4 * abs(sin(angle * 2.5)));
-		return length(pos) / star_radius * radius;
-	} else if (shape_type == 4) {
-		return min(abs_pos.x, abs_pos.y) * 2.0 + max(abs_pos.x, abs_pos.y) * 0.5;
+float sample_shape_mask(int data_offset, ivec2 size, vec2 uv) {
+	if (size.x <= 0 || size.y <= 0) {
+		return 0.0;
 	}
-	return length(pos);
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
+		return 0.0;
+	}
+
+	float x = uv.x * float(size.x - 1);
+	float y = uv.y * float(size.y - 1);
+	int x0 = int(floor(x));
+	int y0 = int(floor(y));
+	int x1 = min(x0 + 1, size.x - 1);
+	int y1 = min(y0 + 1, size.y - 1);
+	float dx = x - float(x0);
+	float dy = y - float(y0);
+
+	int idx00 = y0 * size.x + x0;
+	int idx10 = y0 * size.x + x1;
+	int idx01 = y1 * size.x + x0;
+	int idx11 = y1 * size.x + x1;
+
+	float h00 = param_floats[data_offset + idx00];
+	float h10 = param_floats[data_offset + idx10];
+	float h01 = param_floats[data_offset + idx01];
+	float h11 = param_floats[data_offset + idx11];
+
+	float h0 = mix(h00, h10, dx);
+	float h1 = mix(h01, h11, dx);
+	return mix(h0, h1, dy);
 }
 
 float sample_heightmap(int data_offset, ivec2 size, int wrap_mode, int invert, vec2 uv) {
@@ -212,7 +226,7 @@ float sample_heightmap(int data_offset, ivec2 size, int wrap_mode, int invert, v
 
 float influence_normalized_distance(vec3 local_pos, int influence_shape, vec2 influence_size) {
 	if (influence_shape == 0) {
-		float radius = max(max(influence_size.x, influence_size.y), 0.0001);
+		float radius = max(max(influence_size.x, influence_size.y) * 0.5, 0.0001);
 		return length(local_pos.xz) / radius;
 	} else if (influence_shape == 1) {
 		vec2 half_size = influence_size * 0.5;
@@ -281,7 +295,7 @@ void main() {
 		float rim_height = get_float(20);
 		float rim_width = get_float(21);
 		float floor_ratio = get_float(22);
-		float radius = max(max(influence_size.x, influence_size.y), 0.0001);
+		float radius = max(max(influence_size.x, influence_size.y) * 0.5, 0.0001);
 		float dist = length(local_pos.xz);
 		if (dist >= radius) {
 			height = 0.0;
@@ -305,7 +319,7 @@ void main() {
 		float crater_ratio = get_float(20);
 		float crater_depth = get_float(21);
 		float slope_concavity = get_float(22);
-		float radius = max(max(influence_size.x, influence_size.y), 0.0001);
+		float radius = max(max(influence_size.x, influence_size.y) * 0.5, 0.0001);
 		float dist = length(local_pos.xz);
 		if (dist >= radius) {
 			height = 0.0;
@@ -326,7 +340,7 @@ void main() {
 		float noise_strength = get_float(22);
 		float noise_frequency = get_float(23);
 		int noise_enabled = get_int(4);
-		float radius = max(max(influence_size.x, influence_size.y), 0.0001);
+		float radius = max(max(influence_size.x, influence_size.y) * 0.5, 0.0001);
 		float dist = length(local_pos.xz);
 		if (dist >= radius) {
 			height = 0.0;
@@ -348,20 +362,60 @@ void main() {
 		float shape_height = get_float(19);
 		float smoothness = get_float(20);
 		float rotation = get_float(21);
-		int shape_type = get_int(2);
-		float radius = max(influence_size.x, 0.0001);
+		int mask_size_x = get_int(2);
+		int mask_size_y = get_int(3);
+		int data_offset = get_int(4);
+		int shape_mode = get_int(5);
+		vec2 half_size = vec2(max(influence_size.x * 0.5, 0.0001), max(influence_size.y * 0.5, 0.0001));
 		vec2 pos_2d = rotate2d(local_pos.xz, rotation);
-		float dist = shape_distance(pos_2d, shape_type, radius);
-		if (dist >= radius) {
+		float normalized_distance = max(abs(pos_2d.x) / half_size.x, abs(pos_2d.y) / half_size.y);
+		if (normalized_distance >= 1.0) {
 			height = 0.0;
 		} else {
-			float edge_start = radius * (1.0 - smoothness);
-			float height_factor = 1.0;
-			if (dist > edge_start && radius > edge_start) {
-				float edge_t = (dist - edge_start) / max(radius - edge_start, 0.0001);
-				height_factor = 1.0 - smoothstep(0.0, 1.0, edge_t);
+			float mask_value = 0.0;
+			float boundary_nd = normalized_distance;
+			if (shape_mode == 0) { // CUSTOM_MASK
+				vec2 uv = vec2(
+					(pos_2d.x / max(influence_size.x, 0.0001)) + 0.5,
+					(pos_2d.y / max(influence_size.y, 0.0001)) + 0.5
+				);
+				mask_value = sample_shape_mask(data_offset, ivec2(mask_size_x, mask_size_y), uv);
+				if (mask_value <= 0.0) {
+					height = 0.0;
+				} else {
+					float edge_start = 1.0 - smoothness;
+					float height_factor = 1.0;
+					if (boundary_nd > edge_start && 1.0 > edge_start) {
+						float edge_t = (boundary_nd - edge_start) / max(1.0 - edge_start, 0.0001);
+						height_factor = 1.0 - smoothstep(0.0, 1.0, edge_t);
+					}
+					height = shape_height * mask_value * height_factor;
+				}
+			} else if (shape_mode == 1) { // CIRCLE
+				float radius = max(half_size.x, half_size.y);
+				boundary_nd = length(pos_2d) / max(radius, 0.0001);
+				if (boundary_nd >= 1.0) {
+					height = 0.0;
+				} else {
+					mask_value = 1.0;
+					float edge_start = 1.0 - smoothness;
+					float height_factor = 1.0;
+					if (boundary_nd > edge_start && 1.0 > edge_start) {
+						float edge_t = (boundary_nd - edge_start) / max(1.0 - edge_start, 0.0001);
+						height_factor = 1.0 - smoothstep(0.0, 1.0, edge_t);
+					}
+					height = shape_height * mask_value * height_factor;
+				}
+			} else { // RECTANGLE
+				mask_value = 1.0;
+				float edge_start = 1.0 - smoothness;
+				float height_factor = 1.0;
+				if (boundary_nd > edge_start && 1.0 > edge_start) {
+					float edge_t = (boundary_nd - edge_start) / max(1.0 - edge_start, 0.0001);
+					height_factor = 1.0 - smoothstep(0.0, 1.0, edge_t);
+				}
+				height = shape_height * mask_value * height_factor;
 			}
-			height = shape_height * height_factor;
 		}
 	} else if (params.feature_type == FEATURE_HEIGHTMAP) {
 		float height_scale = get_float(19);
@@ -384,7 +438,7 @@ void main() {
 		int interpolation = get_int(2);
 		vec2 pos_2d = local_pos.xz;
 		float projected = dot(pos_2d, dir);
-		float radius = max(influence_size.x, 0.0001);
+		float radius = max(influence_size.x * 0.5, 0.0001);
 		float t = (projected + radius) / (radius * 2.0);
 		t = clamp(t, 0.0, 1.0);
 		if (interpolation == 1) {
@@ -399,7 +453,7 @@ void main() {
 		float start_h = get_float(19);
 		float end_h = get_float(20);
 		int falloff = get_int(2);
-		float radius = max(max(influence_size.x, influence_size.y), 0.0001);
+		float radius = max(max(influence_size.x, influence_size.y) * 0.5, 0.0001);
 		float dist = length(world_pos.xz - vec2(get_float(0), get_float(2)));
 		float nd = dist / radius;
 		if (nd >= 1.0) {
@@ -421,7 +475,7 @@ void main() {
 		float start_h = get_float(19);
 		float end_h = get_float(20);
 		float sharpness = get_float(21);
-		float radius = max(influence_size.x, 0.0001);
+		float radius = max(influence_size.x * 0.5, 0.0001);
 		float dist = length(local_pos.xz);
 		if (dist >= radius) {
 			height = end_h;
@@ -434,7 +488,7 @@ void main() {
 		float start_h = get_float(19);
 		float end_h = get_float(20);
 		float flatness = get_float(21);
-		float radius = max(influence_size.x, 0.0001);
+		float radius = max(influence_size.x * 0.5, 0.0001);
 		float dist = length(local_pos.xz);
 		if (dist >= radius) {
 			height = end_h;
@@ -479,23 +533,109 @@ void main() {
 		float ridge_sharpness = get_float(22);
 		float peak_freq = get_float(23);
 		float detail_freq = get_float(24);
+		float ridge_meander = get_float(25);
+		float peak_prominence = get_float(26);
+		float foothill_strength = get_float(27);
+		float peak_seed = float(get_int(2));
+		float detail_seed = float(get_int(3));
 		float normalized_distance = influence_normalized_distance(local_pos, influence_shape, influence_size);
 		if (normalized_distance >= 1.0) {
 			height = 0.0;
 		} else {
-			float lateral_distance = abs(dot(local_pos.xz, perp));
-			float ridge_width = max(max(influence_size.x, influence_size.y), 0.0001);
-			if (influence_shape != 0) {
-				ridge_width = max(influence_size.y * 0.5, 0.0001);
-			}
-			float ridge_falloff = 1.0 - pow(lateral_distance / ridge_width, ridge_sharpness);
-			ridge_falloff = max(0.0, ridge_falloff);
-			height = range_height * ridge_falloff;
+			float perp_dist = dot(local_pos.xz, perp);
 			float along_ridge = dot(local_pos.xz, dir);
-			float peak_var = perlin2(vec2(along_ridge * peak_freq, 0.0), float(get_int(2)));
-			height *= 0.7 + peak_var * 0.3;
-			float detail = perlin2(vec2(world_x * detail_freq, world_z * detail_freq), float(get_int(3)));
-			height += height * detail * 0.2;
+
+			float half_x = influence_size.x * 0.5;
+			float half_y = influence_size.y * 0.5;
+			float ridge_width;
+			float half_length;
+			if (influence_shape == 0) {
+				ridge_width = max(max(influence_size.x, influence_size.y), 0.0001) * 0.5;
+				half_length = ridge_width;
+			} else if (influence_shape == 2) {
+				ridge_width = sqrt((half_x * perp.x) * (half_x * perp.x) + (half_y * perp.y) * (half_y * perp.y));
+				half_length = sqrt((half_x * dir.x) * (half_x * dir.x) + (half_y * dir.y) * (half_y * dir.y));
+			} else {
+				ridge_width = abs(half_x * perp.x) + abs(half_y * perp.y);
+				half_length = abs(half_x * dir.x) + abs(half_y * dir.y);
+			}
+			ridge_width = max(ridge_width, 0.0001);
+			half_length = max(half_length, 0.0001);
+
+			// Meander: wander the crest line laterally along its length
+			float meander_offset = 0.0;
+			if (ridge_meander > 0.0) {
+				float meander_noise = perlin2(vec2(along_ridge * 0.15 * peak_freq, 7777.0), peak_seed);
+				meander_offset = meander_noise * ridge_width * ridge_meander;
+			}
+			float lateral = abs(perp_dist - meander_offset);
+
+			// Cross-profile: narrow arête crest + broad massif skirt.
+			// Two stacked Gaussians give the silhouette real ranges have: a
+			// steep, narrow summit ridge and a wide, flattening base.  A single
+			// wide Gaussian (the old profile) just reads as a smooth molehill.
+			float t_core = lateral / max(ridge_width * 0.18, 0.0001);
+			float core = exp(-t_core * t_core * (1.0 + ridge_sharpness * 2.5));
+			float t_mass = lateral / max(ridge_width * 0.55, 0.0001);
+			float mass = exp(-t_mass * t_mass);
+			float cross_profile = (core + 0.35 * mass) / 1.35;
+
+			// Peak / col relief along the spine.
+			// Ridged multifractal: r = (1 - n̂²)² places arête peaks at noise
+			// zero-crossings with C∞-rounded tops (zero slope at the apex —
+			// no single-vertex spikes) and cols where |n| is large.  The noise
+			// is scaled up before ridging because Perlin rarely approaches ±1
+			// — without the scale the cols never dip.  A second, multiplicative
+			// octave adds smaller sub-summits and notches between main peaks.
+			// peak_prominence blends from gentle rolling (0) to contrasted
+			// summits and cols (1); the small floor keeps cols as passes.
+			float n1 = perlin2(vec2(along_ridge * peak_freq, 0.0), peak_seed);
+			float nn1 = clamp(n1 * 2.2, -1.0, 1.0);
+			float r1 = 1.0 - nn1 * nn1;
+			r1 = r1 * r1;
+			float n2 = perlin2(vec2(along_ridge * 2.6 * peak_freq, 431.0), peak_seed);
+			float nn2 = clamp(n2 * 2.2, -1.0, 1.0);
+			float r2 = 1.0 - nn2 * nn2;
+			r2 = r2 * r2;
+			// Multiplicative octaves (ridged multifractal): summits only where
+			// BOTH octaves ridge, so peaks are distinct and cols genuinely dip.
+			float relief = r1 * (0.35 + 0.65 * r2);
+			float rolling = 0.5 + 0.5 * n1;
+			float relief_shaped = mix(rolling, max(pow(relief, 0.7), 0.06), peak_prominence);
+			// Slow overall summit-height variation so not every peak is identical
+			float n_slow = perlin2(vec2(along_ridge * 0.4 * peak_freq, 333.0), peak_seed);
+			float height_scale = 0.65 + 0.35 * (0.5 + 0.5 * n_slow);
+			height = range_height * cross_profile * (0.18 + 0.82 * relief_shaped) * height_scale;
+
+			// Foothills: flank ridgelets + downslope gullies
+			if (foothill_strength > 0.0) {
+				float flank_t = clamp(lateral / ridge_width, 0.0, 1.0);
+				float foothill_env = smoothstep(0.12, 0.35, flank_t) * (1.0 - smoothstep(0.8, 0.98, flank_t));
+				if (foothill_env > 0.0) {
+					float fh_perp = perp_dist - meander_offset;
+					// Anisotropic ridge-relative sampling: high frequency
+					// perpendicular, low frequency along, so sub-ridges elongate
+					// parallel to the crest.  Ridge noise (1-|n|)² gives
+					// ridgelets with valleys, not blobs.
+					float fh_ridge = perlin2(vec2(fh_perp * 0.9 * detail_freq, along_ridge * 0.18 * detail_freq), detail_seed);
+					fh_ridge = 1.0 - abs(fh_ridge);
+					fh_ridge = fh_ridge * fh_ridge;
+					// Low frequency perpendicular, high frequency along breaks
+					// the flanks into gully-dissected spurs running down the slope.
+					float fh_gully = perlin2(vec2(fh_perp * 0.3 * detail_freq, along_ridge * 1.1 * detail_freq), detail_seed);
+					float fh_mod = (0.3 + 0.7 * fh_ridge) * (0.8 + 0.2 * fh_gully);
+					height += range_height * foothill_strength * foothill_env * fh_mod * (0.35 + 0.65 * relief_shaped);
+				}
+			}
+
+			// Surface detail (world-space roughness)
+			float detail = perlin2(vec2(world_x * detail_freq, world_z * detail_freq), detail_seed);
+			height += height * detail * 0.08;
+
+			// Taper the ends of the range so it doesn't terminate in a cliff
+			float along_t = abs(along_ridge) / half_length;
+			float end_fade = 1.0 - smoothstep(0.82, 1.0, along_t);
+			height *= end_fade;
 		}
 	} else if (params.feature_type == FEATURE_LANDSCAPE_DUNE_SEA) {
 		float dune_height = get_float(19);

@@ -41,14 +41,13 @@ static func from_heightmap_feature(
 	ctx.inverse_transform = feature.global_transform.affine_inverse()
 	ctx.influence_shape = feature.influence_shape
 	ctx.influence_size = feature.influence_size
-	ctx.influence_radius = max(feature.influence_size.x, feature.influence_size.y)
+	ctx.influence_radius = EvaluationContext.get_influence_radius(ctx.influence_shape, ctx.influence_size)
 	ctx.influence_radius_sq = ctx.influence_radius * ctx.influence_radius
 	ctx.edge_falloff = feature.edge_falloff
 	ctx.strength = feature.strength
 	ctx.blend_mode = feature.blend_mode
 
-	var half_size = Vector3(ctx.influence_radius, 1000.0, ctx.influence_radius)
-	ctx.aabb = AABB(ctx.world_position - half_size, half_size * 2.0)
+	ctx.aabb = EvaluationContext.compute_rotation_aware_aabb(feature.global_transform, ctx.world_position, ctx.influence_shape, ctx.influence_size)
 
 	# Heightmap-specific properties
 	ctx.height_data = data

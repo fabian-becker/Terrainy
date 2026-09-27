@@ -35,14 +35,13 @@ static func from_gradient_feature(feature: TerrainFeatureNode, start_h: float, e
 	ctx.inverse_transform = feature.global_transform.affine_inverse()
 	ctx.influence_shape = feature.influence_shape
 	ctx.influence_size = feature.influence_size
-	ctx.influence_radius = max(feature.influence_size.x, feature.influence_size.y)
+	ctx.influence_radius = EvaluationContext.get_influence_radius(ctx.influence_shape, ctx.influence_size)
 	ctx.influence_radius_sq = ctx.influence_radius * ctx.influence_radius
 	ctx.edge_falloff = feature.edge_falloff
 	ctx.strength = feature.strength
 	ctx.blend_mode = feature.blend_mode
 	
-	var half_size = Vector3(ctx.influence_radius, 1000.0, ctx.influence_radius)
-	ctx.aabb = AABB(ctx.world_position - half_size, half_size * 2.0)
+	ctx.aabb = EvaluationContext.compute_rotation_aware_aabb(feature.global_transform, ctx.world_position, ctx.influence_shape, ctx.influence_size)
 	
 	# Add gradient-specific properties
 	ctx.start_height = start_h
@@ -50,29 +49,8 @@ static func from_gradient_feature(feature: TerrainFeatureNode, start_h: float, e
 	ctx.falloff_type = falloff
 	ctx.gradient_center = feature.global_position
 	
-	# Try to get gradient direction if available
-	if "direction" in feature:
-		var dir = feature.get("direction")
-		if dir is Vector2:
-			ctx.gradient_vector = dir.normalized()
-		elif dir is Vector3:
-			ctx.gradient_vector = Vector2(dir.x, dir.z).normalized()
-	else:
-		ctx.gradient_vector = Vector2(1, 0)  # Default to X-axis
-	
-	# Get radius/angle/height if available
-	if "gradient_radius" in feature:
-		ctx.gradient_radius = feature.get("gradient_radius")
-	if "cone_angle" in feature:
-		ctx.cone_angle = feature.get("cone_angle")
-	if "cone_height" in feature:
-		ctx.cone_height = feature.get("cone_height")
-	if "interpolation" in feature:
-		ctx.interpolation = feature.get("interpolation")
-	if "sharpness" in feature:
-		ctx.sharpness = feature.get("sharpness")
-	if "flatness" in feature:
-		ctx.flatness = feature.get("flatness")
+	# Default gradient vector (subclasses override via prepare_evaluation_context)
+	ctx.gradient_vector = Vector2(1, 0)
 	
 	return ctx
 

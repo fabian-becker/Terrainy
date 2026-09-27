@@ -22,6 +22,9 @@ var detail_noise: FastNoiseLite
 
 ## Additional landscape-specific parameters
 var ridge_sharpness: float = 2.0
+var ridge_meander: float = 0.0
+var peak_prominence: float = 0.0
+var foothill_strength: float = 0.0
 var peak_variation: float = 0.5
 var canyon_width: float = 50.0
 var canyon_wall_slope: float = 1.0
@@ -38,42 +41,18 @@ static func from_landscape_feature(feature: TerrainFeatureNode, feature_height: 
 	ctx.inverse_transform = feature.global_transform.affine_inverse()
 	ctx.influence_shape = feature.influence_shape
 	ctx.influence_size = feature.influence_size
-	ctx.influence_radius = max(feature.influence_size.x, feature.influence_size.y)
+	ctx.influence_radius = EvaluationContext.get_influence_radius(ctx.influence_shape, ctx.influence_size)
 	ctx.influence_radius_sq = ctx.influence_radius * ctx.influence_radius
 	ctx.edge_falloff = feature.edge_falloff
 	ctx.strength = feature.strength
 	ctx.blend_mode = feature.blend_mode
 	
-	var half_size = Vector3(ctx.influence_radius, 1000.0, ctx.influence_radius)
-	ctx.aabb = AABB(ctx.world_position - half_size, half_size * 2.0)
+	ctx.aabb = EvaluationContext.compute_rotation_aware_aabb(feature.global_transform, ctx.world_position, ctx.influence_shape, ctx.influence_size)
 	
 	# Add landscape-specific properties
 	ctx.height = feature_height
 	ctx.direction = dir.normalized()
 	ctx.perpendicular = Vector2(-ctx.direction.y, ctx.direction.x)
-	
-	# Try to get noise generators
-	if "noise" in feature and feature.get("noise") is FastNoiseLite:
-		ctx.primary_noise = feature.get("noise")
-	
-	if "detail_noise" in feature and feature.get("detail_noise") is FastNoiseLite:
-		ctx.detail_noise = feature.get("detail_noise")
-	
-	# Copy additional parameters if they exist
-	if "ridge_sharpness" in feature:
-		ctx.ridge_sharpness = feature.get("ridge_sharpness")
-	if "peak_variation" in feature:
-		ctx.peak_variation = feature.get("peak_variation")
-	if "canyon_width" in feature:
-		ctx.canyon_width = feature.get("canyon_width")
-	if "wall_slope" in feature:
-		ctx.canyon_wall_slope = feature.get("wall_slope")
-	if "meander_strength" in feature:
-		ctx.canyon_meander_strength = feature.get("meander_strength")
-	if "dune_frequency" in feature:
-		ctx.dune_frequency = feature.get("dune_frequency")
-	if "asymmetry" in feature:
-		ctx.dune_asymmetry = feature.get("asymmetry")
 	
 	return ctx
 
@@ -90,6 +69,21 @@ func get_distance_perpendicular(local_pos: Vector3) -> float:
 ## Get the absolute lateral distance from the centerline.
 func get_lateral_distance(local_pos: Vector3) -> float:
 	return abs(get_distance_perpendicular(local_pos))
+
+## Half-extent of the influence shape projected onto a local 2D axis.
+## This is the support function of the shape along `axis`, i.e. how far the
+## shape reaches in that direction. Used for ridge width / range length that
+## stay correct no matter which way `direction` points.
+func get_extent_along(axis: Vector2) -> float:
+	var half_x = influence_size.x * 0.5
+	var half_y = influence_size.y * 0.5
+	match influence_shape:
+		TerrainFeatureNode.InfluenceShape.CIRCLE:
+			return influence_radius
+		TerrainFeatureNode.InfluenceShape.ELLIPSE:
+			return sqrt((half_x * axis.x) * (half_x * axis.x) + (half_y * axis.y) * (half_y * axis.y))
+		_:
+			return abs(half_x * axis.x) + abs(half_y * axis.y)
 
 ## Get normalized distance from center based on influence shape.
 ## Returns 0 at center, 1 at edge, >1 outside.
