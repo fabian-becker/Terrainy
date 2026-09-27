@@ -151,7 +151,10 @@ signal layer_changed
 		layer_strength = value
 		layer_changed.emit()
 
-## Blend mode for this layer
+## Blend mode for this layer:
+## Normal = weighted average against other Normal layers,
+## Add = layer contributes additively on top of the blended base,
+## Multiply = layer modulates (tints/darkens) the blended result
 @export_enum("Normal", "Add", "Multiply") var blend_mode: int = 0:
 	set(value):
 		blend_mode = value

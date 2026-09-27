@@ -22,14 +22,14 @@ const LandscapeEvaluationContext = preload("res://addons/terrainy/nodes/landscap
 func _ready() -> void:
 	if not noise:
 		noise = FastNoiseLite.new()
-		noise.seed = randi()
+		noise.seed = noise_seed
 		noise.frequency = 0.015
 		noise.fractal_octaves = 3
 		noise.noise_type = FastNoiseLite.TYPE_PERLIN
 	
 	if not detail_noise:
 		detail_noise = FastNoiseLite.new()
-		detail_noise.seed = randi() + 500
+		detail_noise.seed = noise_seed + 500
 		detail_noise.frequency = 0.15
 		detail_noise.fractal_octaves = 2
 	

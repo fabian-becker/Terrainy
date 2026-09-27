@@ -16,7 +16,7 @@ const NoiseEvaluationContext = preload("res://addons/terrainy/nodes/noise/noise_
 func _ready() -> void:
 	if not noise:
 		noise = FastNoiseLite.new()
-		noise.seed = randi()
+		noise.seed = noise_seed
 		noise.noise_type = FastNoiseLite.TYPE_CELLULAR
 		noise.cellular_distance_function = FastNoiseLite.DISTANCE_EUCLIDEAN
 	_update_cellular_return_type()

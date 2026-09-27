@@ -19,53 +19,139 @@ var _heightmap_data: PackedFloat32Array = PackedFloat32Array()
 var _heightmap_w: int = 0
 var _heightmap_h: int = 0
 
+# Source of _heightmap_data, used to skip re-converting the image buffer when
+# set_terrain_data() is called repeatedly with the same heightmap.
+var _heightmap_source: Image = null
+var _heightmap_source_bounds: Rect2 = Rect2()
+var _heightmap_source_resolution: int = -1
+
+## Bumped whenever the composed heightmap content may have changed. Part of every
+## scatter signature so stale placements are regenerated exactly once.
+var _terrain_content_version: int = 0
+
+## Last placement signature per scatter node. Nodes whose signature is unchanged keep
+## their existing instances instead of being freed and rebuilt.
+var _scatter_signatures: Dictionary = {}
+
 func _init(composer: Node3D) -> void:
 	_terrain_composer = composer
 
-func set_terrain_data(heightmap: Image, bounds: Rect2, base_height: float, resolution: int) -> void:
+## Refresh the terrain data used for placement.
+## [param heightmap_changed] must be [code]true[/code] when the composed heightmap content
+## changed since the previous call (feature edits, bounds changes, forced rebuilds).
+func set_terrain_data(
+	heightmap: Image,
+	bounds: Rect2,
+	base_height: float,
+	resolution: int,
+	heightmap_changed: bool = true
+) -> void:
+	var source_changed: bool = heightmap != _heightmap_source \
+		or bounds != _heightmap_source_bounds \
+		or resolution != _heightmap_source_resolution
+
 	_final_heightmap = heightmap
 	_terrain_bounds = bounds
 	_base_height = base_height
 	_resolution = resolution
-	if _final_heightmap:
-		_heightmap_data = _final_heightmap.get_data().to_float32_array()
-		_heightmap_w = _final_heightmap.get_width()
-		_heightmap_h = _final_heightmap.get_height()
-	else:
-		_heightmap_data.clear()
-		_heightmap_w = 0
-		_heightmap_h = 0
 
-func refresh_scatter(scatter_nodes: Array, feature_nodes: Array[TerrainFeatureNode]) -> void:
+	if source_changed:
+		_heightmap_source = heightmap
+		_heightmap_source_bounds = bounds
+		_heightmap_source_resolution = resolution
+		if _final_heightmap:
+			_heightmap_data = _final_heightmap.get_data().to_float32_array()
+			_heightmap_w = _final_heightmap.get_width()
+			_heightmap_h = _final_heightmap.get_height()
+		else:
+			_heightmap_data.clear()
+			_heightmap_w = 0
+			_heightmap_h = 0
+
+	if heightmap_changed:
+		_terrain_content_version += 1
+		_scatter_signatures.clear()
+
+## Force the next refresh to regenerate [param scatter]'s instances.
+func invalidate_scatter(scatter: Node) -> void:
+	if _scatter_signatures.has(scatter):
+		_scatter_signatures.erase(scatter)
+
+func refresh_scatter(scatter_nodes: Array) -> void:
+	_drop_invalid_signatures()
 	for scatter in scatter_nodes:
 		if not is_instance_valid(scatter):
 			continue
-		if not scatter.visible or not scatter.is_inside_tree():
-			_clear_scatter_instances(scatter)
+		var scope: Dictionary = {}
+		var signature: String
+		if _is_scatter_inactive(scatter):
+			signature = "inactive|%d|%s" % [scatter.get_parameter_revision(), scatter.visible]
+		else:
+			scope = _resolve_scatter_scope(scatter)
+			signature = _get_scatter_signature(scatter, scope)
+		if signature == _scatter_signatures.get(scatter, ""):
 			continue
-		if scatter.scene == null or scatter.density <= 0.0:
-			_clear_scatter_instances(scatter)
-			continue
-		_scatter_single_node(scatter, feature_nodes)
+		_scatter_signatures[scatter] = signature
+		_scatter_single_node(scatter, scope if not scope.is_empty() else null)
+
+## A scatter produces no instances while hidden, detached, scene-less or density 0.
+func _is_scatter_inactive(scatter: ScatterNode) -> bool:
+	return not scatter.visible \
+		or not scatter.is_inside_tree() \
+		or scatter.scene == null \
+		or scatter.density <= 0.0
 
 func clear_scatter(scatter_nodes: Array) -> void:
+	_scatter_signatures.clear()
 	for scatter in scatter_nodes:
 		if is_instance_valid(scatter):
 			_clear_scatter_instances(scatter)
 
-func _scatter_single_node(scatter: ScatterNode, feature_nodes: Array[TerrainFeatureNode]) -> void:
-	var scope = _resolve_scatter_scope(scatter)
-	if scope.is_empty():
+## Drop signatures of scatter nodes that have been freed.
+func _drop_invalid_signatures() -> void:
+	for scatter in _scatter_signatures.keys():
+		if not is_instance_valid(scatter):
+			_scatter_signatures.erase(scatter)
+
+## Build the placement signature: everything that can change where instances end up.
+## A matching signature means the existing instances are still valid.
+func _get_scatter_signature(scatter: ScatterNode, scope: Dictionary) -> String:
+	var scope_rect: Rect2 = scope.get("bounds", Rect2()) if not scope.is_empty() else Rect2()
+	var parent_feature: TerrainFeatureNode = scope.get("parent_feature", null) if not scope.is_empty() else null
+	var parent_revision: int = parent_feature.get_parameter_revision() if parent_feature != null else -1
+	return "%d|%d|%d|%s|%s|%s|%s" % [
+		_terrain_content_version,
+		scatter.get_parameter_revision(),
+		parent_revision,
+		scope_rect,
+		scatter.global_transform,
+		str(scatter.scene),
+		str(scatter.get_parent())
+	]
+
+func _scatter_single_node(scatter: ScatterNode, scope) -> void:
+	# Invalid configurations (hidden, no scene, zero density) clear their instances.
+	if not scatter.visible or not scatter.is_inside_tree() or scatter.scene == null or scatter.density <= 0.0:
+		_clear_scatter_instances(scatter)
+		return
+	# The caller may pass null when it could not resolve a scope; that is not an error, the
+	# scope is simply resolved here.
+	var resolved_scope: Dictionary = scope if scope is Dictionary else {}
+	if resolved_scope.is_empty():
+		resolved_scope = _resolve_scatter_scope(scatter)
+	if resolved_scope.is_empty():
 		_clear_scatter_instances(scatter)
 		return
 
-	var placements := _generate_scatter_placements(scatter, scope, feature_nodes)
+	var placements := _generate_scatter_placements(scatter, resolved_scope)
 	if placements.is_empty():
 		_clear_scatter_instances(scatter)
 		return
 
 	var container = _get_or_create_scatter_container(scatter)
-	for child in container.get_children():
+	# Instances are added as internal children, so the internal ones must be included here;
+	# otherwise every rebuild would stack a new set of instances on top of the old ones.
+	for child in container.get_children(true):
 		child.queue_free()
 
 	if scatter.render_mode == 1:  # MultiMesh
@@ -75,8 +161,7 @@ func _scatter_single_node(scatter: ScatterNode, feature_nodes: Array[TerrainFeat
 
 func _generate_scatter_placements(
 	scatter: ScatterNode,
-	scope: Dictionary,
-	feature_nodes: Array[TerrainFeatureNode]
+	scope: Dictionary
 ) -> Array[Dictionary]:
 	var scope_rect: Rect2 = scope["bounds"]
 	if scope_rect.size.x <= 0.0 or scope_rect.size.y <= 0.0:
@@ -301,7 +386,7 @@ func _get_or_create_scatter_container(scatter: ScatterNode) -> Node3D:
 func _clear_scatter_instances(scatter: ScatterNode) -> void:
 	var container = scatter.get_node_or_null("ScatterInstances")
 	if container and container is Node3D:
-		for child in container.get_children():
+		for child in container.get_children(true):
 			child.queue_free()
 
 func _get_feature_world_bounds(feature: TerrainFeatureNode) -> Rect2:

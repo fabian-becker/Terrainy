@@ -561,7 +561,6 @@ void main() {
 			}
 			ridge_width = max(ridge_width, 0.0001);
 			half_length = max(half_length, 0.0001);
-			float crest_width = ridge_width * 0.5;
 
 			// Meander: wander the crest line laterally along its length
 			float meander_offset = 0.0;
@@ -571,40 +570,61 @@ void main() {
 			}
 			float lateral = abs(perp_dist - meander_offset);
 
-			// Crest cross-profile: Gaussian.
-			// Always C∞-smooth: zero slope at the ridge center (rounded top),
-			// no cusp at any parameter value.  ridge_sharpness controls the
-			// Gaussian width (higher = narrower crest, but never a needle).
-			float crest_t = lateral / crest_width;
-			float crest_falloff = exp(-crest_t * crest_t * (1.0 + ridge_sharpness * 3.0));
+			// Cross-profile: narrow arête crest + broad massif skirt.
+			// Two stacked Gaussians give the silhouette real ranges have: a
+			// steep, narrow summit ridge and a wide, flattening base.  A single
+			// wide Gaussian (the old profile) just reads as a smooth molehill.
+			float t_core = lateral / max(ridge_width * 0.18, 0.0001);
+			float core = exp(-t_core * t_core * (1.0 + ridge_sharpness * 2.5));
+			float t_mass = lateral / max(ridge_width * 0.55, 0.0001);
+			float mass = exp(-t_mass * t_mass);
+			float cross_profile = (core + 0.35 * mass) / 1.35;
 
-			// Peak / saddle profile along the ridge.
-			// Peaks sit at noise MAXIMA (smooth domes, single apex vertex) NOT
-			// at zero-crossings (which produced a dense crocodile-teeth ridge).
-			float n_peak = perlin2(vec2(along_ridge * peak_freq, 0.0), peak_seed);
-			float n_norm = clamp(n_peak * 0.5 + 0.5, 0.0, 1.0);
-			float base_profile = n_norm;
-			float contrasted = pow(n_norm, 2.5);
-			float peak_profile = mix(base_profile, contrasted, peak_prominence);
+			// Peak / col relief along the spine.
+			// Ridged multifractal: r = (1 - n̂²)² places arête peaks at noise
+			// zero-crossings with C∞-rounded tops (zero slope at the apex —
+			// no single-vertex spikes) and cols where |n| is large.  The noise
+			// is scaled up before ridging because Perlin rarely approaches ±1
+			// — without the scale the cols never dip.  A second, multiplicative
+			// octave adds smaller sub-summits and notches between main peaks.
+			// peak_prominence blends from gentle rolling (0) to contrasted
+			// summits and cols (1); the small floor keeps cols as passes.
+			float n1 = perlin2(vec2(along_ridge * peak_freq, 0.0), peak_seed);
+			float nn1 = clamp(n1 * 2.2, -1.0, 1.0);
+			float r1 = 1.0 - nn1 * nn1;
+			r1 = r1 * r1;
+			float n2 = perlin2(vec2(along_ridge * 2.6 * peak_freq, 431.0), peak_seed);
+			float nn2 = clamp(n2 * 2.2, -1.0, 1.0);
+			float r2 = 1.0 - nn2 * nn2;
+			r2 = r2 * r2;
+			// Multiplicative octaves (ridged multifractal): summits only where
+			// BOTH octaves ridge, so peaks are distinct and cols genuinely dip.
+			float relief = r1 * (0.35 + 0.65 * r2);
+			float rolling = 0.5 + 0.5 * n1;
+			float relief_shaped = mix(rolling, max(pow(relief, 0.7), 0.06), peak_prominence);
+			// Slow overall summit-height variation so not every peak is identical
 			float n_slow = perlin2(vec2(along_ridge * 0.4 * peak_freq, 333.0), peak_seed);
-			float height_scale = 0.6 + 0.4 * (0.5 + 0.5 * n_slow);
-			peak_profile = clamp(peak_profile * height_scale, 0.0, 1.0);
-			height = range_height * crest_falloff * (0.15 + peak_profile * 0.85);
+			float height_scale = 0.65 + 0.35 * (0.5 + 0.5 * n_slow);
+			height = range_height * cross_profile * (0.18 + 0.82 * relief_shaped) * height_scale;
 
-			// Foothills: subsidiary ridgelets in the outer flanks
+			// Foothills: flank ridgelets + downslope gullies
 			if (foothill_strength > 0.0) {
 				float flank_t = clamp(lateral / ridge_width, 0.0, 1.0);
-				float foothill_env = smoothstep(0.15, 0.4, flank_t) * (1.0 - smoothstep(0.8, 1.0, flank_t));
+				float foothill_env = smoothstep(0.12, 0.35, flank_t) * (1.0 - smoothstep(0.8, 0.98, flank_t));
 				if (foothill_env > 0.0) {
-					// Anisotropic ridge-relative sampling: high freq perpendicular,
-					// low freq along, so sub-ridges elongate parallel to the crest.
-					// Ridge noise (1-|n|)² gives ridgelets with valleys, not blobs.
 					float fh_perp = perp_dist - meander_offset;
-					float fh_noise = perlin2(vec2(fh_perp * 0.8 * detail_freq, along_ridge * 0.15 * detail_freq), detail_seed);
-					float fh_ridge = 1.0 - abs(fh_noise);
+					// Anisotropic ridge-relative sampling: high frequency
+					// perpendicular, low frequency along, so sub-ridges elongate
+					// parallel to the crest.  Ridge noise (1-|n|)² gives
+					// ridgelets with valleys, not blobs.
+					float fh_ridge = perlin2(vec2(fh_perp * 0.9 * detail_freq, along_ridge * 0.18 * detail_freq), detail_seed);
+					fh_ridge = 1.0 - abs(fh_ridge);
 					fh_ridge = fh_ridge * fh_ridge;
-					float fh_mod = 0.3 + fh_ridge * 1.0;
-					height += range_height * foothill_strength * foothill_env * fh_mod * (0.3 + peak_profile * 0.7);
+					// Low frequency perpendicular, high frequency along breaks
+					// the flanks into gully-dissected spurs running down the slope.
+					float fh_gully = perlin2(vec2(fh_perp * 0.3 * detail_freq, along_ridge * 1.1 * detail_freq), detail_seed);
+					float fh_mod = (0.3 + 0.7 * fh_ridge) * (0.8 + 0.2 * fh_gully);
+					height += range_height * foothill_strength * foothill_env * fh_mod * (0.35 + 0.65 * relief_shaped);
 				}
 			}
 

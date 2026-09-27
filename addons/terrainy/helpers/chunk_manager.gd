@@ -11,11 +11,19 @@ class Chunk:
 	var static_body: StaticBody3D
 	var collision_shape: CollisionShape3D
 	var height_shape: HeightMapShape3D = null
+	var collision_trimesh: ConcavePolygonShape3D = null
 	var _collision_map_data: PackedFloat32Array
 	var lod_level: int = 0
 	var is_dirty: bool = true
 	var heightmap: Image = null
 	var hole_mask: Image = null
+	## True when the chunk's hole mask actually carves triangles. Recomputed whenever the chunk
+	## data is replaced, so the collision update does not have to rescan the mask.
+	var has_holes: bool = false
+	## Bumped whenever the chunk data behind collision (heightmap/hole mask) is replaced. A
+	## collision job reports the revision it was built from, so an in-flight job that lost the
+	## race against a rebuild cannot apply faces from the previous heightmap.
+	var collision_revision: int = 0
 
 var _chunks: Dictionary = {}  # Vector2i -> Chunk
 var _chunk_grid_size: Vector2i = Vector2i.ZERO
