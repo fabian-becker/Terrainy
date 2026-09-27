@@ -112,6 +112,66 @@ static func compute_rotation_aware_aabb(global_transform: Transform3D, world_pos
 	var center = Vector3((min_x + max_x) * 0.5, world_position.y, (min_z + max_z) * 0.5)
 	return AABB(center - half_size, half_size * 2.0)
 
+## Conservative XZ radius of a shape that also has a vertical extent (3D holes).
+## Any rotation of a box with half extents (hx, hy, hz) projects at most sqrt(hx^2 + hy^2 + hz^2)
+## onto any axis in the XZ plane, so a square of that half extent always contains the rotated
+## body. Used to bound the 3D hole influence pass, where the 4-corner AABB above is not enough:
+## it only transforms corners at y = 0, so tilting the hole about X or Z would let the vertical
+## extent stick out of it.
+static func conservative_xz_half_extent(shape: int, size: Vector2, half_extent_y: float) -> float:
+	var half_extents = get_influence_half_extents(shape, size)
+	var hy = max(half_extent_y, 0.0)
+	return sqrt(
+		half_extents.x * half_extents.x + hy * hy + half_extents.y * half_extents.y
+	)
+
+## Pixel rectangle (inclusive bounds) that a world-space AABB covers on the terrain grid.
+##
+## Returns a Rect2i in pixel coordinates, clamped to [param resolution], with [param padding]
+## pixels of slack on every side. The padding covers the rounding of the AABB edges: a pixel
+## whose center sits just outside the exact boundary would otherwise be skipped even though the
+## weight function can still return a non-zero value there.
+##
+## Returns an empty Rect2i when the AABB does not overlap the terrain at all, which callers use
+## to skip the whole pass.
+static func compute_pixel_bounds(
+	aabb: AABB,
+	terrain_bounds: Rect2,
+	resolution: Vector2i,
+	padding: int = 1
+) -> Rect2i:
+	if resolution.x <= 0 or resolution.y <= 0:
+		return Rect2i()
+	var step_x := terrain_bounds.size.x / float(resolution.x - 1)
+	var step_y := terrain_bounds.size.y / float(resolution.y - 1)
+	if step_x <= 0.0 or step_y <= 0.0:
+		return Rect2i()
+
+	# World extent of the AABB in the terrain's XZ frame.
+	var world_min_x := aabb.position.x
+	var world_max_x := aabb.position.x + aabb.size.x
+	var world_min_z := aabb.position.z
+	var world_max_z := aabb.position.z + aabb.size.z
+
+	# Fully outside the terrain: nothing can contribute.
+	if world_max_x < terrain_bounds.position.x or world_min_x > terrain_bounds.position.x + terrain_bounds.size.x:
+		return Rect2i()
+	if world_max_z < terrain_bounds.position.y or world_min_z > terrain_bounds.position.y + terrain_bounds.size.y:
+		return Rect2i()
+
+	var x0 := int(floor((world_min_x - terrain_bounds.position.x) / step_x)) - padding
+	var x1 := int(ceil((world_max_x - terrain_bounds.position.x) / step_x)) + padding
+	var y0 := int(floor((world_min_z - terrain_bounds.position.y) / step_y)) - padding
+	var y1 := int(ceil((world_max_z - terrain_bounds.position.y) / step_y)) + padding
+
+	x0 = clampi(x0, 0, resolution.x - 1)
+	x1 = clampi(x1, 0, resolution.x - 1)
+	y0 = clampi(y0, 0, resolution.y - 1)
+	y1 = clampi(y1, 0, resolution.y - 1)
+	if x1 < x0 or y1 < y0:
+		return Rect2i()
+	return Rect2i(x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+
 ## Convert world-space position to local-space without scene tree access.
 ## This is the thread-safe replacement for Node3D.to_local()
 func to_local(world_pos: Vector3) -> Vector3:

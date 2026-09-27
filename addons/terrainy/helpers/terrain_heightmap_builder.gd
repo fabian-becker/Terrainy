@@ -22,6 +22,10 @@ var _influence_cache_keys: Dictionary = {}  # feature -> cache key
 # (3D influence, depth) and must not evict the feature's blending influence map.
 var _hole_influence_cache: Dictionary = {}  # feature -> Image
 var _hole_influence_cache_keys: Dictionary = {}  # feature -> cache key
+# Active-pixel bounds per feature, keyed like the influence map itself. The bounds are a property
+# of the influence image, so they are dropped exactly when that image is, and a warm recompose
+# no longer rescans every influence map just to re-derive the same rectangle.
+var _influence_bounds_cache: Dictionary = {}  # feature -> Rect2i
 var _cached_resolution: Vector2i
 var _cached_bounds: Rect2
 
@@ -543,7 +547,7 @@ func _compose_cpu(
 			"influence": influence_map,
 			"blend_mode": feature.blend_mode,
 			"strength": feature.strength,
-			"active_bounds": _compute_influence_bounds(influence_map, resolution)
+			"active_bounds": _influence_bounds_for(feature, influence_map, resolution)
 		})
 	
 	# Step 2: Blend using optimized byte array operations (if there are non-hole features)
@@ -622,6 +626,20 @@ func _blend_all_features(
 	# Write back once
 	final_map.set_data(width, height, false, Image.FORMAT_RF, final_data.to_byte_array())
 
+## Active-pixel bounds of a feature's influence map, computed once and reused.
+##
+## _compute_influence_bounds walks the whole influence map (~79 ms at 1025x1025 for one feature),
+## and it used to run on every compose, including ones that hit the influence cache and did not
+## regenerate anything. That made a warm recompose pay a full scan per feature for a rectangle that
+## had not changed. The result is now cached alongside the map it describes; every path that drops
+## the influence image also drops its bounds here, so a stale rectangle cannot survive.
+func _influence_bounds_for(feature: TerrainFeatureNode, influence_map: Image, resolution: Vector2i) -> Rect2i:
+	if _influence_bounds_cache.has(feature):
+		return _influence_bounds_cache[feature]
+	var bounds := _compute_influence_bounds(influence_map, resolution)
+	_influence_bounds_cache[feature] = bounds
+	return bounds
+
 ## Compute the pixel-space bounding box of non-zero influence pixels.
 ## Returns a Rect2i covering the active region; falls back to full resolution if all zeros.
 func _compute_influence_bounds(influence_map: Image, resolution: Vector2i) -> Rect2i:
@@ -648,6 +666,11 @@ func _compute_influence_bounds(influence_map: Image, resolution: Vector2i) -> Re
 	return Rect2i(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
 
 ## Generate influence map for a feature using context (thread-safe)
+##
+## Only the pixels inside the feature's rotation-aware bounds are evaluated: a feature covering a
+## small part of the terrain used to walk every pixel of the grid and write 0.0 into almost all of
+## them. Everything outside the clip region stays at the image's initial 0.0, which is exactly what
+## the full pass wrote there, so the resulting map is unchanged.
 func _generate_influence_map(
 	feature: TerrainFeatureNode,
 	context,
@@ -655,25 +678,65 @@ func _generate_influence_map(
 	terrain_bounds: Rect2
 ) -> Image:
 	var influence_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
+
+	var bounds := _influence_pixel_bounds(feature, context, resolution, terrain_bounds)
+	if bounds.size.x <= 0 or bounds.size.y <= 0:
+		# Nothing of the feature overlaps the terrain; the zero-filled image is the answer.
+		return influence_map
+
 	var influence_data := influence_map.get_data().to_float32_array()
 	
 	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
 	
-	for y in range(resolution.y):
+	for y in range(bounds.position.y, bounds.position.y + bounds.size.y):
 		var world_z = terrain_bounds.position.y + (y * step.y)
-		for x in range(resolution.x):
+		var row := y * resolution.x
+		for x in range(bounds.position.x, bounds.position.x + bounds.size.x):
 			var world_x = terrain_bounds.position.x + (x * step.x)
 			var world_pos = Vector3(world_x, 0, world_z)
 			
 			# Use thread-safe context-based influence calculation
 			var weight = feature.get_influence_weight_safe(world_pos, context)
-			var pixel_index = y * resolution.x + x
+			var pixel_index = row + x
 			influence_data[pixel_index] = weight
 	
 	# Update image with computed data
 	influence_map.set_data(resolution.x, resolution.y, false, Image.FORMAT_RF, influence_data.to_byte_array())
 	
 	return influence_map
+
+
+## Pixel rectangle the influence pass of [param feature] has to cover.
+##
+## Reads the clip region from the feature's rotation-aware AABB. Features that override their weight
+## computation (holes with 3D influence) get a conservative square instead, because their shape
+## extends in Y and the 4-corner AABB would not contain it once the feature is tilted.
+func _influence_pixel_bounds(
+	feature: TerrainFeatureNode,
+	context,
+	resolution: Vector2i,
+	terrain_bounds: Rect2
+) -> Rect2i:
+	var aabb: AABB
+	var uses_3d := context != null \
+		and feature.has_method("get_hole_3d_influence") \
+		and feature.get_hole_3d_influence()
+	if uses_3d:
+		var half_extent := EvaluationContext.conservative_xz_half_extent(
+			context.influence_shape,
+			context.influence_size,
+			feature.get_hole_depth() * 0.5
+		)
+		var center: Vector3 = context.world_position
+		aabb = AABB(
+			Vector3(center.x - half_extent, center.y - 2000.0, center.z - half_extent),
+			Vector3(half_extent * 2.0, 4000.0, half_extent * 2.0)
+		)
+	elif context != null:
+		aabb = context.aabb
+	else:
+		aabb = feature.get_influence_aabb()
+	return EvaluationContext.compute_pixel_bounds(aabb, terrain_bounds, resolution)
 
 ## Compose hole mask from hole features. Returns Image where 1.0 = hole, 0.0 = solid.
 func _compose_hole_mask(
@@ -730,6 +793,9 @@ func _compose_hole_mask(
 
 ## Generate influence map for holes with 3D rotation support.
 ## Uses full 3D local coordinates to properly handle rotated holes.
+##
+## Clipped to the same pixel bounds as the flat variant; see [method _influence_pixel_bounds] for
+## why a 3D hole uses a conservative square instead of the 4-corner AABB.
 func _generate_hole_influence_map_3d(
 	feature: TerrainFeatureNode,
 	context,
@@ -738,14 +804,20 @@ func _generate_hole_influence_map_3d(
 	hole_depth: float
 ) -> Image:
 	var influence_map = Image.create(resolution.x, resolution.y, false, Image.FORMAT_RF)
+
+	var bounds := _influence_pixel_bounds(feature, context, resolution, terrain_bounds)
+	if bounds.size.x <= 0 or bounds.size.y <= 0:
+		return influence_map
+
 	var influence_data := influence_map.get_data().to_float32_array()
 	
 	var step = terrain_bounds.size / Vector2(resolution - Vector2i.ONE)
 	var shape_size = Vector3(feature.influence_size.x, hole_depth, feature.influence_size.y)
 	
-	for y in range(resolution.y):
+	for y in range(bounds.position.y, bounds.position.y + bounds.size.y):
 		var world_z = terrain_bounds.position.y + (y * step.y)
-		for x in range(resolution.x):
+		var row := y * resolution.x
+		for x in range(bounds.position.x, bounds.position.x + bounds.size.x):
 			var world_x = terrain_bounds.position.x + (x * step.x)
 			var world_pos = Vector3(world_x, 0, world_z)
 			
@@ -755,7 +827,7 @@ func _generate_hole_influence_map_3d(
 			else:
 				weight = feature.get_influence_weight_safe(world_pos, context)
 			
-			var pixel_index = y * resolution.x + x
+			var pixel_index = row + x
 			influence_data[pixel_index] = weight
 	
 	influence_map.set_data(resolution.x, resolution.y, false, Image.FORMAT_RF, influence_data.to_byte_array())
@@ -840,6 +912,9 @@ func invalidate_influence(feature: TerrainFeatureNode) -> void:
 		_hole_influence_cache.erase(feature)
 	if _hole_influence_cache_keys.has(feature):
 		_hole_influence_cache_keys.erase(feature)
+	# The bounds describe the influence image that was just dropped, so they go with it.
+	if _influence_bounds_cache.has(feature):
+		_influence_bounds_cache.erase(feature)
 
 ## Invalidate the influence caches for a feature only when their cache keys actually
 ## changed (e.g. the feature moved, was resized or got a new mask). Height/strength edits
@@ -861,6 +936,7 @@ func clear_influence_cache() -> void:
 	_influence_cache_keys.clear()
 	_hole_influence_cache.clear()
 	_hole_influence_cache_keys.clear()
+	_influence_bounds_cache.clear()
 
 ## Clear all caches
 func clear_all_caches() -> void:
