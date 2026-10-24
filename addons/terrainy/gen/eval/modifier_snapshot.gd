@@ -73,9 +73,13 @@ func apply(dest, grid, target_offset: float = 0.0, target_scale: float = 1.0, th
 	# Bound the pass: a modifier with a footprint, or (when it has none) a mask that is zero outside
 	# its own bounds. Without this every unbounded modifier walks the whole grid even when its mask
 	# only covers a corridor -- 245k instead of 16.7M samples at 4096 cells.
+	#
+	# Only a mask that actually restricts itself to its bounds may be used as a bound: with
+	# [member MaskSnapshot.invert] the mask is NON-zero outside those bounds (it is 1 there), so
+	# clipping the pass to the mask rect silently drops the modifier's whole effect outside it.
 	if has_bounds:
 		rect = rect.intersection(grid.rect_for_world(bounds, 1))
-	elif mask != null and mask.bounds.size.x > 0.0 and mask.bounds.size.y > 0.0:
+	elif mask != null and not mask.invert and mask.bounds.size.x > 0.0 and mask.bounds.size.y > 0.0:
 		rect = rect.intersection(grid.rect_for_world(mask.bounds, 1))
 	if rect.size.x <= 0 or rect.size.y <= 0:
 		return

@@ -202,3 +202,54 @@ func _parity_build(max_threads: int) -> TerrainGenerator:
 	var gen_children: Array = [mountains, hills, group, clamp_mod]
 	return build(gen, gen_children)
 
+func test_inverted_mask_modifier_still_acts_outside_the_mask_bounds() -> void:
+	# A modifier pass is bounded by its mask's world rect to skip the pixels the mask zeroes. An
+	# inverted mask is zero INSIDE that rect and 1 everywhere else, so clipping the pass to the
+	# mask bounds silently drops the modifier's whole effect.
+	var f := make_field(30.0, Vector2(60, 60))
+	f.region_shape = TerrainTypes.RegionShape.RECTANGLE
+	f.domain_falloff = null
+	var clamp_mod := TerrainClampModifier.new()
+	clamp_mod.use_min = false
+	clamp_mod.max_height = 0.0
+	var mask := TerrainMaskRegion.new()
+	mask.size = Vector2(6, 6)
+	mask.falloff = null
+	mask.invert = true
+	clamp_mod.mask = mask
+	var gen := build(make_generator(64, 64.0), [f, clamp_mod])
+	t.check_almost_eq(h_at(gen, 0, 0), 30.0, "inside the inverted mask the weight is 0: untouched", 0.01)
+	t.check_almost_eq(h_at(gen, 20, 0), 0.0, "outside the mask bounds the clamp still acts", 0.01)
+	t.check_almost_eq(h_at(gen, 20, 20), 0.0, "in the far corner too", 0.01)
+	# The non-inverted mask keeps the fast path (and stays clipped to its bounds).
+	mask.invert = false
+	gen.rebuild_now()
+	t.check_almost_eq(h_at(gen, 0, 0), 0.0, "non-inverted: clamped inside the mask", 0.01)
+	t.check_almost_eq(h_at(gen, 20, 0), 30.0, "non-inverted: untouched outside", 0.01)
+
+func test_modifier_with_an_inverted_mask_matches_the_unclipped_reference() -> void:
+	var f := make_field(20.0, Vector2(30, 30), Vector3(3, 0, -2))
+	var rel := TerrainReliefSource.new()
+	rel.weight = 6.0
+	f.relief_layers = [rel]
+	var smooth := TerrainSmoothModifier.new()
+	smooth.radius = 1.5
+	smooth.strength = 0.5
+	var mask := TerrainMaskRegion.new()
+	mask.size = Vector2(8, 8)
+	mask.invert = true
+	smooth.mask = mask
+	var gen := build(make_generator(64, 64.0), [f, smooth])
+	var probes := [Vector2(0, 0), Vector2(6, 0), Vector2(-8, 4), Vector2(12, 12), Vector2(-20, -20)]
+	var with_mask: Array = []
+	for p in probes:
+		with_mask.append(h_at(gen, p.x, p.y))
+	# The same scene without the mask: an inverted mask over a tiny rect is ~1 everywhere here,
+	# so the smoothed heights must land within a hair of the unmasked run.
+	smooth.mask = null
+	gen.rebuild_now()
+	for i in probes.size():
+		var p: Vector2 = probes[i]
+		var unmasked := h_at(gen, p.x, p.y)
+		t.check(absf(with_mask[i] - unmasked) < 1.5, "height at %s within 1.5 m of the unmasked run (%.3f vs %.3f)" % [str(p), with_mask[i], unmasked])
+
