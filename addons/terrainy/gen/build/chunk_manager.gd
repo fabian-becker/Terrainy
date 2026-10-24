@@ -68,6 +68,11 @@ var grid_count: int = 0
 var chunk_cells: int = 128
 var _root: Node3D = null
 var _grid = null
+## Chunk skeletons (the `Node3D` + `MeshInstance3D` + `StaticBody3D` + `CollisionShape3D` of each
+## chunk) this manager has created and freed since it was built. A regeneration that reuses the
+## layout must not move these; a tool or a trace reads them to prove it.
+var _nodes_created: int = 0
+var _nodes_freed: int = 0
 
 func _init(parent: Node3D) -> void:
 	_root = Node3D.new()
@@ -115,6 +120,7 @@ func _layout(chunk: Chunk, grid) -> void:
 func _create(key: Vector2i) -> Chunk:
 	var chunk := Chunk.new()
 	chunk.key = key
+	_nodes_created += 4
 	chunk.root = Node3D.new()
 	chunk.root.name = "Chunk_%d_%d" % [key.x, key.y]
 	_root.add_child(chunk.root, false, Node.INTERNAL_MODE_BACK)
@@ -131,7 +137,13 @@ func _create(key: Vector2i) -> Chunk:
 
 func _free(chunk: Chunk) -> void:
 	if chunk.root and is_instance_valid(chunk.root):
+		_nodes_freed += 4
 		chunk.root.queue_free()
+
+## Chunk skeletons created and freed since this manager was built:
+## `{"created": int, "freed": int}` (nodes, four per chunk).
+func node_churn() -> Dictionary:
+	return {"created": _nodes_created, "freed": _nodes_freed}
 
 func mark_all_dirty() -> void:
 	for chunk in chunks.values():

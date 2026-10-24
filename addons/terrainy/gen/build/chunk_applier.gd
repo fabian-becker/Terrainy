@@ -114,6 +114,10 @@ func process(now_msec: int) -> void:
 	# unit here, so the apply window is what is *left* of the frame rather than a fresh budget.
 	if _frame_charge_ms > 0.0:
 		scheduler.spend(_frame_charge_ms)
+		if trace_steps:
+			# Reported so a trace can tell "the applier was cheap but started with a spent window"
+			# from "the applier did nothing at all".
+			_step_ms["frame_charge"] = _frame_charge_ms
 		_frame_charge_ms = 0.0
 	var t0 := start_us
 	pipeline.poll()
@@ -144,7 +148,12 @@ func process(now_msec: int) -> void:
 		lod_step()
 	if trace_steps:
 		_step_ms["lod"] = float(Time.get_ticks_usec() - t) / 1000.0
-		t = Time.get_ticks_usec()
+	# The LOD pass is an O(chunks x neighbours) GDScript evaluation - 10.9 ms mean and 35.0 ms at worst
+	# at 2048 cells (RESULTS.md §6) - and it runs before the queue drain. It charged nothing, so a
+	# frame could spend it *plus* a fresh 8 ms apply window. Charging it is the same rule every other
+	# stage follows (design D7.1 rule 2): what a stage used is gone for the next one.
+	scheduler.spend(float(Time.get_ticks_usec() - t) / 1000.0)
+	t = Time.get_ticks_usec()
 	# The queue must drain even when there is no camera (headless tools, bakes, the first frames of
 	# a scene before a viewport camera exists): a queued chunk that nobody dispatches keeps the
 	# terrain "rebuilding" forever.
@@ -164,6 +173,11 @@ func process(now_msec: int) -> void:
 	if scheduler.budget_ms > 0.0 and scheduler.spent_ms() > scheduler.budget_ms:
 		scheduler.note_overrun(true)
 	host.note_frame_work_us(Time.get_ticks_usec() - start_us)
+	if trace_steps:
+		# What the applier's own step cost in total. Everything a >16 ms frame spends *outside* this
+		# number belongs to another stage of the frame (the rebuild, the paint poll, the engine), which
+		# is what [method TerrainGenerator.last_frame_phase_ms] and the soak's engine monitors split.
+		_step_ms["applier_total"] = float(Time.get_ticks_usec() - start_us) / 1000.0
 
 ## Work another stage of this same frame already did (the compose commit, for example), in ms.
 ## Charged inside [method process] right after the frame's accountant is opened, so the job assembly
@@ -189,6 +203,13 @@ func is_baking_navigation() -> bool:
 ## True while navigation geometry is being built on the workers or waiting to be committed.
 func has_nav_work() -> bool:
 	return nav_in_flight > 0 or pipeline.has_nav_work()
+
+## True while **any** worker task the applier started is alive - mesh, collision or navigation
+## geometry, including groups abandoned by a superseding dispatch. This is the teardown-honest
+## question (DESIGN.md §14); [method has_mesh_work] is only the "is the terrain visually complete"
+## one, which is why a caller that reports "settled" must ask this instead.
+func has_worker_work() -> bool:
+	return pipeline != null and pipeline.has_worker_work()
 
 ## Block until every queued chunk mesh / collision result is built and applied, and until the
 ## scheduler queue is empty. This is the synchronous path (bakes, tests, `rebuild_now()`), so it
@@ -341,7 +362,11 @@ func lod_step() -> void:
 	var camera: Camera3D = host.find_camera()
 	if chunks == null or camera == null:
 		return
+	var t := Time.get_ticks_usec()
 	var changed: Array = lod.update(camera, chunks.chunks, scheduler)
+	if trace_steps:
+		_step_ms["lod_update"] = float(Time.get_ticks_usec() - t) / 1000.0
+		t = Time.get_ticks_usec()
 	for chunk in changed:
 		# A revision bump makes an in-flight build for the old level stale: it is dropped at commit
 		# instead of fighting the newer one (design D5.5).
@@ -349,6 +374,8 @@ func lod_step() -> void:
 		chunks.mark_dirty(chunk)
 	var cam_xz := Vector2(camera.global_position.x, camera.global_position.z)
 	var restored: Array = chunks.evict_beyond(cam_xz, host.view_distance, host.lod_hysteresis)
+	if trace_steps:
+		_step_ms["lod_evict"] = float(Time.get_ticks_usec() - t) / 1000.0
 	for chunk in restored:
 		chunk.edit_revision += 1
 		scheduler.enqueue(chunk, ChunkScheduler.Priority.NEAR)
@@ -586,6 +613,10 @@ func update_collision_range() -> void:
 	if changed > 0 and diagnostics:
 		diagnostics.count("collision_range_flips", changed)
 		diagnostics.record("collision", (Time.get_ticks_usec() - start) / 1000)
+	# The pass itself walks every chunk (one distance test each) and can flip shapes: it is main-thread
+	# work like any other unit, so it charges the frame accountant instead of leaving the apply window
+	# its full 8 ms afterwards (design D7.1 rule 2).
+	scheduler.spend(float(Time.get_ticks_usec() - start) / 1000.0)
 
 ## Build the chunk's collision shape. [param heights] / [param faces] come from the worker for a
 ## freshly built chunk; without them the CPU-side copy stored on the chunk is used, which is what
@@ -897,6 +928,14 @@ func _collect_scatter(node: Node, out: Array) -> void:
 		elif child is Node3D and not (child is TerrainPaintLayer):
 			_collect_scatter(child, out)
 
+## True when any chunk still carries scatter instances - the one case where an empty scatter-node list
+## still leaves something to clean up (an instance whose node was deleted).
+func _chunks_have_scatter(chunks) -> bool:
+	for chunk in chunks.chunks.values():
+		if not chunk.scatter.is_empty():
+			return true
+	return false
+
 func queue_chunk_scatter(chunk) -> void:
 	if not scatter_queue.has(chunk.key):
 		scatter_queue.append(chunk.key)
@@ -907,6 +946,14 @@ func process_scatter_queue(unbudgeted: bool = false) -> void:
 	if final_map == null or chunks == null:
 		return
 	var scatters := scatter_nodes()
+	# A terrain with no scatter nodes has nothing to place, but a rebuild still marks every chunk
+	# dirty and the loop below then calls refresh_chunk() for each of them - on a contended frame that
+	# measured 21.5 ms at 1024 cells for work that cannot produce a single instance (RESULTS.md §6).
+	# One pass with an empty-dictionary test replaces it.
+	if scatters.is_empty() and not _chunks_have_scatter(chunks):
+		scatter_dirty_all = false
+		scatter_queue.clear()
+		return
 	if scatter_dirty_all:
 		scatter_dirty_all = false
 		scatter_queue.clear()

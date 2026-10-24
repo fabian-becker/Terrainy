@@ -105,24 +105,48 @@ one subtree with everything else flat; `Independent` groups are only composed wh
 1 plan scan → 2 field eval → 3 compose → 4 Global pass → 5 paint → 6 control maps → 7 chunks
 ```
 
-Stages 2–6 run as one worker task; the main thread only builds the plan and applies finished
-chunks under `chunk_apply_budget_ms` per frame, so generation never blocks the editor or game
-for longer than the budget. Field evaluations are cached by signature (an edit re-evaluates only
-the edited field); only chunks whose heights or holes actually changed are rebuilt, and each
-applied chunk fires `terrain_region_updated(aabb)`. `rebuild_now()` builds synchronously
-(bakes, tools, tests).
+Stages 2–6 run as one worker task; everything else expensive per chunk runs on the
+`WorkerThreadPool` too — composition slices, mesh arrays (positions/normals/tangents/uvs/indices),
+collision soup, per-chunk height bounds, navigation geometry and the dirty-detection hashes. The
+main thread only builds the plan, assembles jobs and commits finished units, and every stage
+charges the same per-frame budget (`chunk_apply_budget_ms`), so generation never blocks the editor
+or game for longer than one budget unit. Field evaluations are cached by signature (an edit
+re-evaluates only the edited field); only chunks whose heights or holes actually changed are
+rebuilt, and each applied chunk fires `terrain_region_updated(aabb)`. `rebuild_now()` builds
+synchronously and ignores the budget (bakes, tools, tests).
 
+Measured on a 16-core machine at 256/512/1024/2048 cells per side, the longest single main-thread
+frame is **4.5 / 9.2 / 10.2 / 10.1 ms** — every size inside a 16 ms frame. The tables, the
+before/after and every caveat are in [../benchmarks/RESULTS.md](../../benchmarks/RESULTS.md); what
+changed and which export does what is in
+[../benchmarks/OPTIMIZATION.md](../../benchmarks/OPTIMIZATION.md).
+
+- **One budget per frame**: `chunk_apply_budget_ms` (default 8) is spent by one accountant, and
+  `tail_budget_ms` (default 2) reserves room for the `all_applied` tail (material refresh). A tail
+  that finds the frame already spent drains at the start of the next frame.
+- **Workers**: `max_worker_threads` defaults to `0` = auto (`OS.get_processor_count() - 1`).
 - **Collision** is always maintained (also in exported builds): `HeightMapShape3D` per chunk,
   trimesh for holed chunks honouring `collision_quality` / `collision_triangle_budget`.
-- **Navigation** re-bakes per chunk, debounced (`navigation_debounce_ms`), tile-aligned via
-  `border_size` + `filter_baking_aabb`; `bake_navigation()` for your own schedule.
+  `collision_range` (metres, `0` = everywhere) disables the shape outside a radius around the LOD
+  camera without dropping the CPU data, so re-entry is a shape assignment, not a rebuild.
+- **Navigation** geometry is built on the workers and committed per chunk; the bake is debounced
+  (`navigation_debounce_ms`), tile-aligned via `border_size` + `filter_baking_aabb`;
+  `bake_navigation()` for your own schedule.
 - **LOD**: `chunk_resolution` (mesh cells per chunk at LOD 0) and the derived distances (`lod_auto`,
   `lod_pixel_error`, `lod_levels`) or explicit `lod_distances`; collision always uses every cell.
-  Normals are sampled from the full-resolution heightmap including the neighbour's border sample,
-  so chunk borders and LOD borders do not show a shading seam.
+  `lod_hysteresis` (default 0.15) stops level flapping at a band boundary. Normals are sampled from
+  the full-resolution heightmap including the neighbour's border sample, so chunk borders and LOD
+  borders do not show a shading seam, and `seam_skirts` adds a skirt wall (mesh surface 1) only on
+  an edge whose neighbour samples it at a different level.
+- **Streaming**: `view_distance` (metres, `0` = every chunk resident, the previous behaviour)
+  releases a chunk's mesh, collision shape, navigation mesh and scatter instances beyond that
+  radius and rebuilds them from the current composition on re-entry; `chunk.streamed_in` reports
+  residency.
 - **GPU**: `use_gpu_feature_evaluation` (Region fields without relief), `use_gpu_composition`
   (blend kernel on the synchronous path), `use_gpu_paint` (stamp + control kernels). Every
   kernel has a CPU twin; without a `RenderingDevice` the CPU path is used silently.
+- **Diagnostics**: `debug_diagnostics` (default off) gates only the slow-phase `push_warning`;
+  counters and the report string are always available through `get_diagnostics()`.
 
 ## Materials
 

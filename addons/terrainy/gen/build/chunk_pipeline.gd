@@ -249,6 +249,34 @@ func has_pending_work() -> bool:
 	)
 
 
+## True while **any** worker group task this pipeline owns is alive, or any of its results still wait
+## to be applied - mesh, collision, navigation, and groups abandoned by a superseding dispatch
+## included. [method has_pending_work] answers "is the terrain visually complete yet"; this answers
+## the teardown question: nothing this pipeline started may still be running when the host goes away
+## (DESIGN.md §14). A caller that reports "settled" must use this one: a navigation group or an
+## abandoned group is a live worker task just as much as a mesh batch is, and
+## [method wait_for_pending] already waits for both.
+func has_worker_work() -> bool:
+	return (
+		has_pending_work()
+		or _nav_group_id >= 0
+		or not _nav_queue.is_empty()
+		or not _abandoned_groups.is_empty()
+	)
+
+
+## Ids of the worker group tasks that are alive right now: `{"mesh": int, "collision": int,
+## "nav": int, "abandoned": Array[int]}` with `-1` for "not running". Diagnostic only - the teardown
+## path uses it to say *what* was still running when a wait timed out.
+func live_group_ids() -> Dictionary:
+	return {
+		"mesh": _mesh_group_id,
+		"collision": _collision_group_id,
+		"nav": _nav_group_id,
+		"abandoned": _abandoned_groups.duplicate(),
+	}
+
+
 ## Rebuild id the queued mesh results belong to, so the generator can drop results of a rebuild
 ## that a newer rebuild has already superseded.
 func mesh_rebuild_id() -> int:

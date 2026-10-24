@@ -48,6 +48,17 @@ var due_msec: int = 0
 var layout_dirty: bool = true
 var rebuild_id: int = 0
 
+## Debug aid: when true, [member process] records the wall time of its two main-thread stages in
+## [member _stage_ms], so a trace can say whether the frame went to the plan scan / job assembly
+## ([method start]) or to publishing a finished compose task ([method poll_task] -> the host's
+## `apply_composition`). Off by default; two clock reads per stage when on.
+var trace_stages: bool = false
+var _stage_ms: Dictionary = {}
+
+## Stage timings of the last [method process] call (empty unless [member trace_stages] is on).
+func last_stage_ms() -> Dictionary:
+	return _stage_ms
+
 var _gpu_fields = null
 
 func _init(p_host) -> void:
@@ -64,10 +75,19 @@ func request(immediate: bool = false) -> void:
 
 ## One main-thread step: publish a finished task, then start the queued one when it is due.
 func process(now_msec: int) -> void:
+	var t := 0
+	if trace_stages:
+		_stage_ms = {}
+		t = Time.get_ticks_usec()
 	poll_task()
+	if trace_stages:
+		_stage_ms["task_poll"] = float(Time.get_ticks_usec() - t) / 1000.0
+		t = Time.get_ticks_usec()
 	if requested and task_id < 0 and job.is_empty() and now_msec >= due_msec:
 		requested = false
 		start()
+	if trace_stages:
+		_stage_ms["start"] = float(Time.get_ticks_usec() - t) / 1000.0
 
 func is_rebuilding() -> bool:
 	return requested or task_id >= 0 or not job.is_empty()

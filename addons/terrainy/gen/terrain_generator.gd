@@ -28,6 +28,13 @@ const GpuCompositor = preload("res://addons/terrainy/gen/build/gpu/gpu_composito
 const GpuFieldEvaluator = preload("res://addons/terrainy/gen/build/gpu/gpu_field_evaluator.gd")
 const GpuPaint = preload("res://addons/terrainy/gen/build/gpu/gpu_paint.gd")
 
+## Wall-clock budget for the teardown wait in [method _exit_tree]: how long a leaving generator gives
+## its worker groups to finish before it cancels them and waits once more ("DESIGN.md §14"). Long
+## enough for a 2048-cell mesh batch under load (measured ~1-4 s), short enough that quitting a scene
+## with a rebuild in flight does not look like a hang. A wait that runs out this long is reported as
+## a warning - it means the process is about to tear the tree down under a running worker.
+const TEARDOWN_WAIT_MS := 5000
+
 ## Fired per applied dirty region (one chunk's world AABB, generator space -> world).
 signal terrain_region_updated(aabb: AABB)
 signal terrain_resized
@@ -358,6 +365,18 @@ var _rebuild = null
 var _frame_work_last_us: int = 0
 var _frame_work_peak_us: int = 0
 
+## Debug aid: when true, [method _process] records the wall time of every stage of the frame in
+## [member _phase_ms], so a trace can split a >16 ms frame into what this node did and what it did
+## not (engine iteration work, OS scheduling). Off by default; two clock reads per stage when on.
+var trace_phases: bool = false
+var _phase_ms: Dictionary = {}
+
+## [method _process] stage timings of the last frame, in ms: `tail`, `rebuild`, `applier`, `paint`,
+## `generator_total`, plus `compose_commit` on a frame that committed a composition. Empty unless
+## [member trace_phases] is on.
+func last_frame_phase_ms() -> Dictionary:
+	return _phase_ms
+
 func _init() -> void:
 	if paint_section.is_empty():
 		paint_section = "gen_%08x" % (randi() & 0x7fffffff)
@@ -406,8 +425,16 @@ func _exit_tree() -> void:
 	# could still call back into the host.
 	_rebuild.wait_for_task()
 	if _applier:
-		_applier.pipeline.wait_for_pending()
-		_applier.shutdown()
+		# The wait result is checked, not ignored (DESIGN.md §14): if a group is still alive when the
+		# budget runs out, the scene tree is about to be torn down underneath a running worker - the
+		# exact situation the old `free()`-mid-rebuild segfault came from. Nothing can be fixed at
+		# that point, so it must at least be visible instead of silent.
+		if not _applier.pipeline.wait_for_pending(TEARDOWN_WAIT_MS):
+			var live: Dictionary = _applier.pipeline.live_group_ids()
+			push_warning("[Terrainy] teardown: worker groups still alive after %d ms (mesh=%d collision=%d nav=%d abandoned=%s) - cancelling, waiting once more" % [
+				TEARDOWN_WAIT_MS, int(live["mesh"]), int(live["collision"]), int(live["nav"]),
+				str(live["abandoned"])])
+		_applier.shutdown(TEARDOWN_WAIT_MS)
 	if _paint.has_pending_save():
 		save_paint()
 	TerrainyAPI.unregister(self)
@@ -544,19 +571,37 @@ func _process(_delta: float) -> void:
 		return
 	var now := Time.get_ticks_msec()
 	var frame_start := Time.get_ticks_usec()
+	var t := frame_start
+	if trace_phases:
+		_phase_ms = {}
 	# A rebuild tail that did not fit in the frame that finished the chunks (material refresh +
 	# report) runs here, as the first unit of a fresh frame (DESIGN.md §7.4), instead of stacking on
 	# top of an exhausted apply window.
 	if _applier.tail_due():
 		_applier.drain_tail()
+		if trace_phases:
+			_phase_ms["tail"] = float(Time.get_ticks_usec() - t) / 1000.0
+			t = Time.get_ticks_usec()
 	_rebuild.process(now)
 	# The rebuild stage is part of this frame's budget like any other stage (DESIGN.md §7.4): the
 	# compose commit at 2048 cells (256 chunks) costs ~9 ms on its own, and letting the applier open
 	# a fresh 8 ms window behind it produced a 17.2 ms frame. Charging the elapsed time makes the
 	# job assembly wait for the next frame instead of overshooting.
-	_applier.charge_frame(float(Time.get_ticks_usec() - frame_start) / 1000.0)
+	_applier.charge_frame(float(Time.get_ticks_usec() - t) / 1000.0)
+	if trace_phases:
+		_phase_ms["rebuild"] = float(Time.get_ticks_usec() - t) / 1000.0
+		t = Time.get_ticks_usec()
 	_applier.process(now)
+	if trace_phases:
+		_phase_ms["applier"] = float(Time.get_ticks_usec() - t) / 1000.0
+		t = Time.get_ticks_usec()
 	_paint.poll(now)
+	if trace_phases:
+		_phase_ms["paint"] = float(Time.get_ticks_usec() - t) / 1000.0
+		# Everything this node's own frame step cost. A frame that is much slower than this number
+		# spent the rest somewhere the generator does not own: the engine's own iteration work
+		# (physics, message queue, renderer sync) or time the OS did not schedule this thread at all.
+		_phase_ms["generator_total"] = float(Time.get_ticks_usec() - frame_start) / 1000.0
 
 ## True while any stage of a rebuild is queued, running or being applied.
 func is_rebuilding() -> bool:
@@ -580,7 +625,11 @@ func effective_worker_threads() -> int:
 	return maxi(OS.get_processor_count() - 1, 1)
 
 func is_rebuilding_meshes() -> bool:
-	return _rebuild.task_id >= 0 or not _rebuild.job.is_empty() or _applier.has_mesh_work()
+	return (
+		_rebuild.task_id >= 0
+		or not _rebuild.job.is_empty()
+		or _applier.has_worker_work()
+	)
 
 ## True while navigation regions are waiting for (or running) a bake.
 func is_baking_navigation() -> bool:
@@ -774,6 +823,18 @@ func apply_composition(job: Dictionary) -> void:
 	_built_once = true
 	_applier.dispatch(dirty, _rebuild.rebuild_id)
 	_diagnostics.record("commit", (Time.get_ticks_usec() - commit_start) / 1000)
+	if trace_phases:
+		# The commit is one stage of the frame it lands in; it is reported here so a trace can tell
+		# an expensive commit frame (adopting the composed image + queuing 256 chunks) from an
+		# expensive apply frame.
+		_phase_ms["compose_commit"] = float(Time.get_ticks_usec() - commit_start) / 1000.0
+		_phase_ms["commit_dirty"] = float(dirty.size())
+		# Chunk nodes / physics bodies created and freed so far, cumulative: the soak compares them
+		# across a churn to see whether a regeneration is rebuilding the node skeleton or only the
+		# resources on it.
+		var chunk_nodes: Dictionary = _chunks.node_churn()
+		_phase_ms["nodes_created"] = float(chunk_nodes.get("created", 0))
+		_phase_ms["nodes_freed"] = float(chunk_nodes.get("freed", 0))
 
 func _chunk_image_hash(chunk) -> int:
 	return hash(_final.extract(chunk.sample_rect).data)
