@@ -1,6 +1,6 @@
 extends RefCounted
 
-## Minimal dependency-free assertion and reporting helper for the Terrainy headless tests.
+## Minimal dependency-free assertion and reporting helper for the Terrainy 2 headless tests.
 ##
 ## Deliberately tiny (no vendored test framework) so that the suite can run in CI with a
 ## plain Godot binary:
@@ -27,45 +27,101 @@ var _case_name: String = ""
 var _test_name: String = ""
 var _test_failed: bool = false
 var _test_skipped: bool = false
+var _script_errors = null
+var runtime_errors: int = 0
+
+## Register before loading cases so parse/load errors are observed as well as runtime
+## errors. The entry point keeps this active through fixture settling and root teardown.
+func start_error_capture() -> void:
+	if _script_errors != null:
+		return
+	_script_errors = preload("res://addons/terrainy/tests/framework/script_error_logger.gd").new()
+	OS.add_logger(_script_errors)
+
+func stop_error_capture() -> void:
+	if _script_errors != null:
+		OS.remove_logger(_script_errors)
+		_script_errors = null
+
+func set_error_context(context: String) -> void:
+	if _script_errors != null:
+		_script_errors.set_context(context)
+
+func fail_suite(message: String) -> void:
+	failures.append(message)
+
+func _collect_script_errors() -> void:
+	if _script_errors == null:
+		return
+	for error in _script_errors.take_errors():
+		runtime_errors += 1
+		_test_failed = true
+		failures.append(error)
 
 ## Run every `test_*` method of `case_script` and report per-test results.
 func run_case(case_script: Script, tree: SceneTree) -> void:
-	var case_name: String = case_script.resource_path.get_file().get_basename()
+	# Direct framework callers also get capture; the suite starts it earlier to cover load().
+	start_error_capture()
+	_collect_script_errors()
+	_case_name = case_script.resource_path.get_file().get_basename()
+	_test_name = "new"
+	_test_failed = false
+	set_error_context("%s::%s" % [_case_name, _test_name])
+	if not case_script.can_instantiate():
+		_fail("case script cannot be instantiated")
+		return
 	var test_case = case_script.new()
+	_collect_script_errors()
+	if test_case == null:
+		_fail("case script returned a null instance")
+		return
 	test_case.t = self
 	test_case.tree = tree
+	_test_name = "before_all"
+	set_error_context("%s::%s" % [_case_name, _test_name])
 	test_case.before_all()
-	for method in test_case.get_method_list():
-		var method_name: String = method["name"]
-		if not method_name.begins_with("test_"):
-			continue
-		_case_name = case_name
-		_test_name = method_name
-		if not _matches_filter():
-			continue
-		_test_failed = false
-		_test_skipped = false
-		var checks_before: int = total_checks
-		test_case.call(method_name)
-		var new_checks: int = total_checks - checks_before
-		if _test_skipped:
-			skipped_tests += 1
-			print("SKIP  %s::%s" % [_case_name, _test_name])
-		elif _test_failed:
-			failed_tests += 1
-			print("FAIL  %s::%s" % [_case_name, _test_name])
-		else:
-			passed_tests += 1
-			if verbose:
-				print("ok    %s::%s (%d checks)" % [_case_name, _test_name, new_checks])
+	_collect_script_errors()
+	# Do not turn tests with broken fixture setup into apparent passes.
+	if not _test_failed:
+		for method in test_case.get_method_list():
+			var method_name: String = method["name"]
+			if not method_name.begins_with("test_"):
+				continue
+			_test_name = method_name
+			if not _matches_filter():
+				continue
+			_test_failed = false
+			_test_skipped = false
+			set_error_context("%s::%s" % [_case_name, _test_name])
+			var checks_before: int = total_checks
+			test_case.call(method_name)
+			_collect_script_errors()
+			var new_checks: int = total_checks - checks_before
+			# A skip never masks an assertion failure or a script error.
+			if _test_failed:
+				failed_tests += 1
+				print("FAIL  %s::%s" % [_case_name, _test_name])
+			elif _test_skipped:
+				skipped_tests += 1
+				print("SKIP  %s::%s" % [_case_name, _test_name])
+			else:
+				passed_tests += 1
+				if verbose:
+					print("ok    %s::%s (%d checks)" % [_case_name, _test_name, new_checks])
+	_test_name = "after_all"
+	set_error_context("%s::%s" % [_case_name, _test_name])
 	test_case.after_all()
+	_collect_script_errors()
+	set_error_context("suite deferred processing / teardown")
 
 ## Print the final summary and return the process exit code.
 func report() -> int:
+	_collect_script_errors()
 	print("")
-	print("Terrainy test suite")
+	print("Terrainy 2 test suite")
 	print("  tests:   %d passed, %d failed, %d skipped" % [passed_tests, failed_tests, skipped_tests])
 	print("  checks:  %d" % total_checks)
+	print("  script errors: %d" % runtime_errors)
 	if not skipped_reasons.is_empty():
 		print("  skipped reasons:")
 		for reason in skipped_reasons:
@@ -102,7 +158,7 @@ func check_not_eq(actual, unexpected, message: String) -> void:
 func check_almost_eq(actual: float, expected: float, message: String, tolerance: float = 0.001) -> void:
 	total_checks += 1
 	if not is_finite(actual) or absf(actual - expected) > tolerance:
-		_fail("%s (expected %.6f +/- %g, got %.6f)" % [message, expected, tolerance, actual])
+		_fail("%s (expected %.6f +/- %s, got %.6f)" % [message, expected, str(tolerance), actual])
 
 func check_in_range(value: float, minimum: float, maximum: float, message: String) -> void:
 	total_checks += 1

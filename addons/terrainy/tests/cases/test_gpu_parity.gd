@@ -1,168 +1,173 @@
 extends "res://addons/terrainy/tests/framework/test_case.gd"
 
-## CPU/GPU parity tests.
-##
-## These require a real RenderingDevice, which the headless dummy renderer does not provide,
-## so they are reported as skipped unless the suite is run with a rendering driver that can
-## create one:
-##
-##     godot --path . --script res://addons/terrainy/tests/run_tests.gd
-##
-## The CPU implementations are the reference: any divergence means one of the two paths
-## deviates from the shared modifier/composition semantics.
+## CPU <-> GPU parity (tested contract; skips without a RenderingDevice, i.e. in headless CI).
+## Run locally/nightly without --headless:
+##     godot --path . --script res://addons/terrainy/tests/run_tests.gd -- --filter=gpu
 
-const SIZE := Vector2i(64, 64)
-const BOUNDS := Rect2(-64.0, -64.0, 128.0, 128.0)
-const BASE_HEIGHT := 20.0
-const TOLERANCE := 0.01
+const TerrainGrid = preload("res://addons/terrainy/gen/eval/terrain_grid.gd")
+const Composer = preload("res://addons/terrainy/gen/eval/composer.gd")
+const GpuCompositor = preload("res://addons/terrainy/gen/build/gpu/gpu_compositor.gd")
+const GpuFieldEvaluator = preload("res://addons/terrainy/gen/build/gpu/gpu_field_evaluator.gd")
+const GpuPaint = preload("res://addons/terrainy/gen/build/gpu/gpu_paint.gd")
+const PaintStamper = preload("res://addons/terrainy/gen/paint/paint_stamper.gd")
+const CurveLut = preload("res://addons/terrainy/gen/eval/curve_lut.gd")
 
-var _builders: Array = []
+func _max_diff(a: PackedFloat32Array, b: PackedFloat32Array) -> float:
+	if a.size() != b.size():
+		return INF
+	var worst := 0.0
+	for i in a.size():
+		worst = maxf(worst, absf(a[i] - b[i]))
+	return worst
 
-func after_all() -> void:
-	for builder in _builders:
-		builder.cleanup()
-	_builders.clear()
-	super.after_all()
+func test_cpu_fallback_when_gpu_is_unavailable() -> void:
+	# Always runs: GPU flags on must never break a build (silent CPU fallback).
+	var gen := make_generator(64, 64.0, func(g: TerrainGenerator):
+		g.use_gpu_composition = true
+		g.use_gpu_feature_evaluation = true
+		g.use_gpu_paint = true
+		g.use_multithreading = false)
+	var layer := TerrainPaintLayer.new()
+	gen.add_child(layer)
+	build(gen, [make_field(4.0, Vector2(20, 20))])
+	t.check_almost_eq(h_at(gen, 0, 0), 4.0, "composed with GPU flags on")
+	gen.paint_stamps(layer, [stamp(BrushStamp.StrokeOp.RAISE, Vector3.ZERO, 4.0, 1.0)])
+	t.check_almost_eq(h_at(gen, 0, 0), 5.0, "painted with GPU flags on", 0.01)
 
-func _new_builder() -> TerrainHeightmapBuilder:
-	var builder := TerrainHeightmapBuilder.new()
-	_builders.append(builder)
-	return builder
-
-func _make_perlin(position: Vector3 = Vector3.ZERO, noise_seed: int = 99) -> PerlinNoiseNode:
-	var feature := PerlinNoiseNode.new()
-	feature.name = "Perlin"
-	feature.noise_seed = noise_seed
-	feature.amplitude = 12.0
-	feature.blend_mode = TerrainFeatureNode.BlendMode.ADD
-	feature.influence_shape = TerrainFeatureNode.InfluenceShape.CIRCLE
-	feature.influence_size = Vector2(80.0, 80.0)
-	feature.edge_falloff = 0.4
-	feature.position = position
-	spawn(feature)
-	return feature
-
-func _make_hill(position: Vector3 = Vector3.ZERO) -> HillNode:
-	var feature := HillNode.new()
-	feature.name = "Hill"
-	feature.blend_mode = TerrainFeatureNode.BlendMode.ADD
-	feature.influence_shape = TerrainFeatureNode.InfluenceShape.CIRCLE
-	feature.influence_size = Vector2(80.0, 80.0)
-	feature.edge_falloff = 0.4
-	feature.position = position
-	spawn(feature)
-	return feature
-
-func test_gpu_modifiers_match_the_cpu_reference() -> void:
-	if not has_rendering_device():
+func test_blend_kernel_matches_cpu() -> void:
+	if not has_rendering_device() or not GpuCompositor.is_available():
 		t.skip(gpu_skip_reason())
 		return
-	var settings := {
-		"smoothing": 2,
-		"smoothing_radius": 3.0,
-		"enable_terracing": true,
-		"terrace_levels": 6,
-		"terrace_smoothness": 0.3,
-		"enable_min_clamp": true,
-		"min_height": 8.0,
-		"enable_max_clamp": true,
-		"max_height": 90.0,
-	}
-	var cpu_pipeline := ModifierPipeline.new()
-	var cpu_item := settings.duplicate()
-	cpu_item["heightmap"] = make_ramp_image(SIZE, 100.0)
-	cpu_item["bounds"] = BOUNDS
-	cpu_item["use_gpu"] = false
-	var cpu_result: Image = cpu_pipeline.apply_modifiers_batch([cpu_item])[0]
+	for mode in 7:
+		var target := HMap.new(Rect2i(0, 0, 40, 30))
+		var src := HMap.new(Rect2i(10, 5, 25, 20))
+		var weights := PackedFloat32Array()
+		weights.resize(src.data.size())
+		for i in target.data.size():
+			target.data[i] = sin(i * 0.37) * 4.0
+		for i in src.data.size():
+			src.data[i] = cos(i * 0.21) * 6.0
+			weights[i] = fmod(i * 0.013, 1.2)
+		var cpu = target.duplicate_map()
+		Composer.blend(cpu, src, weights, mode, 0.8)
+		t.check(GpuCompositor.blend(target, src, weights, mode, 0.8), "GPU path taken (mode %d)" % mode)
+		t.check(_max_diff(cpu.data, target.data) < 1e-4, "blend mode %d parity" % mode)
 
-	# The modifier helper is driven directly on purpose: ModifierPipeline falls back to the
-	# CPU implementation whenever the GPU does not return an image, so going through the
-	# pipeline would let a broken dispatch pass this test unnoticed.
-	var gpu_item := settings.duplicate()
-	gpu_item["heightmap"] = make_ramp_image(SIZE, 100.0)
-	gpu_item["bounds"] = BOUNDS
-	var gpu_processor := GpuHeightmapModifier.new()
-	var gpu_results: Array = gpu_processor.apply_modifiers_batch([gpu_item])
-	t.check(
-		gpu_results.size() == 1 and gpu_results[0] != null,
-		"the GPU modifier dispatched without falling back to the CPU"
-	)
-	if gpu_results.size() == 1 and gpu_results[0] != null:
-		var difference: Dictionary = t.image_difference(cpu_result, gpu_results[0])
-		t.check(
-			difference["max"] <= TOLERANCE,
-			"GPU modifiers match the CPU reference (max difference %.6f, mean %.6f)" % [
-				difference["max"], difference["mean"]
-			]
-		)
-	gpu_processor.cleanup()
-	cpu_pipeline.cleanup()
-
-func test_gpu_composition_matches_the_cpu_reference() -> void:
-	if not has_rendering_device():
+func test_field_kernel_matches_cpu() -> void:
+	if not has_rendering_device() or not GpuFieldEvaluator.is_available():
 		t.skip(gpu_skip_reason())
 		return
-	# A hill is not noise-dependent, so both paths must produce the same heightmap.
-	var feature := _make_hill(Vector3(5.0, 0.0, -5.0))
-	var hole := HoleNode.new()
-	hole.name = "Hole"
-	hole.influence_shape = TerrainFeatureNode.InfluenceShape.CIRCLE
-	hole.influence_size = Vector2(40.0, 40.0)
-	hole.position = Vector3(20.0, 0.0, 0.0)
-	spawn(hole)
+	var grid := TerrainGrid.new(64, 64.0, Vector2.ZERO)
+	var gpu := GpuFieldEvaluator.new()
+	for shape in 3:
+		var f := make_field(7.0, Vector2(40, 24), Vector3(3, 2, -4))
+		f.region_shape = shape
+		f.rotation.y = 0.6
+		var p := Curve.new()
+		p.add_point(Vector2(0, 0.2))
+		p.add_point(Vector2(1, 1))
+		f.profile = p
+		var snap = f.make_snapshot({"grid": grid, "generator_xform": Transform3D.IDENTITY})
+		var cpu: Dictionary = snap.evaluate(grid)
+		var res: Dictionary = gpu.evaluate(snap, grid)
+		t.check(not res.is_empty(), "GPU path taken (shape %d)" % shape)
+		if not res.is_empty():
+			# Compare the contribution h * w: at the rim the weight underflows differently in
+			# float32 (GPU) and float64 (GDScript), and a height with zero weight is inert.
+			var hd := 0.0
+			for i in cpu["h"].data.size():
+				hd = maxf(hd, absf(cpu["h"].data[i] * cpu["w"].data[i] - res["h"].data[i] * res["w"].data[i]))
+			t.check(hd < 1e-3, "weighted height parity shape %d (max %.6f)" % [shape, hd])
+			t.check(_max_diff(cpu["w"].data, res["w"].data) < 1e-3, "weight parity shape %d" % shape)
+		f.free()
 
-	var features: Array[TerrainFeatureNode] = [feature, hole]
-	var contexts := build_contexts(features)
-	var cpu_result: Dictionary = _new_builder().compose(
-		features, contexts, SIZE, BOUNDS, BASE_HEIGHT, false, false, false, false
-	)
-	var gpu_builder := _new_builder()
-	# The builder falls back to CPU composition when the compositor is unavailable, which
-	# would make this comparison pass while never touching the GPU path.
-	t.check(gpu_builder._should_use_gpu(true), "the GPU compositor is available for the parity run")
-	var gpu_result: Dictionary = gpu_builder.compose(
-		features, contexts, SIZE, BOUNDS, BASE_HEIGHT, true, false, false, false
-	)
-	var difference: Dictionary = t.image_difference(cpu_result["heightmap"], gpu_result["heightmap"])
-	t.check(
-		difference["max"] <= TOLERANCE,
-		"GPU heightmap composition matches the CPU reference (max difference %.6f)" % difference["max"]
-	)
+func test_noise_fields_stay_on_the_cpu() -> void:
+	var f := make_field()
+	f.relief_layers = [TerrainReliefSource.new()]
+	var snap = f.make_snapshot({"grid": TerrainGrid.new(32, 32.0, Vector2.ZERO)})
+	t.check(not snap.is_gpu_capable(), "relief (noise) is never evaluated by the kernel")
+	f.free()
 
-func test_gpu_feature_kernels_match_the_cpu_reference() -> void:
-	if not has_rendering_device():
+func test_paint_kernel_matches_cpu_for_all_ops() -> void:
+	if not has_rendering_device() or not GpuPaint.is_available():
 		t.skip(gpu_skip_reason())
 		return
-	# Both runs compose on the GPU; only the feature evaluation differs, which isolates the
-	# compute kernels from the GPU blender.
-	var feature := _make_hill(Vector3(5.0, 0.0, -5.0))
-	var features: Array[TerrainFeatureNode] = [feature]
-	var cpu_builder := _new_builder()
-	# If the kernels were unavailable the builder would silently evaluate on the CPU and this
-	# test would compare the CPU path with itself.
-	t.check(cpu_builder._can_evaluate_on_gpu(feature), "the hill is eligible for GPU feature evaluation")
-	var cpu_eval: Dictionary = cpu_builder.compose(
-		features, build_contexts(features), SIZE, BOUNDS, BASE_HEIGHT, true, false, false, false
-	)
-	var gpu_builder := _new_builder()
-	t.check(gpu_builder._can_evaluate_on_gpu(feature), "the hill is eligible for GPU feature evaluation")
-	var gpu_eval: Dictionary = gpu_builder.compose(
-		features, build_contexts(features), SIZE, BOUNDS, BASE_HEIGHT, true, false, false, true
-	)
-	var difference: Dictionary = t.image_difference(cpu_eval["heightmap"], gpu_eval["heightmap"])
-	t.check(
-		difference["max"] <= TOLERANCE,
-		"GPU feature kernels match the CPU reference (max difference %.6f)" % difference["max"]
-	)
+	var world := Rect2(-32, -32, 64, 64)
+	var noise := FastNoiseLite.new()
+	for kind in 5:
+		for op in 8:
+			var rect := Rect2i(20, 20, 24, 24)
+			var n := rect.size.x * rect.size.y
+			var value := PackedFloat32Array()
+			var coverage := PackedFloat32Array()
+			var surface := PackedFloat32Array()
+			var avg := PackedFloat32Array()
+			var nz := PackedFloat32Array()
+			for i in n:
+				value.append(0.3 + 0.2 * sin(i * 0.1) if kind > 1 else sin(i * 0.1))
+				coverage.append(0.5 if kind == 1 and i % 3 != 0 else 0.0)
+				surface.append(2.0 + cos(i * 0.05))
+				avg.append(2.0)
+				nz.append(noise.get_noise_1d(i))
+			var s1 = stamp(op, Vector3(-4, 0, -2), 6.0, 0.7, 1.5, false)
+			var s2 = stamp(op, Vector3(-1, 0, -3), 5.0, 0.4, 0.5, false)
+			s2.erase = true
+			var packed := PaintStamper.pack([s1, s2])
+			var cv := value.duplicate()
+			var cc := coverage.duplicate()
+			PaintStamper.apply_buffers(kind, rect, world, 128, 0.8, cv, cc, surface, avg, nz, packed["stamps"], packed["luts"])
+			var gv := value.duplicate()
+			var gc := coverage.duplicate()
+			t.check(GpuPaint.apply_buffers(kind, rect, world, 128, 0.8, gv, gc, surface, avg, nz, packed["stamps"], packed["luts"]), "GPU paint path taken")
+			t.check(_max_diff(cv, gv) < 1e-4 and _max_diff(cc, gc) < 1e-4, "paint parity kind %d op %d" % [kind, op])
 
-func test_noise_features_stay_on_the_cpu() -> void:
-	if not has_rendering_device():
+func test_control_kernel_matches_cpu() -> void:
+	if not has_rendering_device() or not GpuPaint.is_available():
 		t.skip(gpu_skip_reason())
 		return
-	var feature := _make_perlin()
-	var builder := _new_builder()
-	builder.use_gpu_feature_evaluation = true
-	t.check(
-		not builder._can_evaluate_on_gpu(feature),
-		"noise features always stay on the CPU for exact parity with the editor preview"
-	)
+	var count := 500
+	var claims_cpu: Array = []
+	var claims_gpu: Array = []
+	for j in 3:
+		var c := PackedFloat32Array()
+		for i in count:
+			c.append(fmod(i * 0.01 * (j + 1), 0.3))
+		claims_cpu.append(c)
+		claims_gpu.append(c.duplicate())
+	var paint := PackedFloat32Array()
+	for i in count:
+		paint.append(fmod(i * 0.007, 1.0))
+	for i in count:
+		var p := minf(paint[i], 1.0)
+		if p <= 0.0:
+			continue
+		for j in 3:
+			claims_cpu[j][i] *= 1.0 - p
+		claims_cpu[1][i] += p
+	t.check(GpuPaint.combine_claims(claims_gpu, paint, 1), "GPU control path taken")
+	for j in 3:
+		t.check(_max_diff(claims_cpu[j], claims_gpu[j]) < 1e-5, "control parity layer %d" % j)
+
+func test_generator_gpu_pipeline_matches_cpu() -> void:
+	if not has_rendering_device() or not GpuFieldEvaluator.is_available() or not GpuCompositor.is_available():
+		t.skip(gpu_skip_reason())
+		return
+	var make := func(gpu: bool) -> TerrainGenerator:
+		var g := make_generator()
+		g.use_gpu_composition = gpu
+		g.use_gpu_feature_evaluation = gpu
+		g.use_gpu_paint = gpu
+		g.use_multithreading = false
+		var a := make_field(6.0, Vector2(30, 20), Vector3(-5, 1, 3))
+		a.rotation.y = 0.4
+		var b := make_field(3.0, Vector2(20, 20), Vector3(10, 0, -8))
+		b.blend_mode = TerrainTypes.BlendMode.MAX
+		var layer := TerrainPaintLayer.new()
+		g.add_child(layer)
+		build(g, [a, b])
+		g.paint_stamps(layer, [stamp(BrushStamp.StrokeOp.RAISE, Vector3(2, 0, 2), 6.0, 1.0, 0.0, false)])
+		return g
+	var gpu_gen: TerrainGenerator = make.call(true)
+	var cpu_gen: TerrainGenerator = make.call(false)
+	t.check(gpu_gen.get_diagnostics()["stats"]["gpu_fields"] > 0, "GPU field kernels were used")
+	t.check(_max_diff(gpu_gen.get_final_map().data, cpu_gen.get_final_map().data) < 1e-3, "GPU pipeline equals CPU pipeline")

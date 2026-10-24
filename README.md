@@ -2,6 +2,11 @@
 
 A hybrid node-based and spatial terrain editor for Godot 4 with live preview and blending capabilities.
 
+> **Terrainy 2** (configuration-driven fields, paint layers, `TerrainyAPI`) is the current
+> version in `addons/terrainy` — see [docs/terrainy2/README.md](docs/terrainy2/README.md).
+> The 0.x feature descriptions below are kept for migration reference; see
+> [the migration table](docs/terrainy2/coexistence.md) for how nodes map to 2.0.
+
 ## Features
 
 - **Spatial Workflow**: Create terrain by placing and positioning feature nodes directly in the 3D viewport
@@ -41,6 +46,12 @@ A hybrid node-based and spatial terrain editor for Godot 4 with live preview and
   - If `ScatterNode` is child of a terrain feature, placement is constrained to the parent feature influence area
   - If `ScatterNode` is direct child of `TerrainComposer`, placement uses the full terrain area
 
+**Surface Control**
+
+- `TextureAreaNode` repaints a texture layer over its influence area and nothing else: it has no height, so it never moves the terrain
+- Every feature node carries `Surface Contributions` (`TerrainSurfaceContribution` resources), so a `RoadNode` can lay grit along its corridor or a feature can suppress grass where it sits
+- See [Surface Contributions](#surface-contributions)
+
 ### Terrain Modifiers
 
 All terrain features support modifiers that can be applied to adjust their appearance:
@@ -64,6 +75,20 @@ Smoothing is particularly useful for reducing the spikiness of procedural terrai
 
 - Limit minimum and/or maximum height values
 - Useful for creating plateaus or preventing extreme elevation changes
+
+### Compositional Terrain
+
+Since the compositional redesign, features compose hierarchically instead of blending as a flat list:
+
+**Groups** — Add a `TerrainGroupNode` and set child features to `Contribute` scope. The group composes its children into one internal landform (blended inside the group), which then blends into the terrain as a single feature. Children default to `Independent`, so existing scenes keep their behaviour exactly. Switching a child's `composition_scope` at runtime (or moving a child in or out of a group) is picked up automatically: the composer notices that its composition plan no longer matches the tree and rescans before the next rebuild.
+
+**Modifier nodes** — `SmoothingModifier`, `TerracingModifier`, `HeightClampModifier`, `RemapRangeModifier` and `FlattenModifier` are scene-tree children placed under the feature or group they modify. Scene order (top to bottom) is the application order — reorder children in the scene dock to reorder the stack. `evaluation_space` controls WHAT they apply to: the owner's own heightmap (`Local`), the group's composited output (`Group`) or the final terrain after all composition (`World` — the world pass runs in scene order on the finished map, so constraints like "this region sits at elevation 40" hold no matter what the features did).
+
+**Masks** — `ShapeMaskNode` (analytic circle/rectangle/ellipse with falloff) and `TextureMaskNode` (red-channel texture) are pure weight fields. Reference one from a modifier's `mask` NodePath: the modifier applies only where its own influence AND the mask overlap. `invert` flips a mask to protect an area instead.
+
+**Paths** — `RoadNode` and `RiverNode` follow the `Curve3D` of a `Path3D` child node through the terrain (add the child and edit its curve in the viewport — there is no inspector curve export). The corridor width, `edge_falloff` banks and the curve's baked elevation profile define the shape: a road pins the terrain to the curve height, a river carves its bed `depth` units below it. Both use the `Replace` blend mode, which moves the terrain toward the path surface instead of adding to it.
+
+**Presets & preview** — Save any feature subtree as a `TerrainPreset` resource (packed scene + default transform) and instantiate it under a composer. `preview_isolate_node` on the composer temporarily previews only one subtree — everything else renders flat — for quick inspection of a single landform; clear it to restore the full terrain.
 
 ## Installation
 
@@ -93,6 +118,12 @@ Terrainy uses compute shaders whenever a `RenderingDevice` is available (Forward
 
 All GPU paths fall back to the CPU automatically when a feature cannot be evaluated on the GPU (mask textures, noise-based features, allocation failures), so enabling a switch never breaks a terrain.
 
+### Editing and Rebuilds
+
+Editing a feature — dragging a feature's inspector value, a `Path3D` child's curve, or a modifier — queues a rebuild, so a drag that changes several parameters costs one rebuild instead of one per edit. Each rebuild composes the heightmap and then regenerates **only the chunks the edit can affect**, taken from the feature's world-space influence bounds. Editing the far end of a long road therefore rebuilds the chunks along that road, not the whole terrain.
+
+The compose itself always runs over the full grid, so on a large terrain a rebuild is still a multi-second, main-thread operation on the CPU — that is what the GPU composition switch and `chunk_apply_budget_ms` are for. `debug_logging` on the composer prints a one-line timing summary of every rebuild. Roads and rivers are the cheap case: both their influence map and their heightmap are rasterised along the curve's corridor instead of scanned over the whole grid, so a `Path3D` curve edit is dominated by the full-grid blend, not by the path.
+
 ### Compatibility Renderer Note
 
 If you are using the Compatibility renderer (or running headless), GPU composition/modifiers are automatically disabled and the plugin falls back to CPU. This prevents editor freezes but may be slower.
@@ -116,6 +147,39 @@ When terrain is cooked before shipping (baking, dedicated servers, export tools)
 - `blend_mode`: **Normal** layers are averaged by their weight, **Add** layers contribute additively, **Multiply** layers modulate (tint/darken) the blended result
 - The material supports up to **32 layers** (`MAX_LAYERS`). Additional layers are ignored and a warning is printed
 - `texture_array_size` (256–8192, default 2048) is the edge length of the `Texture2DArray` that holds the layers. Sources larger than this are downscaled, never upscaled — raise it to keep large source textures crisp, lower it to save VRAM
+
+### Surface Contributions
+
+The layers above are global: each layer's weight is an analytic function of world height and slope, so no node can decide what the ground looks like. `surface_contributions` on any feature node closes that gap. It holds `TerrainSurfaceContribution` resources; each one points at a `TerrainTextureLayer` and describes how it is applied:
+
+- `texture_layer` — the layer to paint. When a feature is accepted, its layers are appended to the **material's** palette, so a node can paint a texture that is not listed in `TerrainComposer.texture_layers`. Such a layer exists only for its contributions: it has no global weight of its own and shows exactly where one of its contributions paints (its own height/slope settings still gate that). Listing the layer in `texture_layers` as well makes it a normal palette layer — it is then shared, and its global height/slope blend also applies outside the contribution
+- `mode`:
+  - **Replace** — the layer claims the surface inside the influence, so a full-strength contribution takes the area over completely (grit over grass) even where the palette's own height/slope blend would give that layer no weight. The claim is settled after the layers are normalized and takes its share from the others, so `strength` fades between the palette's blend (`0`) and the layer alone (`1`). When several contributions claim the same surface they share it in proportion to their strength, so two full-strength `Replace` contributions on one node produce an even mix of their layers instead of an over-bright sum
+  - **Add** — add the contribution's weight on top of the layer's own analytic weight (gravel that also appears wherever the slope suits it)
+  - **Suppress** — fade the layer out, `weight *= 1 - strength * influence` (worn grass on a path)
+- `strength` (0–1), `enabled` and `respect_layer_gate` — scale the contribution, switch it off without deleting it, or let the target layer's own height/slope blend scale it. With `respect_layer_gate` on, the layer only paints where it would apply anyway, which turns a corridor into a surface selector: give two contributions complementary slope ranges (rock on the steep cut, sand on the flat road bed) and each layer takes the parts of the influence its own slope range allows — where neither applies, the palette's blend shows through
+
+`TextureAreaNode` is the ready-made feature for "this patch has different textures": it contributes no height at all (it is an additive feature with a flat profile, which is by definition a no-op for the height blend) and exists only to carry contributions. Its `Influence Shape`, `Influence Size` and `Edge Falloff` describe the patch that gets repainted, exactly like any other feature's influence.
+
+```gdscript
+var patch := TextureAreaNode.new()
+patch.influence_shape = TerrainFeatureNode.InfluenceShape.RECTANGLE
+patch.influence_size = Vector2(40.0, 40.0)
+
+var contribution := TerrainSurfaceContribution.new()
+contribution.texture_layer = preload("res://gravel_layer.tres")
+contribution.mode = TerrainSurfaceContribution.Mode.REPLACE
+contribution.strength = 0.85
+
+var contributions: Array[TerrainSurfaceContribution] = [contribution]
+patch.surface_contributions = contributions
+
+composer.add_child(patch)
+```
+
+The influence map that already drives the node's geometric blend doubles as the surface weight, so the influence gizmo shows exactly the patch that gets repainted, and a `RoadNode`'s curved corridor is used instead of a box around the node. A contribution-only edit reuses the cached control map and rebuilds the material without recomposing heights.
+
+Contributions are collected from every feature of the composition plan, group children included: a `RoadNode` nested in a `TerrainGroupNode` is folded into the group's geometry and never blends into the terrain on its own, but it still paints its own gravel inside the group. Each contributing feature costs one control-map slice, whatever number of contributions it carries, up to 16 controls in total.
 
 ## Runtime Queries
 
@@ -163,6 +227,7 @@ if composer.is_baking_navigation_mesh():
 ## Known Limitations
 
 - **Texture projection is top-down (planar), not triplanar.** Albedo/normal maps are mapped from world XZ, so textures stretch on near-vertical cliffs and the projection does not follow node rotation. Rotating or translating a `TerrainComposer` also moves the texture projection relative to the terrain
+- **Surface contributions are sampled per feature, on the heightmap grid.** Every contributing feature costs one control-map slice in the `control_maps` texture array, and the shader applies at most **16 contributions** (`MAX_SURFACE_CONTROLS`); a feature whose contributions do not fit is skipped whole and a warning is printed. The maps are rasterised at the composer's `resolution`, so a coarse heightmap also gives a coarse patch edge (the influence is smooth, the transition is not sharper than one heightmap cell)
 - **Terrain bounds are treated as world space** for queries and scattering while chunk vertices are generated around the composer's local origin. Keep the composer at the origin (or offset the query positions yourself) if you translate it in X/Z
 - **Noise-based features are CPU-only**: their kernels would have to reimplement `FastNoiseLite` to match the CPU result, so they always run on the CPU (see `Use GPU Feature Evaluation`)
 - **Scattering happens after the heightmap is composed** — instances are placed on the sampled surface, so holes are not taken into account for placement

@@ -15,13 +15,13 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 [application]
 
 config/name="Terrainy"
-run/main_scene="uid://ci3ybcj700a33"
+run/main_scene="uid://bxnvhdry0ro0"
 config/features=PackedStringArray("4.7", "Forward Plus")
 config/icon="res://icon.svg"
 
 [autoload]
 
-TerrainRebuildCoordinator="*uid://brautlco0ivx3"
+TerrainyPaintBundleFormat="*res://addons/terrainy/paint_bundle_format.gd"
 
 [dotnet]
 

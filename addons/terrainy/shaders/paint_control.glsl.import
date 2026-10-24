@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://i7ll5cxjl5jn"
+path="res://.godot/imported/paint_control.glsl-909c06c681beeadb199cf4294a2ff756.res"
+
+[deps]
+
+source_file="res://addons/terrainy/shaders/paint_control.glsl"
+dest_files=["res://.godot/imported/paint_control.glsl-909c06c681beeadb199cf4294a2ff756.res"]
+
+[params]
+

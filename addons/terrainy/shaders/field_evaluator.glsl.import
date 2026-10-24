@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://hg4nlnkrqpko"
+path="res://.godot/imported/field_evaluator.glsl-760e67fde16c9ffebc29b61486fa2853.res"
+
+[deps]
+
+source_file="res://addons/terrainy/shaders/field_evaluator.glsl"
+dest_files=["res://.godot/imported/field_evaluator.glsl-760e67fde16c9ffebc29b61486fa2853.res"]
+
+[params]
+

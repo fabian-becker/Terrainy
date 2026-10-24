@@ -1,434 +1,288 @@
 extends SceneTree
 
-## Terrainy performance benchmark harness (headless).
+## Terrainy 2 performance benchmark harness (headless).
 ##
 ## Usage:
 ##     godot --headless --path . --script res://tests/perf/benchmark.gd
-##     godot --headless --path . --script res://tests/perf/benchmark.gd -- --quick
+##     godot --headless --path . --script res://tests/perf/benchmark.gd -- --quick   # 3 rounds
+##     godot --headless --path . --script res://tests/perf/benchmark.gd -- --full    # + reference scale
 ##
-## Measures the real cost of the pipeline stages instead of guessing at them. Every section
-## times a stage in isolation so the numbers can be attributed, and each measurement runs
-## `REPEATS` rounds and reports the best and the median (the best run is the least noisy
-## estimate of the intrinsic cost; the spread shows how much the environment interferes).
+## Answers "where does the time go" for the 2.0 pipeline (plan scan -> field eval -> compose ->
+## Global pass -> paint -> control maps -> chunks). Every measurement runs `_repeats` rounds and
+## reports best / median / mean: the best run is the least noisy estimate of the intrinsic cost,
+## the spread shows how much the environment interferes.
 ##
-## Exit code is always 0: this is a measurement tool, not a gate.
+## Phase attribution is read from the generator's own TerrainDiagnostics, so the reported stages
+## are the ones the rebuild actually ran rather than a guess from outside.
+##
+## Exit code is always 0 -- this is a measurement tool, not a gate.
+##
+## Headless has no RenderingDevice, so every GPU path is skipped and composition runs on the CPU.
+## The `use_gpu_*` flags are forced off here rather than left to fall back, so the numbers say
+## "CPU worst case" honestly: the editor's GPU paths are not measured by this script.
 
-const TerrainHeightmapBuilder = preload("res://addons/terrainy/helpers/terrain_heightmap_builder.gd")
-const TerrainMeshGenerator = preload("res://addons/terrainy/helpers/terrain_mesh_generator.gd")
-const TerrainCollisionBuilder = preload("res://addons/terrainy/helpers/terrain_collision_builder.gd")
-const TerrainDiagnostics = preload("res://addons/terrainy/helpers/terrain_diagnostics.gd")
-const ModifierPipeline = preload("res://addons/terrainy/helpers/modifier_pipeline.gd")
+const BrushStamp = preload("res://addons/terrainy/gen/paint/brush_stamp.gd")
 
-const RESOLUTIONS: Array[Vector2i] = [
-	Vector2i(257, 257),
-	Vector2i(513, 513),
-	Vector2i(1025, 1025),
-]
-const CHUNK_RESOLUTIONS: Array[int] = [129, 257, 513]
-const BOUNDS := Rect2(-512.0, -512.0, 1024.0, 1024.0)
-const BASE_HEIGHT := 0.0
-const REPEATS := 5
+const DEFAULT_REPEATS := 5
 const QUICK_REPEATS := 3
 
-var _quick: bool = false
-var _repeats: int = REPEATS
-var _results: Array[Dictionary] = []
-var _section: String = ""
+## The design's performance contract names "1024**2 / 4 km**2" as the reference scale, which reads
+## as a 1024-cell grid over a 4 km**2 square: 2048 m x 2048 m, i.e. 2 m cells. `--full` adds it; the
+## default sweep stays quick (a 1024-cell rebuild is minutes, not seconds).
+const SCALES: Array[Dictionary] = [
+	{"label": "256 cells / 256 m", "cells": 256, "size": 256.0},
+	{"label": "512 cells / 512 m", "cells": 512, "size": 512.0},
+	{"label": "1024 cells / 2048 m (reference, 4 km2)", "cells": 1024, "size": 2048.0},
+]
 
+var _quick := false
+var _full := false
+var _repeats := DEFAULT_REPEATS
+var _section := ""
+var _rows: Array[Dictionary] = []
+var _attribution: Array[Dictionary] = []
+var _cache_stats: Array[Dictionary] = []
 
 func _initialize() -> void:
 	for arg in OS.get_cmdline_user_args():
 		if arg == "--quick":
 			_quick = true
 			_repeats = QUICK_REPEATS
-
+		elif arg == "--full":
+			_full = true
 
 func _process(_delta: float) -> bool:
-	print("================================================================")
-	print("Terrainy performance benchmark")
-	print("Godot %s | renderer=%s | RenderingDevice=%s" % [
-		Engine.get_version_info().string,
-		RenderingServer.get_video_adapter_name(),
-		"yes" if RenderingServer.get_rendering_device() != null else "no",
-	])
-	print("repeats=%d (best/median reported) | quick=%s" % [_repeats, _quick])
-	print("================================================================")
-
-	_bench_feature_heightmap_generation()
-	_bench_influence_map_generation()
-	_bench_composition()
-	_bench_mesh_generation()
-	_bench_collision_generation()
-	_bench_modifier_pipeline()
-	_bench_cache_behaviour()
-
+	_header()
+	for scale in _scales():
+		_bench_full_rebuild(scale)
+		_bench_cached_rebuild(scale)
+		_bench_one_field_edit(scale)
+		_bench_paint_stroke(scale)
 	_report()
 	quit(0)
 	return true
 
+# ---------------------------------------------------------------------------
+# Sections
+# ---------------------------------------------------------------------------
+
+func _bench_full_rebuild(scale: Dictionary) -> void:
+	_section = "full rebuild | %s" % scale["label"]
+	var gen := _make_terrain(scale["cells"], scale["size"])
+	gen.rebuild_now()  # settle: the first rebuild also lays out chunks
+	_measure("force_rebuild + rebuild_now", func() -> void:
+		gen.force_rebuild()
+		gen.rebuild_now(), "cache-cleared recompose of the whole pipeline")
+	_attribution.append({"label": scale["label"], "diag": gen.get_diagnostics()})
+	_free(gen)
+
+func _bench_cached_rebuild(scale: Dictionary) -> void:
+	_section = "cached rebuild | %s" % scale["label"]
+	var gen := _make_terrain(scale["cells"], scale["size"])
+	gen.rebuild_now()
+	_measure("rebuild_now (nothing changed)", func() -> void:
+		gen.rebuild_now(), "should reuse the compose signature and rebuild no chunk")
+	_free(gen)
+
+func _bench_one_field_edit(scale: Dictionary) -> void:
+	_section = "one field edit | %s" % scale["label"]
+	var gen := _make_terrain(scale["cells"], scale["size"])
+	var field := gen.get_node("Mountain") as TerrainFieldNode
+	gen.rebuild_now()
+	var first: Dictionary = gen.get_diagnostics()["counters"]
+	var first_evaluated := int(first.get("fields_evaluated", 0))
+	_measure("edit profile_height + rebuild_now", func() -> void:
+		field.profile_height += 1.0
+		gen.rebuild_now(), "one field re-evaluated, the rest replayed from cache")
+	var after: Dictionary = gen.get_diagnostics()["counters"]
+	_cache_stats.append({
+		"label": scale["label"],
+		"first_evaluated": first_evaluated,
+		"evaluated": int(after.get("fields_evaluated", 0)),
+		"reused": int(after.get("fields_reused", 0)),
+	})
+	_free(gen)
+
+func _bench_paint_stroke(scale: Dictionary) -> void:
+	_section = "paint stroke | %s" % scale["label"]
+	var gen := _make_terrain(scale["cells"], scale["size"])
+	var layer := TerrainPaintLayer.new()
+	layer.name = "Sculpt"
+	layer.kind = TerrainPaintLayer.PaintKind.HEIGHT_DELTA
+	gen.add_child(layer)
+	gen.rebuild_now()
+	var strokes := 0
+	_measure("paint_stamps (24 m radius)", func() -> void:
+		strokes += 1
+		var stamp := BrushStamp.new()
+		stamp.op = BrushStamp.StrokeOp.RAISE
+		stamp.position = Vector3(20.0 + strokes * 4.0, 0.0, 20.0)
+		stamp.radius = 24.0
+		stamp.strength = 1.5
+		gen.paint_stamps(layer, [stamp]), "stamp + local recompose of the stroke rect")
+	_free(gen)
+
+# ---------------------------------------------------------------------------
+# Terrain fixture
+# ---------------------------------------------------------------------------
+
+func _relief(weight: float, freq: float, seed_value: int, scale: Vector2 = Vector2.ONE, follow: bool = false) -> TerrainReliefSource:
+	var r := TerrainReliefSource.new()
+	r.weight = weight
+	r.noise.frequency = freq
+	r.noise_seed = seed_value
+	r.scale = scale
+	r.follow_profile = follow
+	return r
+
+func _curve(points: Array) -> Curve:
+	var c := Curve.new()
+	for p in points:
+		c.add_point(Vector2(p[0], p[1]), p[2] if p.size() > 2 else 0.0, p[3] if p.size() > 3 else 0.0)
+	return c
+
+func _layer(layer_name: String, color: Color) -> TerrainyTextureLayer:
+	var l := TerrainyTextureLayer.new()
+	l.layer_name = layer_name
+	l.albedo_color = color
+	return l
+
+## A composition that exercises every stage: a Global noise base, a profiled Region mountain with
+## a Local terrace (nested sculpting), a Replace plateau, a texture palette and a painted layer.
+## Same shapes as the demo recipes, so the mix is representative rather than synthetic.
+func _make_terrain(cells: int, size: float) -> TerrainGenerator:
+	var gen := TerrainGenerator.new()
+	gen.name = "BenchTerrain"
+	# Benchmark an exact grid: no "keep the meters per cell" derivation on resize.
+	gen.preserve_cell_size = false
+	gen.terrain_resolution = cells
+	gen.terrain_size = size
+	gen.chunk_size = 128
+	gen.navigation_enabled = false
+	gen.use_gpu_composition = false
+	gen.use_gpu_feature_evaluation = false
+	gen.use_gpu_paint = false
+	var grass := _layer("Grass", Color(0.32, 0.5, 0.22))
+	grass.slope_max = 30.0
+	var rock := _layer("Rock", Color(0.45, 0.42, 0.4))
+	rock.slope_min = 28.0
+	var snow := _layer("Snow", Color(0.93, 0.95, 0.97))
+	snow.height_min = 34.0
+	gen.texture_layers = [grass, rock, snow] as Array[TerrainyTextureLayer]
+	root.add_child(gen)
+
+	var base := TerrainFieldNode.new()
+	base.name = "RollingHills"
+	base.domain_kind = TerrainTypes.DomainKind.GLOBAL
+	base.profile_height = 0.0
+	base.relief_layers = [_relief(5.0, 0.012, 1), _relief(1.2, 0.05, 2)] as Array[TerrainReliefSource]
+	gen.add_child(base)
+
+	var mountain := TerrainFieldNode.new()
+	mountain.name = "Mountain"
+	mountain.position = Vector3(-55, 0, -50)
+	mountain.region_size = Vector2(120, 120)
+	mountain.profile_height = 45.0
+	mountain.profile = _curve([[0, 0, 0, 0.5], [0.55, 0.45, 1.2, 1.2], [1, 1, 0.3, 0]])
+	mountain.relief_layers = [_relief(10.0, 0.03, 3, Vector2.ONE, true)] as Array[TerrainReliefSource]
+	gen.add_child(mountain)
+	var terrace := TerrainTerraceModifier.new()
+	terrace.name = "MountainTerraces"
+	terrace.space = TerrainTypes.Space.LOCAL
+	terrace.step_height = 6.0
+	mountain.add_child(terrace)
+
+	var plateau := TerrainFieldNode.new()
+	plateau.name = "Plateau"
+	plateau.position = Vector3(60, 0, 60)
+	plateau.domain_kind = TerrainTypes.DomainKind.REGION
+	plateau.region_shape = TerrainTypes.RegionShape.RECTANGLE
+	plateau.region_size = Vector2(120, 90)
+	plateau.blend_mode = TerrainTypes.BlendMode.REPLACE
+	plateau.profile_height = 26.0
+	plateau.elevation_origin = TerrainTypes.ElevationOrigin.WORLD
+	plateau.profile_offset = 26.0
+	gen.add_child(plateau)
+	return gen
+
+func _free(gen: TerrainGenerator) -> void:
+	root.remove_child(gen)
+	gen.free()
 
 # ---------------------------------------------------------------------------
 # Harness
 # ---------------------------------------------------------------------------
 
-## Time `body` `_repeats` times and record min/median/mean in milliseconds.
-func _measure(label: String, body: Callable, note: String = "") -> Dictionary:
+func _scales() -> Array:
+	return SCALES if _full else SCALES.slice(0, 2)
+
+func _header() -> void:
+	print("================================================================")
+	print("Terrainy 2 performance benchmark")
+	print("Godot %s | adapter=%s | RenderingDevice=%s" % [
+		Engine.get_version_info().string,
+		RenderingServer.get_video_adapter_name(),
+		"yes" if RenderingServer.get_rendering_device() != null else "no (CPU worst case)",
+	])
+	print("repeats=%d (best/median/mean) | quick=%s | full=%s" % [_repeats, _quick, _full])
+	print("================================================================")
+
+## Time [param body] `_repeats` times and record best/median/mean in ms.
+func _measure(label: String, body: Callable, note: String = "") -> void:
 	var samples: Array[float] = []
 	for i in _repeats:
 		var start := Time.get_ticks_usec()
 		body.call()
 		samples.append(float(Time.get_ticks_usec() - start) / 1000.0)
 	samples.sort()
-	var min_ms: float = samples[0]
-	var median_ms: float = samples[samples.size() / 2]
 	var sum := 0.0
 	for s in samples:
 		sum += s
-	var mean_ms := sum / float(samples.size())
-	var entry := {
-		"section": _section,
-		"label": label,
-		"min": min_ms,
-		"median": median_ms,
-		"mean": mean_ms,
-		"note": note,
-	}
-	_results.append(entry)
-	print("  %-52s min %9.2f ms  median %9.2f ms  %s" % [label, min_ms, median_ms, note])
-	return entry
-
-
-func _print_section(title: String) -> void:
-	_section = title
-	print("\n--- %s ---" % title)
-
-
-## A feature set with the mix a real scene uses: noise, primitives, a landscape and a hole.
-func _make_features(count_noise: int = 2, count_primitive: int = 2) -> Array:
-	var features: Array = []
-	for i in count_noise:
-		var n := PerlinNoiseNode.new()
-		n.name = "Perlin%d" % i
-		n.noise_seed = 1000 + i
-		n.amplitude = 20.0
-		n.influence_size = Vector2(600.0, 600.0)
-		n.edge_falloff = 0.3
-		n.position = Vector3(-200.0 + i * 200.0, 0.0, -200.0)
-		get_root().add_child(n)
-		features.append(n)
-	for i in count_primitive:
-		var h := HillNode.new()
-		h.name = "Hill%d" % i
-		h.height = 60.0
-		h.influence_size = Vector2(300.0, 300.0)
-		h.edge_falloff = 0.3
-		h.position = Vector3(150.0 - i * 300.0, 0.0, 150.0)
-		get_root().add_child(h)
-		features.append(h)
-	var range_node := MountainRangeNode.new()
-	range_node.name = "Range"
-	range_node.influence_size = Vector2(500.0, 500.0)
-	range_node.position = Vector3(0.0, 0.0, 300.0)
-	get_root().add_child(range_node)
-	features.append(range_node)
-	return features
-
-
-func _contexts_for(features: Array) -> Dictionary:
-	var contexts: Dictionary = {}
-	for feature in features:
-		contexts[feature] = feature.prepare_evaluation_context()
-	return contexts
-
-
-func _typed(features: Array) -> Array[TerrainFeatureNode]:
-	var typed: Array[TerrainFeatureNode] = []
-	for feature in features:
-		typed.append(feature)
-	return typed
-
-
-func _free_all(nodes: Array) -> void:
-	for node in nodes:
-		if is_instance_valid(node):
-			node.free()
-
-
-# ---------------------------------------------------------------------------
-# Stage 1: per-feature heightmap generation (CPU, the innermost loop)
-# ---------------------------------------------------------------------------
-
-func _bench_feature_heightmap_generation() -> void:
-	_print_section("Feature heightmap generation (generate_heightmap_with_context_raw)")
-	var features := _make_features()
-	var contexts := _contexts_for(features)
-
-	for resolution in RESOLUTIONS:
-		var pixels := resolution.x * resolution.y
-		for feature in features:
-			var ctx = contexts[feature]
-			_measure(
-				"%s @ %dx%d" % [feature.name, resolution.x, resolution.y],
-				func() -> void:
-					feature.generate_heightmap_with_context_raw(resolution, BOUNDS, ctx)
-			)
-		# Per-pixel cost summary for the whole feature set.
-		var start := Time.get_ticks_usec()
-		for feature in features:
-			feature.generate_heightmap_with_context_raw(resolution, BOUNDS, contexts[feature])
-		var elapsed_us := Time.get_ticks_usec() - start
-		print("    -> whole set (%d features, %d px each): %.2f ms total, %.3f us/px" % [
-			features.size(), pixels, float(elapsed_us) / 1000.0,
-			float(elapsed_us) / float(pixels * features.size()),
-		])
-
-	_free_all(features)
-
-
-# ---------------------------------------------------------------------------
-# Stage 2: influence map generation (CPU fallback path)
-# ---------------------------------------------------------------------------
-
-func _bench_influence_map_generation() -> void:
-	_print_section("Influence map generation (CPU path, _generate_influence_map)")
-	var features := _make_features(1, 1)
-	var contexts := _contexts_for(features)
-	var builder = TerrainHeightmapBuilder.new()
-
-	for resolution in RESOLUTIONS:
-		var pixels := resolution.x * resolution.y
-		for feature in features:
-			var ctx = contexts[feature]
-			_measure(
-				"%s influence @ %dx%d" % [feature.name, resolution.x, resolution.y],
-				func() -> void:
-					builder._generate_influence_map(feature, ctx, resolution, BOUNDS)
-			)
-
-	_measure(
-		"influence bounds scan (Rect2i) @ 1025x1025",
-		func() -> void:
-			var img: Image = builder._generate_influence_map(features[0], contexts[features[0]], Vector2i(1025, 1025), BOUNDS)
-			builder._compute_influence_bounds(img, Vector2i(1025, 1025))
-	)
-
-	builder.cleanup()
-	_free_all(features)
-
-
-# ---------------------------------------------------------------------------
-# Stage 3: composition (CPU blend + GPU when available)
-# ---------------------------------------------------------------------------
-
-func _bench_composition() -> void:
-	_print_section("Heightmap composition (builder.compose)")
-	var features := _make_features(2, 2)
-	var typed := _typed(features)
-	var contexts := _contexts_for(features)
-	var has_device := RenderingServer.get_rendering_device() != null
-
-	for resolution in RESOLUTIONS:
-		var builder = TerrainHeightmapBuilder.new()
-		# Cold: caches empty, everything generated + composed.
-		_measure(
-			"compose cold, CPU only @ %dx%d" % [resolution.x, resolution.y],
-			func() -> void:
-				builder.clear_all_caches()
-				for feature in features:
-					feature.mark_dirty()
-				builder.compose(typed, contexts, resolution, BOUNDS, BASE_HEIGHT, false, false, false)
-		)
-		# Warm: caches populated, only the blend runs.
-		builder.compose(typed, contexts, resolution, BOUNDS, BASE_HEIGHT, false, false, false)
-		_measure(
-			"compose warm (cached) @ %dx%d" % [resolution.x, resolution.y],
-			func() -> void:
-				builder.compose(typed, contexts, resolution, BOUNDS, BASE_HEIGHT, false, false, false)
-		)
-		if has_device:
-			_measure(
-				"compose cold, GPU compose @ %dx%d" % [resolution.x, resolution.y],
-				func() -> void:
-					builder.clear_all_caches()
-					for feature in features:
-						feature.mark_dirty()
-					builder.compose(typed, contexts, resolution, BOUNDS, BASE_HEIGHT, true, false, true)
-			)
-		builder.cleanup()
-
-	_free_all(features)
-
-
-# ---------------------------------------------------------------------------
-# Stage 4: mesh generation (generate_surface_arrays)
-# ---------------------------------------------------------------------------
-
-func _bench_mesh_generation() -> void:
-	_print_section("Mesh generation (TerrainMeshGenerator.generate_surface_arrays)")
-	var terrain_size := Vector2(512.0, 512.0)
-
-	for chunk_res in CHUNK_RESOLUTIONS:
-		var heightmap := _make_noise_image(chunk_res)
-		var verts := chunk_res * chunk_res
-		var tris := (chunk_res - 1) * (chunk_res - 1) * 2
-		_measure(
-			"solid mesh %dx%d" % [chunk_res, chunk_res],
-			func() -> void:
-				TerrainMeshGenerator.generate_surface_arrays(heightmap, terrain_size, null, false),
-			"%d verts / %d tris" % [verts, tris]
-		)
-
-	# Holed variant: marching squares with boundary vertices is the expensive branch.
-	for chunk_res in [129, 257]:
-		var heightmap := _make_noise_image(chunk_res)
-		var hole_mask := _make_hole_mask_image(chunk_res)
-		_measure(
-			"holed mesh %dx%d (marching squares)" % [chunk_res, chunk_res],
-			func() -> void:
-				TerrainMeshGenerator.generate_surface_arrays(heightmap, terrain_size, hole_mask, false)
-		)
-
-
-func _make_noise_image(res: int) -> Image:
-	var data := PackedFloat32Array()
-	data.resize(res * res)
-	for y in res:
-		for x in res:
-			data[y * res + x] = sin(float(x) * 0.05) * cos(float(y) * 0.05) * 30.0
-	return Image.create_from_data(res, res, false, Image.FORMAT_RF, data.to_byte_array())
-
-
-func _make_hole_mask_image(res: int) -> Image:
-	var data := PackedFloat32Array()
-	data.resize(res * res)
-	var center := float(res) * 0.5
-	var radius := float(res) * 0.2
-	for y in res:
-		for x in res:
-			var d := sqrt(pow(float(x) - center, 2.0) + pow(float(y) - center, 2.0))
-			data[y * res + x] = 1.0 if d < radius else 0.0
-	return Image.create_from_data(res, res, false, Image.FORMAT_RF, data.to_byte_array())
-
-
-# ---------------------------------------------------------------------------
-# Stage 5: collision generation
-# ---------------------------------------------------------------------------
-
-func _bench_collision_generation() -> void:
-	_print_section("Collision generation (TerrainCollisionBuilder.build_faces)")
-	var terrain_size := Vector2(512.0, 512.0)
-
-	for chunk_res in [129, 257, 513]:
-		var heightmap := _make_noise_image(chunk_res)
-		var hole_mask := _make_hole_mask_image(chunk_res)
-		_measure(
-			"build_faces %dx%d, EXACT" % [chunk_res, chunk_res],
-			func() -> void:
-				TerrainCollisionBuilder.build_faces(heightmap, terrain_size, hole_mask, 0, 0)
-		)
-		_measure(
-			"build_faces %dx%d, FAST(8192) stride-decimated" % [chunk_res, chunk_res],
-			func() -> void:
-				TerrainCollisionBuilder.build_faces(heightmap, terrain_size, hole_mask, 8192, 0)
-		)
-
-	var big := _make_noise_image(513)
-	_measure(
-		"mask_has_holes 513x513",
-		func() -> void:
-			TerrainCollisionBuilder.mask_has_holes(_make_hole_mask_image(513))
-	)
-
-
-# ---------------------------------------------------------------------------
-# Stage 6: modifier pipeline
-# ---------------------------------------------------------------------------
-
-func _bench_modifier_pipeline() -> void:
-	_print_section("Modifier pipeline (smoothing / terracing / clamping)")
-	var pipeline = ModifierPipeline.new()
-	var feature := HillNode.new()
-	feature.position = Vector3.ZERO
-	get_root().add_child(feature)
-	var ctx = feature.prepare_evaluation_context()
-
-	for resolution in [Vector2i(257, 257), Vector2i(513, 513)]:
-		var heightmap := _make_noise_image(resolution.x)
-		for label in ["smoothing_r2", "smoothing_r8", "terracing_5", "terracing_20", "clamp"]:
-			_measure(
-				"%s @ %dx%d" % [label, resolution.x, resolution.y],
-				func() -> void:
-					match label:
-						"smoothing_r2":
-							pipeline.apply_modifiers(heightmap, BOUNDS, ctx, TerrainFeatureNode.SmoothingMode.LIGHT, 2.0, false, 5, 0.2, false, 0.0, false, 100.0, true)
-						"smoothing_r8":
-							pipeline.apply_modifiers(heightmap, BOUNDS, ctx, TerrainFeatureNode.SmoothingMode.HEAVY, 8.0, false, 5, 0.2, false, 0.0, false, 100.0, true)
-						"terracing_5":
-							pipeline.apply_modifiers(heightmap, BOUNDS, ctx, TerrainFeatureNode.SmoothingMode.NONE, 2.0, true, 5, 0.2, false, 0.0, false, 100.0, true)
-						"terracing_20":
-							pipeline.apply_modifiers(heightmap, BOUNDS, ctx, TerrainFeatureNode.SmoothingMode.NONE, 2.0, true, 20, 0.2, false, 0.0, false, 100.0, true)
-						"clamp":
-							pipeline.apply_modifiers(heightmap, BOUNDS, ctx, TerrainFeatureNode.SmoothingMode.NONE, 2.0, false, 5, 0.2, true, 5.0, true, 25.0, true)
-			)
-
-	feature.free()
-	pipeline.cleanup()
-
-
-# ---------------------------------------------------------------------------
-# Stage 7: cache behaviour (does a warm rebuild avoid the expensive stages?)
-# ---------------------------------------------------------------------------
-
-func _bench_cache_behaviour() -> void:
-	_print_section("Cache behaviour (rebuild with no changes = should be near-free)")
-	var features := _make_features(2, 2)
-	var typed := _typed(features)
-	var contexts := _contexts_for(features)
-	var builder = TerrainHeightmapBuilder.new()
-	var resolution := Vector2i(513, 513)
-
-	builder.compose(typed, contexts, resolution, BOUNDS, BASE_HEIGHT, false, false, false)
-	_measure(
-		"1st recompose, nothing dirty (heightmaps+influence cached)",
-		func() -> void:
-			builder.compose(typed, contexts, resolution, BOUNDS, BASE_HEIGHT, false, false, false)
-	)
-	_measure(
-		"recompose after mark_dirty on ONE of 5 features",
-		func() -> void:
-			features[0].mark_dirty()
-			builder.compose(typed, contexts, resolution, BOUNDS, BASE_HEIGHT, false, false, false)
-	)
-	_measure(
-		"recompose after invalidate_influence (heightmaps kept)",
-		func() -> void:
-			builder.clear_influence_cache()
-			builder.compose(typed, contexts, resolution, BOUNDS, BASE_HEIGHT, false, false, false)
-	)
-
-	builder.cleanup()
-	_free_all(features)
-
-
-# ---------------------------------------------------------------------------
-# Report
-# ---------------------------------------------------------------------------
+	_rows.append({
+		"section": _section, "label": label, "min": samples[0],
+		"median": samples[samples.size() / 2], "mean": sum / float(samples.size()), "note": note,
+	})
 
 func _report() -> void:
-	print("\n================================================================")
-	print("SUMMARY (best-of-%d, milliseconds)" % _repeats)
-	print("================================================================")
-	var last_section := ""
-	for entry in _results:
-		if entry.section != last_section:
-			last_section = entry.section
-			print("\n%s" % last_section)
-		print("  %-52s %9.2f  %s" % [entry.label, entry.min, entry.note])
-
-	print("\nTop 15 by median cost:")
-	var sorted_entries := _results.duplicate()
-	sorted_entries.sort_custom(func(a, b): return a.median > b.median)
-	for i in mini(15, sorted_entries.size()):
-		var e: Dictionary = sorted_entries[i]
-		print("  %2d. %-50s median %9.2f ms   [%s]" % [i + 1, e.label, e.median, e.section])
 	print("")
+	print("----------------------------------------------------------------")
+	print("timings (ms)")
+	print("----------------------------------------------------------------")
+	var section := ""
+	for row in _rows:
+		if row["section"] != section:
+			section = row["section"]
+			print("\n%s" % section)
+			print("  %-42s %10s %10s %10s  %s" % ["measurement", "best", "median", "mean", "note"])
+		print("  %-42s %10.2f %10.2f %10.2f  %s" % [row["label"], row["min"], row["median"], row["mean"], row["note"]])
+
+	print("")
+	print("----------------------------------------------------------------")
+	print("cache behaviour (fields evaluated / reused, from TerrainDiagnostics)")
+	print("----------------------------------------------------------------")
+	for entry in _cache_stats:
+		print("  %-42s first rebuild evaluated %d | after a one-field edit: %d evaluated, %d reused"
+			% [entry["label"], entry["first_evaluated"], entry["evaluated"], entry["reused"]])
+
+	print("")
+	print("----------------------------------------------------------------")
+	print("stage attribution (last full rebuild per scale, from TerrainDiagnostics)")
+	print("----------------------------------------------------------------")
+	for entry in _attribution:
+		var diag: Dictionary = entry["diag"]
+		var phases: Dictionary = diag["phases"]
+		var counters: Dictionary = diag["counters"]
+		print("\n%s  (%d chunks, %d samples/side)" % [entry["label"], diag["chunks"], diag["grid"]["samples"]])
+		var parts := PackedStringArray()
+		for key in ["plan", "compose", "paint", "controls", "chunk_workers"]:
+			if phases.has(key):
+				parts.append("%s=%d" % [key, int(phases[key])])
+		print("  phases:   %s" % " ".join(parts))
+		var counts := PackedStringArray()
+		for key in ["units", "fields_evaluated", "fields_reused", "chunks_generated", "chunks_applied", "apply_frames"]:
+			counts.append("%s=%d" % [key, int(counters.get(key, 0))])
+		print("  counters: %s" % " ".join(counts))
+	print("")
+	print("Summing phases is not the total: chunk meshing runs on worker threads while the main")
+	print("thread applies results, so `chunk_workers` overlaps the frame budget rather than adding")
+	print("to it. `tests/perf/benchmark_frame_budget.gd` measures that side directly.")

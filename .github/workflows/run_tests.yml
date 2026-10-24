@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 env:
-  # Keep in sync with the Godot version the addon is developed against (plugin.cfg).
+  # Keep in sync with the Godot version the project is developed against (project.godot).
   GODOT_VERSION: 4.7.2
 
 jobs:
@@ -43,16 +43,29 @@ jobs:
       - name: Import project
         run: ~/godot/godot --headless --path . --import
 
+      # CI gates the CPU paths; the GPU parity cases skip here (no RenderingDevice) and run
+      # locally / nightly via addons/terrainy/tests/run_gpu_parity.sh, which fails on a skip so a
+      # silent skip is never a pass. A pixel-level check of the terrain material shader needs a
+      # rendered frame and a real GPU, so it is not part of this job.
       - name: Run headless tests
         run: |
           set -o pipefail
           ~/godot/godot --headless --path . \
             --script res://addons/terrainy/tests/run_tests.gd 2>&1 | tee test_output.txt
 
+      - name: Verify harness rejects script runtime errors
+        if: always()
+        run: |
+          set -o pipefail
+          ~/godot/godot --headless --path . \
+            --script res://addons/terrainy/tests/verify_harness.gd 2>&1 | tee harness_output.txt
+
       - name: Upload test output
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: headless-test-output
-          path: test_output.txt
+          path: |
+            test_output.txt
+            harness_output.txt
           if-no-files-found: ignore
