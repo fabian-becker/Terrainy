@@ -257,6 +257,9 @@ static func blend(target, src, weights: PackedFloat32Array, mode: int, scale: fl
 	var cd: PackedFloat32Array = coverage.data if coverage != null else PackedFloat32Array()
 	var x_off: int = rect.position.x - target.rect.position.x
 	var sx_off: int = rect.position.x - src.rect.position.x
+	# ADD is what a plain terrain field blends with, i.e. most of the pixels: inline it rather than
+	# calling blend_value() per sample.
+	var is_add := mode == TerrainTypes.BlendMode.ADD
 	for gy in range(y0, y1):
 		var trow: int = (gy - target.rect.position.y) * tw + x_off
 		var srow: int = (gy - src.rect.position.y) * sw + sx_off
@@ -266,7 +269,10 @@ static func blend(target, src, weights: PackedFloat32Array, mode: int, scale: fl
 			if ws <= 0.0:
 				continue
 			var ti := trow + x
-			td[ti] = blend_value(td[ti], sd[si], ws, mode)
+			if is_add:
+				td[ti] = td[ti] + sd[si] * ws
+			else:
+				td[ti] = blend_value(td[ti], sd[si], ws, mode)
 			if coverage != null:
 				cd[ti] = maxf(cd[ti], minf(weights[si], 1.0))
 

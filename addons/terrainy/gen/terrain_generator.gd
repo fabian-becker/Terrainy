@@ -624,6 +624,16 @@ func effective_worker_threads() -> int:
 		return max_worker_threads
 	return maxi(OS.get_processor_count() - 1, 1)
 
+## Pool budget the compose hands to its own passes (field evaluation, blends, modifiers).
+##
+## Half the logical cores, never more than [method effective_worker_threads]: the passes are
+## memory-heavy pixel loops, and on an SMT machine more bands than physical cores measurably hurt
+## (8-core/16-thread reference box, 2048 cells: 15 bands 15.0 s vs 8 bands 10.2 s of compose).
+func compose_worker_threads() -> int:
+	if not use_multithreading:
+		return 1
+	return clampi(OS.get_processor_count() / 2, 1, effective_worker_threads())
+
 func is_rebuilding_meshes() -> bool:
 	return (
 		_rebuild.task_id >= 0

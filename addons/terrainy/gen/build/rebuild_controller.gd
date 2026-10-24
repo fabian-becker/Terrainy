@@ -179,7 +179,7 @@ func start(synchronous: bool = false) -> void:
 		"paint_epoch": host.get_paint_epoch(), "rebuild_id": rebuild_id,
 		"injected": {}, "gpu_blend": false, "hash_rects": hash_rects,
 		# Pool budget the compose hands to its own passes (field evaluation, blends, modifiers).
-		"worker_threads": host.effective_worker_threads() if host.use_multithreading else 1,
+		"worker_threads": host.compose_worker_threads(),
 	}
 	# GPU field evaluation runs on the main thread (local RenderingDevices are main-thread only)
 	# before the worker starts; its maps are injected into the composer's cache.
