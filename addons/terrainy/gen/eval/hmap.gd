@@ -128,22 +128,27 @@ func blurred(region: Rect2i, radius: float, cell: float, iterations: int, thread
 	var tmp := PackedFloat32Array()
 	tmp.resize(rw * rh)
 	var inv := 1.0 / float(2 * r + 1)
-	var bands := BandTask.band_count(maxi(rw, rh), threads)
+	var bands := BandTask.band_count(maxi(rw, rh), threads, BandTask.MIN_ROWS_PER_BAND)
+	var ok := true
 	for _it in maxi(iterations, 1):
 		# Horizontal
 		if bands <= 1:
 			_blur_rows(buf, tmp, rw, rh, r, inv, 0, rh)
 		else:
-			BandTask.run(threads, bands, func(i: int) -> void:
+			ok = BandTask.run(threads, bands, func(i: int) -> void:
 				var rng := BandTask.band_range(rh, bands, i)
-				_blur_rows(buf, tmp, rw, rh, r, inv, rng.x, rng.y))
+				_blur_rows(buf, tmp, rw, rh, r, inv, rng.x, rng.y)) and ok
 		# Vertical
 		if bands <= 1:
 			_blur_cols(tmp, buf, rw, rh, r, inv, 0, rw)
 		else:
-			BandTask.run(threads, bands, func(i: int) -> void:
+			ok = BandTask.run(threads, bands, func(i: int) -> void:
 				var rng := BandTask.band_range(rw, bands, i)
-				_blur_cols(tmp, buf, rw, rh, r, inv, rng.x, rng.y))
+				_blur_cols(tmp, buf, rw, rh, r, inv, rng.x, rng.y)) and ok
+		if not ok:
+			# Fail closed: a half-blurred buffer would be blended as if it were the smooth pass.
+			push_error("[Terrainy] blur bands did not all finish")
+			return PackedFloat32Array()
 	var out := PackedFloat32Array()
 	out.resize(region.size.x * region.size.y)
 	for y in region.size.y:

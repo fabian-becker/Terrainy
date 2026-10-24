@@ -11,9 +11,6 @@ const Raster = preload("res://addons/terrainy/gen/eval/raster.gd")
 const CurveLut = preload("res://addons/terrainy/gen/eval/curve_lut.gd")
 const BandTask = preload("res://addons/terrainy/gen/eval/band_task.gd")
 
-## Fewest rows a band may own before splitting the mask pass stops paying for itself.
-const BAND_MIN_ROWS: int = 8
-
 enum Kind { REGION, TEXTURE, PATH, SLOPE, ELEVATION, PAINT }
 
 var kind: int = Kind.REGION
@@ -48,16 +45,24 @@ var signature: String = ""
 
 ## Mask weights over [param rect] (row-major, one value per grid sample). Bands write disjoint
 ## rows of one buffer, so [param threads] > 1 spreads the pass over the pool.
+##
+## Returns an EMPTY array when a band did not finish: the caller must then treat the mask as
+## unusable rather than as "zero everywhere" (zeros are a legal mask value, and an inverted mask
+## would even turn them into full strength).
 func weights(grid, rect: Rect2i, dest, threads: int = 1) -> PackedFloat32Array:
 	var out := PackedFloat32Array()
 	out.resize(rect.size.x * rect.size.y)
-	var count := BandTask.band_count(rect.size.y, threads, BAND_MIN_ROWS)
+	var count := BandTask.band_count(rect.size.y, threads, BandTask.MIN_ROWS_PER_BAND)
+	var ok := true
 	if count <= 1:
 		_weights_rows(grid, rect, dest, out, 0, rect.size.y)
 	else:
-		BandTask.run(threads, count, func(i: int) -> void:
+		ok = BandTask.run(threads, count, func(i: int) -> void:
 			var rng := BandTask.band_range(rect.size.y, count, i)
 			_weights_rows(grid, rect, dest, out, rng.x, rng.y))
+	if not ok:
+		push_error("[Terrainy] mask bands did not all finish: the mask is unusable for this compose")
+		return PackedFloat32Array()
 	return out
 
 ## Fill rows `[y0, y1)` of [param out] (laid out like [param rect], row-major).
@@ -126,7 +131,7 @@ func _region(grid, rect: Rect2i, out: PackedFloat32Array, base: int) -> void:
 	var w := rect.size.x
 	var has_lut := not falloff_lut.is_empty()
 	for y in rect.size.y:
-		var gz: float = grid.origin.y + (rect.position.y + y) * grid.cell
+		var gz: float = grid.world_z(rect.position.y + y)
 		var row := base + y * w
 		for x in w:
 			var gx: float = grid.origin.x + (rect.position.x + x) * grid.cell
@@ -146,7 +151,7 @@ func _texture_at(lx: float, lz: float) -> float:
 func _texture(grid, rect: Rect2i, out: PackedFloat32Array, base: int) -> void:
 	var w := rect.size.x
 	for y in rect.size.y:
-		var gz: float = grid.origin.y + (rect.position.y + y) * grid.cell
+		var gz: float = grid.world_z(rect.position.y + y)
 		var row := base + y * w
 		for x in w:
 			var gx: float = grid.origin.x + (rect.position.x + x) * grid.cell
@@ -203,7 +208,7 @@ func _paint_at(wx: float, wz: float) -> float:
 func _paint(grid, rect: Rect2i, out: PackedFloat32Array, base: int) -> void:
 	var w := rect.size.x
 	for y in rect.size.y:
-		var gz: float = grid.origin.y + (rect.position.y + y) * grid.cell
+		var gz: float = grid.world_z(rect.position.y + y)
 		var row := base + y * w
 		for x in w:
 			out[row + x] = _paint_at(grid.origin.x + (rect.position.x + x) * grid.cell, gz)

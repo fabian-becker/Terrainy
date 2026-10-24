@@ -39,6 +39,8 @@ class StubGrid extends RefCounted:
 	func rect_for_world(_world: Rect2, _padding: int = 1) -> Rect2i:
 		return Rect2i(0, 0, 2, 2)
 
+# --- band_task: the split itself -------------------------------------------------------------
+
 func test_band_ranges_are_contiguous_and_cover_every_row() -> void:
 	for rows in [1, 7, 8, 9, 64, 100, 123, 769]:
 		for threads in [1, 2, 3, 8, 16]:
@@ -70,6 +72,38 @@ func test_band_count_is_one_when_splitting_cannot_pay() -> void:
 	t.check_eq(BandTask.band_count(7, 8, 8), 1, "fewer rows than min_rows runs inline")
 	t.check_eq(BandTask.band_count(1024, 8, 8), 8, "enough rows fills the budget")
 	t.check_eq(BandTask.band_count(40, 8, 8), 5, "rows / min_rows caps the band count")
+
+func test_band_run_visits_every_index_once() -> void:
+	for threads in [1, 2, 4, 16]:
+		var seen := PackedInt32Array()
+		seen.resize(37)
+		var ok := BandTask.run(threads, 37, func(i: int) -> void: seen[i] += 1)
+		t.check(ok, "run(%d) reports success" % threads)
+		var total := 0
+		var repeated := 0
+		for v in seen:
+			total += v
+			if v > 1:
+				repeated += 1
+		t.check_eq(total, 37, "every index ran once with %d threads" % threads)
+		t.check_eq(repeated, 0, "no index ran twice with %d threads" % threads)
+	# An empty pass is a success, not a failure.
+	t.check(BandTask.run(4, 0, func(_i: int) -> void: pass), "empty pass succeeds")
+
+func test_run_rows_hands_absolute_rows_to_the_callback() -> void:
+	# The callbacks run on 4 threads, and appending to a shared Array from several threads loses
+	# entries (the exact hazard the band design avoids) -- so the collector is locked here.
+	var seen: Array = []
+	var mutex := Mutex.new()
+	BandTask.run_rows(4, 64, 10, func(y0: int, y1: int) -> void:
+		mutex.lock()
+		seen.append(Vector2i(y0, y1))
+		mutex.unlock(), 8)
+	t.check_eq(seen.size(), 4, "64 rows / 8 min rows = 4 bands over 4 threads")
+	for rng in seen:
+		t.check(rng.x >= 10 and rng.y <= 74, "offset applied to %s" % str(rng))
+
+# --- the determinism invariant: values never depend on the band split ------------------------
 
 func _stub_snapshot(grid) -> RefCounted:
 	var f := make_field(10.0, Vector2(200, 200))
@@ -202,6 +236,8 @@ func _parity_build(max_threads: int) -> TerrainGenerator:
 	var gen_children: Array = [mountains, hills, group, clamp_mod]
 	return build(gen, gen_children)
 
+# --- masks: an inverted mask is non-zero outside its bounds ----------------------------------
+
 func test_inverted_mask_modifier_still_acts_outside_the_mask_bounds() -> void:
 	# A modifier pass is bounded by its mask's world rect to skip the pixels the mask zeroes. An
 	# inverted mask is zero INSIDE that rect and 1 everywhere else, so clipping the pass to the
@@ -253,3 +289,68 @@ func test_modifier_with_an_inverted_mask_matches_the_unclipped_reference() -> vo
 		var unmasked := h_at(gen, p.x, p.y)
 		t.check(absf(with_mask[i] - unmasked) < 1.5, "height at %s within 1.5 m of the unmasked run (%.3f vs %.3f)" % [str(p), with_mask[i], unmasked])
 
+# --- failure containment ---------------------------------------------------------------------
+
+func test_modifier_apply_reports_success_and_touches_the_map() -> void:
+	var grid := TerrainGrid.new(32, 32.0)
+	var dest := HMap.new(grid.full_rect(), 5.0)
+	var snap := ModifierSnapshot.new()
+	snap.op = ModifierSnapshot.Op.CLAMP
+	snap.use_min = false
+	snap.clamp_max = 2.0
+	snap.bounds = Rect2(-1, -1, 2, 2)
+	var ok: bool = snap.apply(dest, grid, 0.0, 1.0, 4)
+	t.check(ok, "apply reports success")
+	t.check_almost_eq(dest.get_at(0, 0), 2.0, "clamped", 0.001)
+	t.check_almost_eq(dest.get_at(0, 0), 2.0, "banded merge wrote the first row", 0.001)
+	t.check_almost_eq(dest.get_at(dest.rect.size.x - 1, dest.rect.size.y - 1), 2.0, "and the last", 0.001)
+	t.check_eq(dest.data.size(), dest.rect.size.x * dest.rect.size.y, "map keeps its size")
+
+func test_stitch_guard_rejects_an_incomplete_band_set() -> void:
+	var rows := 12
+	var w := 4
+	var expected := w * rows
+	var complete: Array = []
+	var partial: Array = []
+	for band in 3:
+		complete.append(PackedFloat32Array())
+		complete[band].resize(w * 4)
+		if band < 2:
+			partial.append(PackedFloat32Array())
+			partial[band].resize(w * 4)
+		else:
+			partial.append(null)
+	t.check(ModifierSnapshot.stitch_complete(complete, expected), "three full blocks stitch")
+	t.check(not ModifierSnapshot.stitch_complete(partial, expected), "a missing block does not stitch")
+	complete[1] = PackedFloat32Array()
+	complete[1].resize(w * 3)
+	t.check(not ModifierSnapshot.stitch_complete(complete, expected), "a short block does not stitch")
+	t.check(not ModifierSnapshot.stitch_complete([], expected), "no blocks do not stitch")
+	t.check(ModifierSnapshot.stitch_complete([], 0), "an empty pass is trivially complete")
+
+# --- diagnostics: the counters must describe what ran ----------------------------------------
+
+func test_evaluated_counts_injected_gpu_maps() -> void:
+	var f := make_field(10.0, Vector2(20, 20))
+	f.domain_falloff = null
+	var gen := build(make_generator(32, 32.0), [f])
+	var grid = gen.get_grid()
+	var plan = PlanBuilder.build(gen, gen.composition_context(grid, [], []))
+	var target = null
+	for unit in plan.all_units():
+		if unit.kind == CompositionPlan.UnitKind.FIELD:
+			target = unit
+			break
+	t.check(target != null, "the plan has a FIELD unit")
+	if target == null:
+		return
+	var hmap := HMap.new(grid.full_rect(), 2.0)
+	var wmap := HMap.new(grid.full_rect(), 1.0)
+	var composer := Composer.new()
+	composer.injected = {target.snap.signature: {"h": hmap, "w": wmap}}
+	composer.worker_threads = 2
+	var composite = composer.compose(plan, grid, 0.0)
+	t.check_eq(composer.evaluated, 1, "an injected map counts as evaluated")
+	t.check_eq(composer.gpu_evaluated, 1, "and as GPU-evaluated")
+	t.check_eq(composer.reused, 0, "nothing was reused")
+	t.check_almost_eq(composite.get_at(0, 0), 2.0, "the injected heights reached the composite", 0.01)

@@ -227,12 +227,32 @@ static func run_compose_job(job: Dictionary) -> void:
 		if job.get("gpu_blend", false):
 			composer.gpu_blend_hook = GpuCompositor.blend
 		procedural = composer.compose(plan, grid, job["base_height"], job["min_height"], job["max_height"])
+		if composer.failed and composer.worker_threads > 1:
+			# A banded pass did not finish. Retry once with every pass inline: the same code paths,
+			# no threads, so a failure that came from the split cannot repeat -- and the second
+			# result is what the compose publishes.
+			push_error("[Terrainy] compose failed on %d worker threads: retrying inline" % composer.worker_threads)
+			composer = Composer.new()
+			composer.previous_cache = job["previous_cache"]
+			composer.injected = job["injected"]
+			composer.worker_threads = 1
+			if job.get("gpu_blend", false):
+				composer.gpu_blend_hook = GpuCompositor.blend
+			job["retried_inline"] = true
+			procedural = composer.compose(plan, grid, job["base_height"], job["min_height"], job["max_height"])
 		unit_weights = composer.unit_weights
 		cache = composer.cache
 		job["evaluated"] = composer.evaluated
 		job["reused"] = composer.reused
 		job["gpu_evaluated"] = composer.gpu_evaluated
 		job["gpu_blends"] = composer.gpu_blends
+		if composer.failed:
+			# Fail closed, even after the inline retry: no result means the commit is skipped
+			# whole (poll_task reports the failure, build_failed is emitted) and the previous
+			# terrain, its evaluation cache and its meshes stay exactly as they were. A
+			# half-written map must never become the terrain or the next rebuild's _eval_cache.
+			job["failed"] = true
+			return
 	var t1 := Time.get_ticks_msec()
 	var world: Rect2 = job["world"]
 	var final_map

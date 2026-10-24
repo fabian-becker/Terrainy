@@ -9,9 +9,6 @@ const Raster = preload("res://addons/terrainy/gen/eval/raster.gd")
 const CurveLut = preload("res://addons/terrainy/gen/eval/curve_lut.gd")
 const BandTask = preload("res://addons/terrainy/gen/eval/band_task.gd")
 
-## Fewest rows a band may own before splitting a pass stops paying for itself.
-const BAND_MIN_ROWS: int = 8
-
 enum Op { SMOOTH, TERRACE, CLAMP, REMAP, FLATTEN }
 
 var op: int = Op.SMOOTH
@@ -65,9 +62,12 @@ func reads_neighbours() -> bool:
 ##
 ## [param threads] spreads the passes over the worker pool: every pass (mask, flatten, blur,
 ## merge) writes its own rows of the map, so the bands never touch each other's pixels.
-func apply(dest, grid, target_offset: float = 0.0, target_scale: float = 1.0, threads: int = 1) -> void:
+##
+## Returns false when a pass did not finish (a band was abandoned): [param dest] is then left
+## exactly as it was, because a half-written map must never reach the composite.
+func apply(dest, grid, target_offset: float = 0.0, target_scale: float = 1.0, threads: int = 1) -> bool:
 	if dest == null or dest.is_empty() or strength <= 0.0:
-		return
+		return true
 	var target_level := target_height * target_scale + target_offset
 	var rect: Rect2i = dest.rect
 	# Bound the pass: a modifier with a footprint, or (when it has none) a mask that is zero outside
@@ -76,27 +76,34 @@ func apply(dest, grid, target_offset: float = 0.0, target_scale: float = 1.0, th
 	#
 	# Only a mask that actually restricts itself to its bounds may be used as a bound: with
 	# [member MaskSnapshot.invert] the mask is NON-zero outside those bounds (it is 1 there), so
-	# clipping the pass to the mask rect silently drops the modifier's whole effect outside it.
+	# clipping the pass to the mask rect would silently drop the modifier's whole effect outside it.
 	if has_bounds:
 		rect = rect.intersection(grid.rect_for_world(bounds, 1))
 	elif mask != null and not mask.invert and mask.bounds.size.x > 0.0 and mask.bounds.size.y > 0.0:
 		rect = rect.intersection(grid.rect_for_world(mask.bounds, 1))
 	if rect.size.x <= 0 or rect.size.y <= 0:
-		return
+		return true
 	var weights := PackedFloat32Array()
 	weights.resize(rect.size.x * rect.size.y)
 	weights.fill(clampf(strength, 0.0, 1.0))
 	if mask != null:
 		var m: PackedFloat32Array = mask.weights(grid, rect, dest, threads)
-		var bands := BandTask.band_count(rect.size.y, threads, BAND_MIN_ROWS)
+		if m.size() != weights.size():
+			# The mask pass was abandoned: its weights are not there, so nothing may be applied.
+			return false
+		var bands := BandTask.band_count(rect.size.y, threads, BandTask.MIN_ROWS_PER_BAND)
+		var ok := true
 		if bands <= 1:
 			_mul_rows(weights, m, rect.size.x, 0, rect.size.y)
 		else:
-			BandTask.run(threads, bands, func(i: int) -> void:
+			ok = BandTask.run(threads, bands, func(i: int) -> void:
 				var rng := BandTask.band_range(rect.size.y, bands, i)
 				_mul_rows(weights, m, rect.size.x, rng.x, rng.y))
+		if not ok:
+			return false
 	if op == Op.FLATTEN:
-		_flatten_weights(grid, rect, weights, threads)
+		if not _flatten_weights(grid, rect, weights, threads):
+			return false
 	var processed := PackedFloat32Array()
 	if op == Op.SMOOTH:
 		processed = dest.blurred(rect, radius, grid.cell, iterations, threads)
@@ -119,24 +126,28 @@ func apply(dest, grid, target_offset: float = 0.0, target_scale: float = 1.0, th
 	if w != mw or not cov_data.is_empty():
 		_merge_rows(source, PackedFloat32Array(), weights, processed, cov_data, cw, c0, rect,
 			dest_pos, mw, target_level, 0, rect.size.y)
-		return
-	var bands := BandTask.band_count(rect.size.y, threads, BAND_MIN_ROWS)
+		return true
+	var bands := BandTask.band_count(rect.size.y, threads, BandTask.MIN_ROWS_PER_BAND)
 	if bands <= 1:
 		_merge_rows(source, PackedFloat32Array(), weights, processed, cov_data, cw, c0, rect,
 			dest_pos, mw, target_level, 0, rect.size.y)
-		return
+		return true
+	# One slot per band, written by its own band only: no lock is needed, and there is nothing that
+	# could be left held if a band were abandoned (a held [Mutex] would hang the compose worker,
+	# whose wait_to_finish has no timeout).
 	var slots := []
 	slots.resize(bands)
-	var mutex := Mutex.new()
-	BandTask.run(threads, bands, func(i: int) -> void:
+	var completed := BandTask.run(threads, bands, func(i: int) -> void:
 		var rng := BandTask.band_range(rect.size.y, bands, i)
 		var buf := PackedFloat32Array()
 		buf.resize(w * (rng.y - rng.x))
-		buf = _merge_rows(source, buf, weights, processed, cov_data, cw, c0, rect, dest_pos,
-			mw, target_level, rng.x, rng.y)
-		mutex.lock()
-		slots[i] = buf
-		mutex.unlock())
+		slots[i] = _merge_rows(source, buf, weights, processed, cov_data, cw, c0, rect, dest_pos,
+			mw, target_level, rng.x, rng.y))
+	if not completed or not stitch_complete(slots, w * rect.size.y):
+		# Fail closed: an unwritten block must not be stitched into the map (that shifts every row
+		# after it and publishes garbage heights for the rest of the session).
+		push_error("[Terrainy] modifier merge bands did not all finish: keeping the previous map")
+		return false
 	var out := PackedFloat32Array()
 	var start: int = (rect.position.y - dest_pos.y) * mw
 	out.append_array(source.slice(0, start))
@@ -144,6 +155,18 @@ func apply(dest, grid, target_offset: float = 0.0, target_scale: float = 1.0, th
 		out.append_array(part)
 	out.append_array(source.slice(start + w * rect.size.y, source.size()))
 	dest.data = out
+	return true
+
+## True when [param slots] holds one finished row block per band and the blocks add up to
+## [param expected] samples. Empty blocks are legal (a band can own no rows); a slot a band never
+## filled is not, and is what [method apply] refuses to stitch.
+static func stitch_complete(slots: Array, expected: int) -> bool:
+	var total := 0
+	for part in slots:
+		if not (part is PackedFloat32Array):
+			return false
+		total += (part as PackedFloat32Array).size()
+	return total == expected
 
 func _mul_rows(weights: PackedFloat32Array, other: PackedFloat32Array, width: int, y0: int, y1: int) -> void:
 	var i := y0 * width
@@ -254,19 +277,19 @@ func _remap(h: float) -> float:
 		n = CurveLut.sample(remap_lut, clampf(n, 0.0, 1.0)) if clamp_input else n
 	return out_min + n * (out_max - out_min)
 
-func _flatten_weights(grid, rect: Rect2i, weights: PackedFloat32Array, threads: int = 1) -> void:
-	var bands := BandTask.band_count(rect.size.y, threads, BAND_MIN_ROWS)
+func _flatten_weights(grid, rect: Rect2i, weights: PackedFloat32Array, threads: int = 1) -> bool:
+	var bands := BandTask.band_count(rect.size.y, threads, BandTask.MIN_ROWS_PER_BAND)
 	if bands <= 1:
 		_flatten_rows(grid, rect, weights, 0, rect.size.y)
-	else:
-		BandTask.run(threads, bands, func(i: int) -> void:
-			var rng := BandTask.band_range(rect.size.y, bands, i)
-			_flatten_rows(grid, rect, weights, rng.x, rng.y))
+		return true
+	return BandTask.run(threads, bands, func(i: int) -> void:
+		var rng := BandTask.band_range(rect.size.y, bands, i)
+		_flatten_rows(grid, rect, weights, rng.x, rng.y))
 
 func _flatten_rows(grid, rect: Rect2i, weights: PackedFloat32Array, y0: int, y1: int) -> void:
 	var w := rect.size.x
 	for y in range(y0, mini(y1, rect.size.y)):
-		var gz: float = grid.origin.y + (rect.position.y + y) * grid.cell
+		var gz: float = grid.world_z(rect.position.y + y)
 		var row := y * w
 		for x in w:
 			var k := row + x

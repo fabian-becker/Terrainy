@@ -23,13 +23,14 @@ const HMap = preload("res://addons/terrainy/gen/eval/hmap.gd")
 const CompositionPlan = preload("res://addons/terrainy/gen/eval/composition_plan.gd")
 const BandTask = preload("res://addons/terrainy/gen/eval/band_task.gd")
 
-## Fewest rows a band may own before splitting a pass stops paying for itself.
-const BAND_MIN_ROWS: int = 8
-
 var grid = null
 ## Worker pool budget for the passes inside this compose (1 = everything inline on the caller).
 ## The compose itself already runs on a worker task, so the passes nest a group task into it.
 var worker_threads: int = 1
+## True when a banded pass did not finish, i.e. the composite this composer produced is not
+## trustworthy. [method RebuildController.run_compose_job] then drops the whole compose (and retries
+## once inline), so no half-written map reaches the terrain or the next rebuild's evaluation cache.
+var failed: bool = false
 ## signature -> {"h": HMap, "w": HMap}; read from the previous compose, written for this one.
 var previous_cache: Dictionary = {}
 var cache: Dictionary = {}
@@ -54,7 +55,9 @@ func compose(plan, p_grid, base_height: float, min_height: float = -INF, max_hei
 	unit_weights = {}
 	evaluated = 0
 	reused = 0
+	gpu_evaluated = 0
 	fresh = {}
+	failed = false
 	var composite := HMap.new(grid.full_rect(), base_height)
 	_prefetch_fields(plan)
 	_compose_children(plan.root.children, composite, composite, composite, -1)
@@ -67,12 +70,15 @@ func compose(plan, p_grid, base_height: float, min_height: float = -INF, max_hei
 
 ## Clamp a full-width buffer of [param rows] rows in place, in bands.
 func _clamp_rows(d: PackedFloat32Array, width: int, rows: int, lo: float, hi: float) -> void:
-	BandTask.run_rows(worker_threads, rows, 0, func(y0: int, y1: int) -> void:
+	var ok := BandTask.run_rows(worker_threads, rows, 0, func(y0: int, y1: int) -> void:
 		var i := y0 * width
 		var last := y1 * width
 		while i < last:
 			d[i] = clampf(d[i], lo, hi)
-			i += 1, BAND_MIN_ROWS)
+			i += 1, BandTask.MIN_ROWS_PER_BAND)
+	if not ok:
+		failed = true
+		push_error("[Terrainy] clamp bands did not all finish")
 
 ## Evaluate every field the compose will need up front, on the pool: the fields are independent
 ## snapshots, so the whole stage-2 evaluation of a compose is one group task instead of a
@@ -92,6 +98,7 @@ func _prefetch_fields(plan) -> void:
 	if pending.is_empty():
 		return
 	var jobs: Array = []
+	var rects: Dictionary = {}
 	for unit in pending:
 		var snap = unit.snap
 		var rect: Rect2i = snap.pixel_rect(grid)
@@ -100,7 +107,8 @@ func _prefetch_fields(plan) -> void:
 		fresh[unit.snap.signature] = true
 		if rect.size.x <= 0 or rect.size.y <= 0:
 			continue
-		var count := BandTask.band_count(rect.size.y, worker_threads, BAND_MIN_ROWS)
+		rects[unit.snap.signature] = rect
+		var count := BandTask.band_count(rect.size.y, worker_threads, BandTask.MIN_ROWS_PER_BAND)
 		for b in count:
 			var rng := BandTask.band_range(rect.size.y, count, b)
 			jobs.append({
@@ -109,9 +117,18 @@ func _prefetch_fields(plan) -> void:
 			})
 	if jobs.is_empty():
 		return
-	BandTask.run(worker_threads, jobs.size(), func(i: int) -> void:
+	var ok: bool = BandTask.run(worker_threads, jobs.size(), func(i: int) -> void:
 		var job: Dictionary = jobs[i]
 		job["snap"].evaluate_band(grid, job["rect"], job["y0"], job["y1"], job["hd"], job["wd"]))
+	if ok:
+		return
+	# Fail closed: a field whose bands did not all finish holds a half-filled map. Drop those cache
+	# entries so the unit is evaluated again, serially, when the tree walk reaches it -- the compose
+	# still gets correct data, and nothing half-filled can become the next compose's _eval_cache.
+	push_error("[Terrainy] field evaluation bands did not all finish: re-evaluating serially")
+	for sig in rects.keys():
+		cache.erase(sig)
+		fresh.erase(sig)
 
 func _compose_children(children: Array, own, group, datum, datum_mode: int) -> void:
 	for child in children:
@@ -142,7 +159,10 @@ func _apply_modifier(snap, target, datum, datum_mode: int) -> void:
 			TerrainTypes.BlendMode.SUBTRACT:
 				offset = level
 				scale = -1.0
-	snap.apply(target, grid, offset, scale, worker_threads)
+	if not snap.apply(target, grid, offset, scale, worker_threads):
+		# The modifier left the target untouched; the compose cannot be published as-is.
+		failed = true
+		push_error("[Terrainy] modifier pass did not finish: the compose will not be applied")
 
 func evaluate_field(unit) -> Dictionary:
 	var sig: String = unit.snap.signature
@@ -194,6 +214,12 @@ func _apply_field(unit, target, group, datum, datum_mode: int = -1) -> void:
 	if unit.mask != null:
 		weights = weights.duplicate()
 		var m: PackedFloat32Array = unit.mask.weights(grid, w.rect, target, worker_threads)
+		if m.size() != weights.size():
+			# The mask pass was abandoned: blending with what is not there would apply the field at
+			# full strength (or at an inverted full strength). Leave the field out instead.
+			failed = true
+			push_error("[Terrainy] field mask did not finish: the compose will not be applied")
+			return
 		for i in weights.size():
 			weights[i] *= m[i]
 	_blend(target, h, weights, unit.blend_mode, 1.0)
@@ -274,13 +300,16 @@ func _blend(target, src, weights: PackedFloat32Array, mode: int, scale: float) -
 			gpu_blends += 1
 			return
 	var rect: Rect2i = target.rect.intersection(src.rect)
-	var count := BandTask.band_count(rect.size.y, worker_threads, BAND_MIN_ROWS)
+	var count := BandTask.band_count(rect.size.y, worker_threads, BandTask.MIN_ROWS_PER_BAND)
 	if count <= 1:
 		blend(target, src, weights, mode, scale)
 		return
-	BandTask.run(worker_threads, count, func(i: int) -> void:
+	var ok := BandTask.run(worker_threads, count, func(i: int) -> void:
 		var rng := BandTask.band_range(rect.size.y, count, i)
 		blend(target, src, weights, mode, scale, rect.position.y + rng.x, rect.position.y + rng.y))
+	if not ok:
+		failed = true
+		push_error("[Terrainy] blend bands did not all finish: the compose will not be applied")
 
 ## Blend [param src] into [param target] over their overlap. [param weights] is laid out like
 ## src. When the target carries a coverage map (group composites), coverage = max(coverage, w).
