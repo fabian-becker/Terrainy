@@ -107,6 +107,10 @@ func apply(dest, grid, target_offset: float = 0.0, target_scale: float = 1.0, th
 	var processed := PackedFloat32Array()
 	if op == Op.SMOOTH:
 		processed = dest.blurred(rect, radius, grid.cell, iterations, threads)
+		if processed.size() != weights.size():
+			# The blur was abandoned, so there is nothing to merge: a zero-filled buffer would
+			# read as "smooth toward 0 m".
+			return false
 	# Group composites track coverage so the group only blends where its children acted. A
 	# modifier is not a blend, so it must mark the area it touched itself -- otherwise a group
 	# whose only child is a flatten would contribute nothing at all.

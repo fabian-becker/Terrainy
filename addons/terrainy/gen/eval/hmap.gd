@@ -137,14 +137,14 @@ func blurred(region: Rect2i, radius: float, cell: float, iterations: int, thread
 		else:
 			ok = BandTask.run(threads, bands, func(i: int) -> void:
 				var rng := BandTask.band_range(rh, bands, i)
-				_blur_rows(buf, tmp, rw, rh, r, inv, rng.x, rng.y)) and ok
+				_blur_rows(buf, tmp, rw, rh, r, inv, rng.x, rng.y))
 		# Vertical
 		if bands <= 1:
 			_blur_cols(tmp, buf, rw, rh, r, inv, 0, rw)
 		else:
 			ok = BandTask.run(threads, bands, func(i: int) -> void:
 				var rng := BandTask.band_range(rw, bands, i)
-				_blur_cols(tmp, buf, rw, rh, r, inv, rng.x, rng.y)) and ok
+				_blur_cols(tmp, buf, rw, rh, r, inv, rng.x, rng.y))
 		if not ok:
 			# Fail closed: a half-blurred buffer would be blended as if it were the smooth pass.
 			push_error("[Terrainy] blur bands did not all finish")
