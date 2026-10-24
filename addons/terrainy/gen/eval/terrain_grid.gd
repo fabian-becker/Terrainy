@@ -37,6 +37,23 @@ func world_rect() -> Rect2:
 func world_of(px: int, py: int) -> Vector2:
 	return Vector2(origin.x + px * cell, origin.y + py * cell)
 
+## World X of sample column [param px] as a double.
+##
+## A [Vector2] component is 32-bit in a standard build, so [method world_of] must never feed a
+## per-sample world coordinate into the evaluation math: the loop needs the double.
+func world_x(px: int) -> float:
+	return origin.x + px * cell
+
+## World Z of sample row [param py] as a double.
+##
+## Row-shaped passes must recompute this per row instead of seeding one band-relative value and
+## adding [member cell] down the rows: `y0 * cell + n * cell` is not bit-equal to
+## `(y0 + n) * cell` when a cell is not exactly representable (0.1, 0.3, 1/3 ...), so an
+## accumulator makes a sample's world position -- and therefore its height -- depend on which band
+## evaluated it, i.e. on `OS.get_processor_count()` through [method TerrainGenerator.compose_worker_threads].
+func world_z(py: int) -> float:
+	return origin.y + py * cell
+
 ## Fractional sample coordinates of a world XZ position.
 func sample_of(world_xz: Vector2) -> Vector2:
 	return (world_xz - origin) / cell

@@ -167,7 +167,6 @@ func evaluate_band(grid, rect: Rect2i, y0: int, y1: int, hd: PackedFloat32Array,
 	var fo_last := fo_n - 1
 	var pr_last := pr_n - 1
 	var hd_base := y0 * w
-	var row_gz: float = grid.origin.y + band.position.y * grid.cell
 	var cell: float = grid.cell
 	var ox: float = grid.origin.x
 	var bx: float = band.position.x
@@ -182,9 +181,13 @@ func evaluate_band(grid, rect: Rect2i, y0: int, y1: int, hd: PackedFloat32Array,
 	if region_inline:
 		e32.resize(1)
 	for y in rows:
-		var gz := row_gz
+		# Per-row world Z, recomputed from the absolute row (never accumulated down the rows): the
+		# unbanded loop read `origin.y + (rect.position.y + y) * cell`, and this is that expression
+		# with `band.position.y == rect.position.y + y0`. Seeding one value per band and adding
+		# `cell` is not bit-equal to it for a non-exactly-representable cell, which would make a
+		# sample's height depend on the band split -- i.e. on the machine's core count.
+		var gz: float = grid.world_z(band.position.y + y)
 		var bpos := y * w
-		row_gz += cell
 		for x in w:
 			var bi := bpos + x
 			var gx: float = ox + (bx + x) * cell

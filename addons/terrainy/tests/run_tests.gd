@@ -23,6 +23,7 @@ const CASES: PackedStringArray = [
 	"res://addons/terrainy/tests/cases/test_mesh_seams.gd",
 	"res://addons/terrainy/tests/cases/test_lod_streaming.gd",
 	"res://addons/terrainy/tests/cases/test_field_composition.gd",
+	"res://addons/terrainy/tests/cases/test_band_parallelism.gd",
 	"res://addons/terrainy/tests/cases/test_corridor_domain.gd",
 	"res://addons/terrainy/tests/cases/test_hierarchy_composition.gd",
 	"res://addons/terrainy/tests/cases/test_masks.gd",
