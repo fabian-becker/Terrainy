@@ -354,3 +354,51 @@ func test_evaluated_counts_injected_gpu_maps() -> void:
 	t.check_eq(composer.gpu_evaluated, 1, "and as GPU-evaluated")
 	t.check_eq(composer.reused, 0, "nothing was reused")
 	t.check_almost_eq(composite.get_at(0, 0), 2.0, "the injected heights reached the composite", 0.01)
+
+func test_counters_partition_the_plan_fields() -> void:
+	# `evaluated + reused` must account for every FIELD apply: `evaluated` counts the applies the
+	# compose produced a map for (CPU, prefetched or GPU-injected), `reused` the ones the previous
+	# cache supplied.
+	var a := make_field(8.0, Vector2(18, 18), Vector3(-6, 0, 0))
+	var b := make_field(12.0, Vector2(18, 18), Vector3(6, 0, 0))
+	var c := make_field(4.0, Vector2(10, 10))
+	c.domain_falloff = null
+	var gen := build(make_generator(32, 32.0), [a, b, c])
+	var grid = gen.get_grid()
+	var plan = PlanBuilder.build(gen, gen.composition_context(grid, [], []))
+	var fields := 0
+	for unit in plan.all_units():
+		if unit.kind == CompositionPlan.UnitKind.FIELD:
+			fields += 1
+	t.check(fields >= 3, "the plan has the three fields (%d)" % fields)
+	var composer := Composer.new()
+	composer.worker_threads = 4
+	composer.compose(plan, grid, 0.0)
+	t.check_eq(composer.evaluated + composer.reused, fields, "evaluated + reused accounts for every field apply")
+	t.check_eq(composer.evaluated, fields, "a fresh compose evaluated all of them")
+	t.check_eq(composer.gpu_evaluated, 0, "none came from a GPU kernel")
+
+func test_gpu_blend_counter_counts_blends_that_ran() -> void:
+	# `STATS|gpu_blends` must be the number of blends the GPU actually performed: the counter is
+	# what separates "could" (the compositor exists, the host asked) from "did".
+	var f := make_field(10.0, Vector2(20, 20))
+	f.domain_falloff = null
+	var gen := build(make_generator(32, 32.0), [f])
+	var grid = gen.get_grid()
+	var plan = PlanBuilder.build(gen, gen.composition_context(grid, [], []))
+	var composer := Composer.new()
+	composer.worker_threads = 4
+	# A lambda captures locals by value, so the counter lives in a one-element array.
+	var calls := [0]
+	composer.gpu_blend_hook = func(_target, _src, _weights, _mode, _scale) -> bool:
+		calls[0] += 1
+		return true
+	composer.compose(plan, grid, 0.0)
+	t.check(calls[0] > 0, "the hook was offered the blend (%d)" % calls[0])
+	t.check_eq(composer.gpu_blends, calls[0], "the counter matches the blends the hook applied")
+	# And the diagnostic the probe prints separates the two questions.
+	var diag: Dictionary = gen.get_diagnostics()
+	t.check(diag["gpu"].has("composition") and diag["gpu"].has("composition_used"), "could and did are separate keys")
+	t.check_eq(diag["gpu"]["composition_used"], int(diag["stats"].get("gpu_blends", 0)) > 0, "used follows the counter")
+	t.check_eq(diag["gpu"]["field_evaluation_used"], int(diag["stats"].get("gpu_evaluated", 0)) > 0, "field used follows its counter")
+	t.check_eq(diag["gpu"]["composition_used"], false, "a threaded CPU compose reports no GPU composition")

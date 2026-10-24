@@ -809,6 +809,12 @@ func apply_composition(job: Dictionary) -> void:
 		"reused": job.get("reused", 0), "timings": timings, "gpu_fields": job["injected"].size(),
 		# Of `evaluated`, how many maps an injected GPU kernel produced, and how many blends the
 		# GPU compositor actually performed (as opposed to being available for).
+		#
+		# `gpu_fields` is the number of maps a kernel injected, i.e. a subset of `evaluated` (which
+		# counts every FIELD apply, CPU or injected) -- not a third bucket. `evaluated + reused` is
+		# the partition of FIELD applies; `gpu_evaluated` counts the applies served from an injected
+		# map and `gpu_fields` the maps injected, so a signature applied twice counts twice in the
+		# former and once in the latter.
 		"gpu_evaluated": job.get("gpu_evaluated", 0), "gpu_blends": job.get("gpu_blends", 0),
 	}
 	# Stage 7: decide which chunks changed.
