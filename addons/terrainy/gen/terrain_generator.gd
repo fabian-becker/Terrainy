@@ -629,6 +629,13 @@ func effective_worker_threads() -> int:
 ## Half the logical cores, never more than [method effective_worker_threads]: the passes are
 ## memory-heavy pixel loops, and on an SMT machine more bands than physical cores measurably hurt
 ## (8-core/16-thread reference box, 2048 cells: 15 bands 15.0 s vs 8 bands 10.2 s of compose).
+##
+## This is a COST knob only, never a determinism input: every banded pass writes its own rows of
+## the output and recomputes its per-row world coordinate from the row index, so the same scene
+## composes to bit-identical heights whatever this returns (pinned by
+## `test_band_parallelism::test_compose_is_identical_across_worker_thread_counts`). It is not
+## exported for that reason -- there is nothing to reproduce by hand, and [member max_worker_threads]
+## already caps it from above.
 func compose_worker_threads() -> int:
 	if not use_multithreading:
 		return 1
