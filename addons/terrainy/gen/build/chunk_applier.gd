@@ -30,6 +30,9 @@ const CollisionBuilder = preload("res://addons/terrainy/gen/build/collision_buil
 const MeshGen = preload("res://addons/terrainy/gen/build/mesh_generator.gd")
 const NavigationBuilder = preload("res://addons/terrainy/gen/build/navigation_builder.gd")
 const ScatterBuilder = preload("res://addons/terrainy/gen/build/scatter_builder.gd")
+const SeamBuilder = preload("res://addons/terrainy/gen/build/seam_builder.gd")
+const ChunkScheduler = preload("res://addons/terrainy/gen/build/chunk_scheduler.gd")
+const LodController = preload("res://addons/terrainy/gen/build/lod_controller.gd")
 
 signal region_updated(aabb: AABB)
 signal navigation_baked(mesh: NavigationMesh, key: Vector2i)
@@ -37,23 +40,46 @@ signal all_applied
 
 var host = null
 var pipeline = null
+## Frame-budget accountant and the chunk work queue (design §10.3).
+var scheduler = null
+## Distance LOD, hysteresis and the skirt edge mask (design §10.4).
+var lod = null
 var diagnostics = null
 var collision_refresh_pending: bool = false
 var scatter_dirty_all: bool = false
 var nav_due_msec: int = 0
 var nav_in_flight: int = 0
 var scatter_queue: Array = []
+## Rebuild id the queued mesh jobs belong to, set by [method dispatch].
+var _rebuild_id: int = -1
 
-var _lod_camera: Vector3 = Vector3.INF
+## Last camera position the LOD pass ran at. Exposed because tools and tests force a re-evaluation
+## by setting it to [constant Vector3.INF].
+var _lod_camera: Vector3:
+	get:
+		return lod._camera_pos if lod != null else Vector3.INF
+	set(value):
+		if lod != null:
+			lod._camera_pos = value
 
 func _init(p_host) -> void:
 	host = p_host
 	pipeline = ChunkPipeline.new()
+	scheduler = ChunkScheduler.new()
+	lod = LodController.new(host)
 
 # --- Frame step -----------------------------------------------------------------------------
 
-## One main-thread step: apply whatever finished, then top up scatter, LOD and navigation.
+## One main-thread step. The budget (`chunk_apply_budget_ms`) is a *deadline* for every stage in
+## it, not a per-stage allowance (design D7.1): each stage charges [member scheduler] before it
+## starts another unit, so a stage that ran long leaves the next one no time instead of starting
+## with a fresh allowance and blowing the frame.
 func process(now_msec: int) -> void:
+	if scheduler == null or host == null:
+		return
+	var start_us := Time.get_ticks_usec()
+	scheduler.budget_ms = float(host.chunk_apply_budget_ms)
+	scheduler.begin_frame(now_msec)
 	pipeline.poll()
 	if pipeline.has_mesh_results():
 		apply_mesh_results(true)
@@ -64,13 +90,23 @@ func process(now_msec: int) -> void:
 		refresh_all_collision()
 	if not scatter_queue.is_empty() or scatter_dirty_all:
 		process_scatter_queue()
-	if host.enable_lod and host.get_final_map() != null and not has_mesh_work():
-		update_lod()
+	# LOD, residency and the queue drain run last, on whatever budget the apply stages left.
+	if host.get_final_map() != null and (host.enable_lod or host.view_distance > 0.0):
+		lod_step()
+	# The queue must drain even when there is no camera (headless tools, bakes, the first frames of
+	# a scene before a viewport camera exists): a queued chunk that nobody dispatches keeps the
+	# terrain "rebuilding" forever.
+	_drain_queue(true)
 	if host.navigation_enabled and nav_due_msec > 0 and now_msec >= nav_due_msec and not host.is_rebuilding_meshes():
 		bake_navigation_step()
+	if scheduler.budget_ms > 0.0 and scheduler.spent_ms() > scheduler.budget_ms:
+		scheduler.note_overrun(true)
+	host.note_frame_work_us(Time.get_ticks_usec() - start_us)
 
+## True while the terrain has work queued or in flight.
 func is_busy() -> bool:
-	return has_mesh_work() or collision_refresh_pending or not scatter_queue.is_empty() or scatter_dirty_all
+	return has_mesh_work() or collision_refresh_pending or not scatter_queue.is_empty() \
+		or scatter_dirty_all or (scheduler != null and scheduler.has_work())
 
 func has_mesh_work() -> bool:
 	return pipeline != null and pipeline.has_pending_work()
@@ -79,32 +115,104 @@ func has_mesh_work() -> bool:
 func is_baking_navigation() -> bool:
 	return nav_in_flight > 0 or nav_due_msec > 0
 
-## Block until every queued chunk mesh / collision result is built and applied.
+## Block until every queued chunk mesh / collision result is built and applied, and until the
+## scheduler queue is empty. This is the synchronous path (bakes, tests, `rebuild_now()`), so it
+## ignores the frame budget by design (design D7.1 rule 6).
 func drain() -> void:
-	while pipeline.has_pending_work():
+	var guard := 0
+	while true:
+		guard += 1
+		if guard > 200000:
+			push_warning("[Terrainy] chunk drain did not settle, giving up after %d iterations" % guard)
+			return
+		if not has_mesh_work() and not scheduler.has_work():
+			return
 		pipeline.poll()
 		if pipeline.has_mesh_results():
 			apply_mesh_results(false)
 		if pipeline.has_collision_results():
 			apply_collision_results(false)
+		if not has_mesh_work() and scheduler.has_work():
+			_drain_queue(false)
 		if pipeline.has_pending_work():
 			OS.delay_usec(200)
 
 # --- Chunks ---------------------------------------------------------------------------------
 
 ## Queue mesh jobs for [param dirty]. Empty dirty still closes the stage so the host can finish.
+##
+## This only *queues*: dispatch itself is the scheduler's job (design D7.3), so a rebuild of 256
+## chunks spreads over as many frames as the budget needs instead of stalling one.
 func dispatch(dirty: Array, rebuild_id: int) -> void:
 	if dirty.is_empty():
 		all_applied.emit()
 		return
-	var jobs: Array = []
+	if rebuild_id >= 0:
+		_rebuild_id = rebuild_id
+	var chunks = host.get_chunk_manager()
 	for chunk in dirty:
+		if not chunk.streamed_in:
+			# Outside the view distance: building it would be exactly the work streaming exists to
+			# avoid. It keeps its dirty flag and is built when it streams back in (design D8.1).
+			chunk.build_queued = true
+			continue
+		chunks.mark_dirty(chunk)
+		# A rebuilt chunk is the newest truth the user is looking at, so it takes the top class.
+		scheduler.enqueue(chunk, ChunkScheduler.Priority.EDIT)
+	_drain_queue(true)
+
+## Build queued chunk jobs, best class first, until the frame budget is spent, then hand them to the
+## worker pool as one batch (the workers need several jobs at once to actually run in parallel).
+## [param budgeted] false is the synchronous drain path and ignores the budget.
+func _drain_queue(budgeted: bool) -> void:
+	if has_mesh_work():
+		# A batch in flight was sliced from the heightmap it describes; dispatching over it would
+		# cancel it. Let it finish, then continue the queue on the next frame.
+		return
+	var jobs: Array = []
+	while scheduler.has_work():
+		if budgeted and not scheduler.can_spend():
+			break
+		var chunk = scheduler.take_next()
+		if chunk == null:
+			break
+		if not chunk.streamed_in:
+			# Streamed out between queueing and dispatch. Dropping it loses nothing: the chunk is
+			# rebuilt from the current composition when it comes back.
+			continue
+		var unit_start := Time.get_ticks_usec()
 		jobs.append(chunk_job(chunk))
+		# The unit is the main-thread job assembly (slice + downsample), which is the expensive part
+		# the budget exists to bound (hazard H3); the worker side is not main-thread time.
+		scheduler.spend(float(Time.get_ticks_usec() - unit_start) / 1000.0)
+	if jobs.is_empty():
+		return
 	pipeline.use_threads = host.use_multithreading
 	pipeline.worker_threads = host.max_worker_threads
-	pipeline.dispatch_mesh_jobs(jobs, rebuild_id)
+	pipeline.dispatch_mesh_jobs(jobs, _rebuild_id if _rebuild_id >= 0 else host.get_rebuild_id())
 	if not pipeline.use_threads or jobs.size() <= 1:
+		# Inline build: the results are already here, so applying them cannot be deferred.
 		apply_mesh_results(false)
+
+## Re-evaluate LOD targets and residency and queue what changed. The queue is drained at the end of
+## the step with whatever budget is left, so a camera moving across ten chunks spreads its LOD churn
+## over ten frames instead of one (design D5.5).
+func lod_step() -> void:
+	var chunks = host.get_chunk_manager()
+	var camera: Camera3D = host.find_camera()
+	if chunks == null or camera == null:
+		return
+	var changed: Array = lod.update(camera, chunks.chunks, scheduler)
+	for chunk in changed:
+		# A revision bump makes an in-flight build for the old level stale: it is dropped at commit
+		# instead of fighting the newer one (design D5.5).
+		chunk.edit_revision += 1
+		chunks.mark_dirty(chunk)
+	var cam_xz := Vector2(camera.global_position.x, camera.global_position.z)
+	var restored: Array = chunks.evict_beyond(cam_xz, host.view_distance, host.lod_hysteresis)
+	for chunk in restored:
+		chunk.edit_revision += 1
+		scheduler.enqueue(chunk, ChunkScheduler.Priority.NEAR)
 
 func chunk_job(chunk) -> Dictionary:
 	var r: Rect2i = chunk.sample_rect
@@ -145,12 +253,13 @@ func chunk_job(chunk) -> Dictionary:
 		"collision": true, "collision_budget": collision_budget(),
 	}
 
-func mesh_step(chunk) -> int:
+func mesh_step(chunk, lod_level: int = -1) -> int:
 	var cells: int = chunk.sample_rect.size.x - 1
 	var base := 1
 	if host.chunk_resolution > 0 and host.chunk_resolution < cells:
 		base = maxi(cells / host.chunk_resolution, 1)
-	var step: int = base << chunk.lod_level
+	var level: int = chunk.lod_level if lod_level < 0 else lod_level
+	var step: int = base << level
 	var w: int = chunk.sample_rect.size.x
 	var h: int = chunk.sample_rect.size.y
 	var fitted := mini(step, mini(w - 1, h - 1))
@@ -164,12 +273,14 @@ func collision_budget() -> int:
 	return CollisionBuilder.budget_for_quality(host.collision_quality)
 
 func apply_mesh_results(budgeted: bool) -> void:
-	var start := Time.get_ticks_msec()
 	var applied := 0
 	while pipeline.has_mesh_results():
+		var t0 := Time.get_ticks_usec()
 		apply_chunk_result(pipeline.pop_mesh_result())
 		applied += 1
-		if budgeted and host.chunk_apply_budget_ms > 0 and Time.get_ticks_msec() - start >= host.chunk_apply_budget_ms:
+		# The commit unit is charged like every other unit in the frame (design D7.1 rule 2).
+		scheduler.spend(float(Time.get_ticks_usec() - t0) / 1000.0)
+		if budgeted and not scheduler.can_spend():
 			diagnostics.count("apply_frames")
 			break
 	diagnostics.count("chunks_applied", applied)
@@ -181,7 +292,14 @@ func apply_chunk_result(result: Dictionary) -> void:
 	var chunk = chunks.chunks.get(result["key"])
 	if chunk == null or result.get("revision", -1) != chunk.edit_revision:
 		return
-	chunk.mesh_instance.mesh = MeshGen.mesh_from_arrays(result["arrays"])
+	if not chunk.streamed_in:
+		# Streamed out while the job was in flight: drop the result instead of re-attaching a mesh
+		# to a chunk nobody draws. The chunk is rebuilt when it comes back.
+		return
+	var lod_level: int = int(result.get("lod_level", chunk.lod_level))
+	var mesh: ArrayMesh = MeshGen.mesh_from_arrays(result["arrays"])
+	apply_skirts(mesh, chunk, result["arrays"], lod_level)
+	chunk.mesh_instance.mesh = mesh
 	chunk.mesh_instance.cast_shadow = host.cast_shadows
 	chunk.heightmap = result["heightmap"]
 	chunk.hole_mask = result.get("hole_mask")
@@ -201,6 +319,40 @@ func apply_chunk_result(result: Dictionary) -> void:
 	var aabb := AABB(Vector3(b.position.x, gy + host.final_min(), b.position.y),
 		Vector3(b.size.x, maxf(host.final_max() - host.final_min(), 0.001), b.size.y))
 	region_updated.emit(aabb)
+
+## Seal the chunk's LOD boundaries (design D5.4): a wall down from every edge whose neighbour
+## samples the shared edge at a different resolution. Added as **surface 1**, so surface 0 stays
+## exactly the arrays the mesh worker produced - collision, the bake exporter and the existing
+## vertex-count/seam tests keep reading the same vertex set they always read.
+## Returns the number of skirt vertices added.
+func apply_skirts(mesh: ArrayMesh, chunk, arrays: Array, lod_level: int) -> int:
+	if not host.seam_skirts or arrays == null or arrays.size() < Mesh.ARRAY_MAX:
+		return 0
+	var chunks = host.get_chunk_manager()
+	var edges: int = lod.edges_for(chunk.key, chunks.chunks)
+	if edges == 0:
+		return 0
+	var step := mesh_step(chunk, lod_level)
+	var dims := mesh_dims(chunk, step)
+	return SeamBuilder.append_skirt_surface(mesh, arrays, dims, lod.skirt_depth(step), edges)
+
+## Vertex grid (samples per side) of the mesh a chunk builds at [param step].
+func mesh_dims(chunk, step: int) -> Vector2i:
+	var s := maxi(step, 1)
+	return Vector2i(
+		(chunk.sample_rect.size.x - 1) / s + 1,
+		(chunk.sample_rect.size.y - 1) / s + 1)
+
+## Release the scheduler's references on teardown: it is a RefCounted that holds the host node (and
+## is held by it), so the cycle has to be broken explicitly or every generator leaks at exit.
+func shutdown() -> void:
+	if scheduler != null:
+		scheduler.clear()
+		scheduler.chunk_lookup = Callable()
+		scheduler = null
+	if lod != null:
+		lod.host = null
+		lod = null
 
 # --- Collision ------------------------------------------------------------------------------
 
@@ -235,7 +387,8 @@ func refresh_all_collision() -> void:
 		return
 	var jobs: Array = []
 	for chunk in chunks.chunks.values():
-		if chunk.heightmap == null:
+		# Streamed-out chunks have no heightmap and no shape left: nothing to refresh.
+		if chunk.heightmap == null or not chunk.streamed_in:
 			continue
 		if not chunk.has_holes:
 			apply_collision(chunk, PackedVector3Array())
@@ -248,13 +401,17 @@ func refresh_all_collision() -> void:
 
 func apply_collision_results(budgeted: bool) -> void:
 	var chunks = host.get_chunk_manager()
-	var start := Time.get_ticks_msec()
+	var applied := 0
 	while pipeline.has_collision_results():
+		var t0 := Time.get_ticks_usec()
 		var result: Dictionary = pipeline.pop_collision_result()
 		var chunk = chunks.chunks.get(result["key"])
-		if chunk and result.get("revision", 0) == chunk.collision_revision:
+		# A streamed-out chunk has no shape to fill: its commit slot is spent, its shape is not.
+		if chunk and chunk.streamed_in and result.get("revision", 0) == chunk.collision_revision:
 			apply_collision(chunk, result.get("collision_faces", PackedVector3Array()))
-		if budgeted and host.chunk_apply_budget_ms > 0 and Time.get_ticks_msec() - start >= host.chunk_apply_budget_ms:
+		applied += 1
+		scheduler.spend(float(Time.get_ticks_usec() - t0) / 1000.0)
+		if budgeted and not scheduler.can_spend():
 			break
 
 func apply_collision_layers() -> void:
@@ -360,26 +517,7 @@ func navigation_meshes() -> Dictionary:
 ## That is scale independent - the fixed meter distances of 0.x made every chunk of a 4 km terrain
 ## jump straight to the coarsest level and turned the terrain into countable triangles.
 func lod_distances_for(camera: Camera3D) -> PackedFloat32Array:
-	if not host.lod_auto or camera == null:
-		return host.lod_distances
-	var grid = host.get_grid()
-	if grid == null:
-		return host.lod_distances
-	var view_height := 0.0
-	var viewport := camera.get_viewport()
-	if viewport != null:
-		view_height = viewport.get_visible_rect().size.y
-	if view_height < 1.0:
-		# Headless / not-yet-sized viewport: the project's window height is the sane stand-in.
-		view_height = maxf(float(ProjectSettings.get_setting("display/window/size/viewport_height", 1080)), 1.0)
-	var tan_half_fov := tan(deg_to_rad(clampf(camera.fov, 1.0, 179.0)) * 0.5)
-	# A cell covers `cell * view_height / (2 * distance * tan(fov/2))` pixels: solve for distance.
-	var cell: float = grid.cell
-	var level_zero: float = cell * view_height / (2.0 * tan_half_fov * maxf(host.lod_pixel_error, 0.1))
-	var out := PackedFloat32Array()
-	for i in maxi(host.lod_levels, 1):
-		out.append(level_zero * float(1 << i))
-	return out
+	return lod.distances_for(camera, host.get_grid())
 
 ## Distance from [param point] (XZ) to the nearest point of the chunk rectangle.
 static func _distance_to_bounds(bounds: Rect2, point: Vector2) -> float:
@@ -388,29 +526,12 @@ static func _distance_to_bounds(bounds: Rect2, point: Vector2) -> float:
 		clampf(point.y, bounds.position.y, bounds.end.y))
 	return point.distance_to(nearest)
 
+## Re-evaluate LOD targets and residency now and build everything the queue holds, ignoring the
+## frame budget. The per-frame path is [method lod_step]; this entry point exists for tools and
+## tests that need the switch to happen synchronously.
 func update_lod() -> void:
-	var camera: Camera3D = host.find_camera()
-	if camera == null:
-		return
-	var pos := camera.global_position
-	if _lod_camera != Vector3.INF and pos.distance_to(_lod_camera) < 16.0:
-		return
-	_lod_camera = pos
-	var distances := lod_distances_for(camera)
-	var chunks = host.get_chunk_manager()
-	var changed: Array = []
-	for chunk in chunks.chunks.values():
-		var d := _distance_to_bounds(chunk.world_bounds, Vector2(pos.x, pos.z))
-		var lod := 0
-		for i in distances.size():
-			if d >= distances[i]:
-				lod = i + 1
-		if lod != chunk.lod_level:
-			chunk.lod_level = lod
-			chunks.mark_dirty(chunk)
-			changed.append(chunk)
-	if not changed.is_empty():
-		dispatch(changed, host.get_rebuild_id())
+	lod_step()
+	drain()
 
 # --- Scatter --------------------------------------------------------------------------------
 
@@ -442,8 +563,8 @@ func process_scatter_queue(unbudgeted: bool = false) -> void:
 		scatter_queue.clear()
 		for key in chunks.chunks.keys():
 			scatter_queue.append(key)
-	var start := Time.get_ticks_msec()
 	while not scatter_queue.is_empty():
+		var unit_start := Time.get_ticks_usec()
 		var item = scatter_queue.pop_front()
 		if item is int:
 			# A scatter node changed: every chunk refreshes that node only.
@@ -453,7 +574,9 @@ func process_scatter_queue(unbudgeted: bool = false) -> void:
 					host.get_grid(), final_map, host.get_hole_map(), item)
 		else:
 			var chunk = chunks.chunks.get(item)
-			if chunk:
+			# A streamed-out chunk has no instances to refresh.
+			if chunk and chunk.streamed_in:
 				ScatterBuilder.refresh_chunk(host, chunk, scatters, host.get_grid(), final_map, host.get_hole_map())
-		if not unbudgeted and host.chunk_apply_budget_ms > 0 and Time.get_ticks_msec() - start >= host.chunk_apply_budget_ms:
+		scheduler.spend(float(Time.get_ticks_usec() - unit_start) / 1000.0)
+		if not unbudgeted and not scheduler.can_spend():
 			break

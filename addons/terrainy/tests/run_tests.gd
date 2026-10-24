@@ -21,6 +21,7 @@ const CASES: PackedStringArray = [
 	"res://addons/terrainy/tests/cases/test_eval_core.gd",
 	"res://addons/terrainy/tests/cases/test_scale_invariance.gd",
 	"res://addons/terrainy/tests/cases/test_mesh_seams.gd",
+	"res://addons/terrainy/tests/cases/test_lod_streaming.gd",
 	"res://addons/terrainy/tests/cases/test_field_composition.gd",
 	"res://addons/terrainy/tests/cases/test_corridor_domain.gd",
 	"res://addons/terrainy/tests/cases/test_hierarchy_composition.gd",

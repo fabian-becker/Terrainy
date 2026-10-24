@@ -41,6 +41,22 @@ class Chunk:
 	var nav_revision: int = 0
 	var nav_baking: bool = false
 	var _collision_map_data: PackedFloat32Array
+	## Streaming residency (design D8.1). The node skeleton and all bookkeeping always stay; only the
+	## resources a state does not need are released, so a chunk that comes back is a rebuild from the
+	## current composition, never a recompose.
+	enum Residency { READY, QUEUED, EVICTED }
+	var residency: int = Residency.READY
+	## False while the chunk is streamed out: its mesh, collision shape, navigation mesh and
+	## scatter instances have been released because it sits outside the generator's view distance.
+	var streamed_in: bool:
+		get:
+			return residency != Residency.EVICTED
+	## True while a rebuild for this chunk is queued in the streaming scheduler.
+	var build_queued: bool = false
+	## Bitmask of edges that need a skirt ([method LodController.edges_for]). Kept on the chunk so the
+	## controller can tell when a neighbour's level change made this chunk's mesh stale even though
+	## its own level did not move.
+	var skirt_edges: int = 0
 
 var chunks: Dictionary = {}  # Vector2i -> Chunk
 var grid_count: int = 0
@@ -156,6 +172,122 @@ func has_dirty() -> bool:
 func mark_clean(chunk: Chunk, revision: int) -> void:
 	if revision == chunk.edit_revision:
 		chunk.is_dirty = false
+
+## Release everything the chunk owns in the renderer and the physics server: mesh, collision
+## shape, navigation mesh and scatter instances. The node skeleton and the heightmap hash stay, so
+## [method stream_in] can rebuild the chunk from the current composition without recomposing.
+func stream_out(chunk: Chunk) -> void:
+	if not chunk.streamed_in:
+		return
+	chunk.residency = Chunk.Residency.EVICTED
+	chunk.is_dirty = false
+	chunk.build_queued = false
+	if chunk.mesh_instance:
+		chunk.mesh_instance.mesh = null
+		chunk.mesh_instance.visible = false
+	if chunk.collision_shape:
+		# Dropping the shape returns its RID (HeightMapShape3D data included) to the physics server.
+		chunk.collision_shape.shape = null
+	chunk.height_shape = null
+	chunk.collision_trimesh = null
+	chunk.heightmap = null
+	chunk.hole_mask = null
+	chunk.has_holes = false
+	chunk.nav_dirty = true
+	chunk.nav_baking = false
+	if chunk.nav_region and is_instance_valid(chunk.nav_region):
+		chunk.nav_region.enabled = false
+		chunk.nav_region.navigation_mesh = null
+	for node in chunk.scatter.values():
+		if node and is_instance_valid(node):
+			node.queue_free()
+	chunk.scatter.clear()
+	chunk.scatter_transforms.clear()
+
+## Bring a streamed-out chunk back: visible again, dirty so the next build refills it.
+func stream_in(chunk: Chunk) -> void:
+	if chunk.streamed_in:
+		return
+	chunk.residency = Chunk.Residency.READY
+	if chunk.mesh_instance:
+		chunk.mesh_instance.visible = true
+	if chunk.nav_region and is_instance_valid(chunk.nav_region):
+		chunk.nav_region.enabled = true
+	chunk.is_dirty = true
+
+## Chunks that are currently not drawn (streamed out).
+func streamed_out_chunks() -> Array:
+	var out: Array = []
+	for chunk in chunks.values():
+		if not chunk.streamed_in:
+			out.append(chunk)
+	return out
+
+## Chunks whose mesh and collision shape are live.
+func resident_chunks() -> Array:
+	var out: Array = []
+	for chunk in chunks.values():
+		if chunk.streamed_in:
+			out.append(chunk)
+	return out
+
+## The up-to-four chunks sharing an edge with [param key]. Missing neighbours are simply absent:
+## the terrain border has no neighbour to seam against.
+func neighbours_of(key: Vector2i) -> Array:
+	var out: Array = []
+	for offset in [Vector2i(0, -1), Vector2i(1, 0), Vector2i(0, 1), Vector2i(-1, 0)]:
+		var chunk = chunks.get(key + offset)
+		if chunk != null:
+			out.append(chunk)
+	return out
+
+## Move [param chunk] into [param state], releasing or restoring resources as that state requires.
+## Never frees or creates nodes: physics-server and renderer churn per camera move is exactly what
+## this avoids (design D8.1).
+func set_residency(chunk: Chunk, state: int) -> void:
+	if chunk == null or chunk.residency == state:
+		return
+	match state:
+		Chunk.Residency.EVICTED:
+			stream_out(chunk)
+		Chunk.Residency.QUEUED:
+			chunk.residency = Chunk.Residency.QUEUED
+			chunk.build_queued = true
+		_:
+			stream_in(chunk)
+			chunk.residency = Chunk.Residency.READY
+			chunk.build_queued = false
+
+## Evict every chunk farther than [param view_distance] from [param camera_xz] and restore the ones
+## that came back inside it. Returns the restored chunks - the caller queues them, because a
+## restored chunk still has to be rebuilt from its heightmap.
+##
+## [param hysteresis] is the fraction of the view distance a chunk has to come back inside before it
+## is restored, which is what stops a chunk sitting exactly on the boundary from being released and
+## rebuilt every frame (design D8.1). `view_distance <= 0` keeps every chunk resident, which is the
+## default and the pre-streaming behaviour.
+func evict_beyond(camera_xz: Vector2, view_distance: float, hysteresis: float = 0.15) -> Array:
+	var restored: Array = []
+	if view_distance <= 0.0:
+		return restored
+	var margin := clampf(hysteresis, 0.0, 0.45)
+	var reenter := view_distance * (1.0 - margin)
+	for chunk in chunks.values():
+		var d := _distance_to_bounds(chunk.world_bounds, camera_xz)
+		if chunk.streamed_in:
+			if d > view_distance:
+				stream_out(chunk)
+			continue
+		if d <= reenter:
+			stream_in(chunk)
+			restored.append(chunk)
+	return restored
+
+static func _distance_to_bounds(bounds: Rect2, point: Vector2) -> float:
+	var nearest := Vector2(
+		clampf(point.x, bounds.position.x, bounds.end.x),
+		clampf(point.y, bounds.position.y, bounds.end.y))
+	return point.distance_to(nearest)
 
 func chunk_at_world(world_xz: Vector2) -> Chunk:
 	for chunk in chunks.values():
