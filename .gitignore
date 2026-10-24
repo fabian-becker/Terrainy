@@ -4,3 +4,6 @@
 .vscode/settings.json
 .terrainy_bakes/
 graphify-out/
+# Measurement corpus lives outside the repo (junctioned in, see D:/Repos/Terrainy-benchmarks)
+benchmarks/
+.benchlogs/
