@@ -65,10 +65,15 @@ func apply(dest, grid, target_offset: float = 0.0, target_scale: float = 1.0, th
 		return
 	var target_level := target_height * target_scale + target_offset
 	var rect: Rect2i = dest.rect
+	# Bound the pass: a modifier with a footprint, or (when it has none) a mask that is zero outside
+	# its own bounds. Without this every unbounded modifier walks the whole grid even when its mask
+	# only covers a corridor -- 245k instead of 16.7M samples at 4096 cells.
 	if has_bounds:
 		rect = rect.intersection(grid.rect_for_world(bounds, 1))
-		if rect.size.x <= 0 or rect.size.y <= 0:
-			return
+	elif mask != null and mask.bounds.size.x > 0.0 and mask.bounds.size.y > 0.0:
+		rect = rect.intersection(grid.rect_for_world(mask.bounds, 1))
+	if rect.size.x <= 0 or rect.size.y <= 0:
+		return
 	var weights := PackedFloat32Array()
 	weights.resize(rect.size.x * rect.size.y)
 	weights.fill(clampf(strength, 0.0, 1.0))
@@ -164,6 +169,14 @@ func _merge_rows(source: PackedFloat32Array, buf: PackedFloat32Array,
 	var umax := use_max
 	var lo := clamp_min
 	var hi := clamp_max
+	# The two ops that touch every pixel of a big terrain get their own loop with the per-sample
+	# helper inlined: a match plus a GDScript call per sample is what made this pass 3-4 us/sample.
+	var hot := op_i == Op.REMAP or op_i == Op.CLAMP
+	var span := in_max - in_min
+	var in_span_ok := absf(span) > 1e-6
+	var out_span := out_max - out_min
+	var lut_n := remap_lut.size()
+	var lut_last := lut_n - 1
 	for y in rows:
 		var gy := rect.position.y + y0 + y
 		var row: int = (gy - dest_pos.y) * mw + x_off
@@ -183,21 +196,32 @@ func _merge_rows(source: PackedFloat32Array, buf: PackedFloat32Array,
 					cov_data[ci] = cwt
 			var h: float = source[row + x]
 			var t: float
-			match op_i:
-				Op.SMOOTH:
-					t = processed[k]
-				Op.TERRACE:
-					t = _terrace(h)
-				Op.CLAMP:
+			if hot:
+				if op_i == Op.CLAMP:
 					t = h
 					if umin:
 						t = maxf(t, lo)
 					if umax:
 						t = minf(t, hi)
-				Op.REMAP:
-					t = _remap(h)
-				_:
-					t = target_level
+				else:
+					# _remap() inlined (identical arithmetic, one fewer call per sample).
+					var n := (h - in_min) / span if in_span_ok else 0.0
+					if clamp_input:
+						n = clampf(n, 0.0, 1.0)
+					if lut_n > 0:
+						if clamp_input:
+							var cx := clampf(n, 0.0, 1.0) * float(lut_last)
+							var ci2 := int(cx)
+							n = remap_lut[lut_last] if ci2 >= lut_last else lerpf(remap_lut[ci2], remap_lut[ci2 + 1], cx - ci2)
+					t = out_min + n * out_span
+			else:
+				match op_i:
+					Op.SMOOTH:
+						t = processed[k]
+					Op.TERRACE:
+						t = _terrace(h)
+					_:
+						t = target_level
 			buf[wrow + x] = h + (t - h) * wt
 	return buf
 
