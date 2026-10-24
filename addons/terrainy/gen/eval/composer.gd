@@ -37,7 +37,12 @@ var cache: Dictionary = {}
 var unit_weights: Dictionary = {}
 ## Pre-evaluated maps by signature (GPU field kernels fill this before the worker runs).
 var injected: Dictionary = {}
+## FIELD units this compose produced a map for: CPU evaluation, a prefetched evaluation, or a map a
+## GPU kernel injected. Every applied field counts exactly once here or in [member reused]; the
+## injected ones used to be invisible, so a GPU build reported one field fewer than the plan has.
 var evaluated: int = 0
+## Of [member evaluated], how many maps came from an injected GPU kernel.
+var gpu_evaluated: int = 0
 ## Signatures filled by [method _prefetch_fields] that no apply has counted yet.
 var fresh: Dictionary = {}
 var reused: int = 0
@@ -149,7 +154,12 @@ func evaluate_field(unit) -> Dictionary:
 			reused += 1
 		return cache[sig]
 	var ev = injected.get(sig)
-	if ev == null:
+	if ev != null:
+		# A GPU kernel filled this map. It is still this field's evaluation, so it counts as
+		# evaluated; gpu_evaluated is what separates it from the CPU ones.
+		evaluated += 1
+		gpu_evaluated += 1
+	else:
 		ev = previous_cache.get(sig)
 		if ev != null:
 			reused += 1

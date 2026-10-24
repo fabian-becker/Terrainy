@@ -86,6 +86,31 @@ func test_rebuild_state_and_settle() -> void:
 	var diag := TerrainyAPI.get_diagnostics(gen)
 	t.check(diag.has("rebuild_id") and diag.has("phases") and diag.has("gpu"), "diagnostics shape")
 
+func test_diagnostics_count_every_field_and_separate_gpu_use() -> void:
+	var gen := build(make_generator(), [
+		make_field(4.0, Vector2(20, 20)),
+		make_field(3.0, Vector2(12, 12), Vector3(16, 0, 16)),
+	])
+	var diag := TerrainyAPI.get_diagnostics(gen)
+	var gpu: Dictionary = diag["gpu"]
+	for key in ["composition_used", "field_evaluation_used", "paint_used"]:
+		t.check(gpu.has(key), "gpu diagnostics separate use from availability (%s)" % key)
+	# Every FIELD unit of the plan is accounted for: the CPU evaluated it, an injected kernel map
+	# filled it, or the previous compose's cache supplied it. A GPU map used to vanish from both
+	# counters, which made a 6-field plan read as "evaluated: 5".
+	var plan_script = preload("res://addons/terrainy/gen/eval/composition_plan.gd")
+	var fields := 0
+	for unit in gen._plan.all_units():
+		if unit.kind == plan_script.UnitKind.FIELD:
+			fields += 1
+	t.check(fields >= 2, "plan has the fields that were added (%d)" % fields)
+	var stats: Dictionary = diag["stats"]
+	t.check_eq(int(stats["evaluated"]) + int(stats["reused"]), fields,
+		"evaluated + reused counts every field unit")
+	t.check_eq(int(stats["gpu_evaluated"]), 0, "a headless build injects no GPU field maps")
+	t.check(not gpu["composition_used"], "no blend ran on the GPU")
+	t.check(not gpu["field_evaluation_used"], "no field was evaluated on the GPU")
+
 func test_region_changed_hub_signal() -> void:
 	var gen := build(make_generator())
 	var hits: Array = []

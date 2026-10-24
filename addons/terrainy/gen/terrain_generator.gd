@@ -800,6 +800,9 @@ func apply_composition(job: Dictionary) -> void:
 		"units": _plan.unit_count, "post_units": _plan.post.size(), "holes": _plan.holes.size(),
 		"paint_layers": _plan.paint_layers.size(), "evaluated": job.get("evaluated", 0),
 		"reused": job.get("reused", 0), "timings": timings, "gpu_fields": job["injected"].size(),
+		# Of `evaluated`, how many maps an injected GPU kernel produced, and how many blends the
+		# GPU compositor actually performed (as opposed to being available for).
+		"gpu_evaluated": job.get("gpu_evaluated", 0), "gpu_blends": job.get("gpu_blends", 0),
 	}
 	# Stage 7: decide which chunks changed.
 	var layout_changed: bool = _chunks.update_grid(grid, chunk_size) or _rebuild.layout_dirty
@@ -1219,10 +1222,17 @@ func get_diagnostics() -> Dictionary:
 		"resident_chunks": chunks - streamed_out,
 		"streamed_out_chunks": streamed_out,
 		"dirty_chunks": _chunks.dirty_chunks().size() if _chunks else 0,
+		# `composition` / `field_evaluation` / `paint` are "could": the host asked for the kernel and
+		# this build has one. The `_used` flags are "did", from the last compose's own counters --
+		# the blend kernel in particular is only armed when a compose runs unthreaded
+		# (use_multithreading defaults to true), so `composition: true` says nothing about use.
 		"gpu": {"rendering_device": RenderingServer.get_rendering_device() != null,
 			"composition": use_gpu_composition and GpuCompositor.is_available(),
 			"field_evaluation": use_gpu_feature_evaluation and GpuFieldEvaluator.is_available(),
-			"paint": use_gpu_paint and GpuPaint.is_available()},
+			"paint": use_gpu_paint and GpuPaint.is_available(),
+			"composition_used": int(_stats.get("gpu_blends", 0)) > 0,
+			"field_evaluation_used": int(_stats.get("gpu_evaluated", 0)) > 0,
+			"paint_used": _paint != null and _paint.gpu_stamps > 0},
 		"stats": _stats,
 		"phases": _diagnostics._phases.duplicate() if _diagnostics else {},
 		"counters": _diagnostics._counters.duplicate() if _diagnostics else {},

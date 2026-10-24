@@ -30,6 +30,9 @@ signal resample_requested(old_size: float, new_size: float, old_grid: int, new_g
 
 var _host = null
 var _gpu_paint = null
+## Brush batches the GPU paint kernel applied. Diagnostics only: [method TerrainGenerator.
+## get_diagnostics] reports "paint_used" from this, because `GpuPaint.is_available()` is not use.
+var gpu_stamps: int = 0
 var _save_due_msec: int = 0
 # Sizing change waiting for the editor's "resample?" answer.
 var _sizing_pending: Dictionary = {}
@@ -85,6 +88,8 @@ func apply_stamps(layer: TerrainPaintLayer, stamps: Array) -> Rect2i:
 		if _gpu_paint == null:
 			_gpu_paint = GpuPaint.new()
 		rect = _gpu_paint.apply_to_layer(layer, stamps, world, _host.local_height_at)
+		if rect.size.x > 0 and rect.size.y > 0:
+			gpu_stamps += 1
 	if rect.size == Vector2i.ZERO:
 		rect = PaintStamper.apply_to_layer(layer, stamps, world, _host.local_height_at)
 	if rect.size.x <= 0:

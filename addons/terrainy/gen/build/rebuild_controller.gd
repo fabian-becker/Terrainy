@@ -231,6 +231,8 @@ static func run_compose_job(job: Dictionary) -> void:
 		cache = composer.cache
 		job["evaluated"] = composer.evaluated
 		job["reused"] = composer.reused
+		job["gpu_evaluated"] = composer.gpu_evaluated
+		job["gpu_blends"] = composer.gpu_blends
 	var t1 := Time.get_ticks_msec()
 	var world: Rect2 = job["world"]
 	var final_map
