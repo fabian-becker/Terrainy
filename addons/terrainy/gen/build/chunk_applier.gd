@@ -110,6 +110,11 @@ func process(now_msec: int) -> void:
 	var start_us := Time.get_ticks_usec()
 	scheduler.budget_ms = float(host.chunk_apply_budget_ms)
 	scheduler.begin_frame(now_msec)
+	# Work another stage of this frame already did (the compose commit) is spent before the first
+	# unit here, so the apply window is what is *left* of the frame rather than a fresh budget.
+	if _frame_charge_ms > 0.0:
+		scheduler.spend(_frame_charge_ms)
+		_frame_charge_ms = 0.0
 	var t0 := start_us
 	pipeline.poll()
 	if trace_steps:
@@ -159,6 +164,15 @@ func process(now_msec: int) -> void:
 	if scheduler.budget_ms > 0.0 and scheduler.spent_ms() > scheduler.budget_ms:
 		scheduler.note_overrun(true)
 	host.note_frame_work_us(Time.get_ticks_usec() - start_us)
+
+## Work another stage of this same frame already did (the compose commit, for example), in ms.
+## Charged inside [method process] right after the frame's accountant is opened, so the job assembly
+## that follows cannot spend a budget the earlier stage already used.
+var _frame_charge_ms: float = 0.0
+
+## Report work done by another stage of the current frame; consumed by the next [method process].
+func charge_frame(ms: float) -> void:
+	_frame_charge_ms += maxf(ms, 0.0)
 
 ## True while the terrain has work queued or in flight.
 func is_busy() -> bool:
@@ -262,7 +276,9 @@ func dispatch(dirty: Array, rebuild_id: int) -> void:
 		chunks.mark_dirty(chunk)
 		# A rebuilt chunk is the newest truth the user is looking at, so it takes the top class.
 		scheduler.enqueue(chunk, ChunkScheduler.Priority.EDIT)
-	_drain_queue(true)
+	# No drain here: this runs inside the compose commit, which is itself a budgeted stage of the
+	# frame. [method process] opens the accountant, charges the commit's cost and then assembles
+	# jobs with whatever is left - draining here would hand the commit frame a fresh 8 ms window.
 
 ## Build queued chunk jobs, best class first, until the frame budget is spent, then hand them to the
 ## worker pool as one batch (the workers need several jobs at once to actually run in parallel).
@@ -304,8 +320,16 @@ func _drain_queue(budgeted: bool) -> void:
 	pipeline.worker_threads = _worker_threads()
 	if diagnostics:
 		diagnostics.record("chunk_jobs", (Time.get_ticks_usec() - start) / 1000)
-	pipeline.dispatch_mesh_jobs(jobs, job_rebuild_id)
-	if not pipeline.use_threads or jobs.size() <= 1:
+	var dispatch_start := Time.get_ticks_usec()
+	pipeline.dispatch_mesh_jobs(jobs, job_rebuild_id, budgeted)
+	# Handing a batch to the pool is main-thread work too (one group task per job), so it is charged
+	# like every other unit: a single 256-job batch used to be the biggest frame of the whole build.
+	var dispatch_ms := float(Time.get_ticks_usec() - dispatch_start) / 1000.0
+	scheduler.spend(dispatch_ms)
+	if trace_steps:
+		_step_ms["n_jobs"] = jobs.size()
+		_step_ms["dispatch"] = dispatch_ms
+	if not pipeline.use_threads or (jobs.size() <= 1 and not budgeted):
 		# Inline build: the results are already here, so applying them cannot be deferred.
 		apply_mesh_results(false)
 

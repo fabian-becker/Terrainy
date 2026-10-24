@@ -67,13 +67,13 @@ var _abandoned_groups: Array[int] = []
 ## see [method run_mesh_job]. A pre-sliced job (`heightmap` instead of `final_image`/`rect`) is
 ## still accepted for callers that already copied the region.
 ## Jobs left over from a previous dispatch are dropped, they describe a superseded heightmap.
-func dispatch_mesh_jobs(jobs: Array, rebuild_id: int) -> void:
+func dispatch_mesh_jobs(jobs: Array, rebuild_id: int, force_pool: bool = false) -> void:
 	cancel_mesh_jobs()
 	if jobs.is_empty():
 		return
 	_mesh_rebuild_id = rebuild_id
 	_mesh_dispatch_ms = Time.get_ticks_msec()
-	_dispatch(jobs, run_mesh_job, "Terrainy chunk meshes", "_mesh")
+	_dispatch(jobs, run_mesh_job, "Terrainy chunk meshes", "_mesh", force_pool)
 
 
 ## Hands collision-only jobs to the worker pool. Each job is a dictionary with the keys the
@@ -108,7 +108,8 @@ func effective_worker_threads() -> int:
 	return maxi(OS.get_processor_count() - 1, 1)
 
 
-func _dispatch(jobs: Array, body: Callable, description: String, prefix: String) -> void:
+func _dispatch(jobs: Array, body: Callable, description: String, prefix: String,
+		force_pool: bool = false) -> void:
 	var holder := {
 		"jobs": jobs,
 		"results": [],
@@ -117,7 +118,9 @@ func _dispatch(jobs: Array, body: Callable, description: String, prefix: String)
 	holder["results"].resize(jobs.size())
 
 	# One job is not worth the pool round trip, and neither is anything when threading is off.
-	if not use_threads or jobs.size() == 1:
+	# `force_pool` exists for the budgeted frame path: a single chunk mesh is ~15 ms of main-thread
+	# work at 2048 cells, so the caller that is spending a frame budget must not take this shortcut.
+	if not use_threads or (jobs.size() == 1 and not force_pool):
 		for i in jobs.size():
 			body.call(i, holder)
 		_publish(prefix, holder)

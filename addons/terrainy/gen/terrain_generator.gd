@@ -543,12 +543,18 @@ func _process(_delta: float) -> void:
 	if not _ready_done:
 		return
 	var now := Time.get_ticks_msec()
+	var frame_start := Time.get_ticks_usec()
 	# A rebuild tail that did not fit in the frame that finished the chunks (material refresh +
 	# report) runs here, as the first unit of a fresh frame (DESIGN.md §7.4), instead of stacking on
 	# top of an exhausted apply window.
 	if _applier.tail_due():
 		_applier.drain_tail()
 	_rebuild.process(now)
+	# The rebuild stage is part of this frame's budget like any other stage (DESIGN.md §7.4): the
+	# compose commit at 2048 cells (256 chunks) costs ~9 ms on its own, and letting the applier open
+	# a fresh 8 ms window behind it produced a 17.2 ms frame. Charging the elapsed time makes the
+	# job assembly wait for the next frame instead of overshooting.
+	_applier.charge_frame(float(Time.get_ticks_usec() - frame_start) / 1000.0)
 	_applier.process(now)
 	_paint.poll(now)
 
