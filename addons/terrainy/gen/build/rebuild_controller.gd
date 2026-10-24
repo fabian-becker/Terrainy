@@ -140,6 +140,15 @@ func start(synchronous: bool = false) -> void:
 	# must not be reused (they are in that grid's sample coordinates).
 	var same_grid: bool = var_to_str(grid.signature()) == host.get_eval_grid_signature()
 	var eval_cache: Dictionary = host.get_eval_cache() if same_grid else {}
+	# Per-chunk region rects for the dirty detection (DESIGN.md §4.8). Hashing every chunk's region
+	# on the main thread cost 11-13 ms at 1024 cells and ~48 ms at 2048, inside the commit frame; the
+	# worker has the composed map anyway, so it hashes the regions while it is there. A plain
+	# `{key: Rect2i}` snapshot, copied here, is all the worker gets - it never sees a chunk object.
+	var hash_rects: Dictionary = {}
+	var chunk_manager = host.get_chunk_manager()
+	if chunk_manager != null:
+		for chunk in chunk_manager.chunks.values():
+			hash_rects[chunk.key] = chunk.sample_rect
 	var new_job := {
 		"plan": plan, "grid": grid, "base_height": host.base_height, "min_height": host.min_height,
 		"max_height": host.max_height, "previous_cache": eval_cache, "reuse_procedural": reuse_procedural,
@@ -148,7 +157,7 @@ func start(synchronous: bool = false) -> void:
 		"world": host.get_terrain_world_rect(), "palette": palette_capture, "paint_grid": host.paint_layer_grid,
 		"generator_y": gen_y, "compose_sig": compose_sig, "paint_sig": paint_sig,
 		"paint_epoch": host.get_paint_epoch(), "rebuild_id": rebuild_id,
-		"injected": {}, "gpu_blend": false,
+		"injected": {}, "gpu_blend": false, "hash_rects": hash_rects,
 	}
 	# GPU field evaluation runs on the main thread (local RenderingDevices are main-thread only)
 	# before the worker starts; its maps are injected into the composer's cache.
@@ -206,9 +215,25 @@ static func run_compose_job(job: Dictionary) -> void:
 		final_map = PaintStage.apply_region(procedural, grid, plan.paint_layers, grid.full_rect(), world)
 	else:
 		final_map = procedural.duplicate_map()
+	# The Image the chunk workers slice is built here, in the worker, instead of on the main
+	# thread when the result is committed (a full-grid float -> byte copy).
+	var final_image: Image = final_map.to_image()
 	var t2 := Time.get_ticks_msec()
 	var holes = compute_holes(plan.holes, final_map, grid, job["generator_y"], false)
 	var nav_holes = compute_holes(plan.holes, final_map, grid, job["generator_y"], true)
+	# Per-chunk region hashes for the commit's dirty detection (DESIGN.md §4.8). Same call the main
+	# thread used (`HMap.extract(rect).data`), so the values - and therefore the dirty decisions -
+	# are identical; only the thread changed. `[image_hash, holes_hash, rect]`: the rect travels
+	# with the hash so the commit can refuse a hash for a chunk whose rect has moved since.
+	var chunk_hashes := {}
+	var hash_rects: Dictionary = job.get("hash_rects", {})
+	for key in hash_rects:
+		var rect: Rect2i = hash_rects[key]
+		chunk_hashes[key] = [
+			hash(final_map.extract(rect).data),
+			hash(holes.extract(rect).data) if holes != null else 0,
+			rect,
+		]
 	var units: Array = []
 	for unit in plan.all_units():
 		if not unit.contributions.is_empty():
@@ -217,7 +242,8 @@ static func run_compose_job(job: Dictionary) -> void:
 	planes["units"] = units
 	var t3 := Time.get_ticks_msec()
 	job["result"] = {
-		"procedural": procedural, "final": final_map, "holes": holes, "nav_holes": nav_holes,
+		"procedural": procedural, "final": final_map, "final_image": final_image,
+		"holes": holes, "nav_holes": nav_holes, "chunk_hashes": chunk_hashes,
 		"planes": planes, "unit_weights": unit_weights, "cache": cache,
 		"timings": {"compose": t1 - t0, "paint": t2 - t1, "controls": t3 - t2},
 	}

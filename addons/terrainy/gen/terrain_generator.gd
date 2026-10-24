@@ -160,9 +160,25 @@ const MIN_CELL_SIZE := 0.05
 ## Apply brush stamps with the paint_apply compute kernel when a RenderingDevice exists.
 @export var use_gpu_paint: bool = true
 @export var use_multithreading: bool = true
-@export_range(1, 32, 1) var max_worker_threads: int = 4
+## Worker threads used for the per-chunk jobs (mesh arrays, collision soup, pixel slicing).
+## 0 = auto: [method effective_worker_threads] returns OS.get_processor_count() - 1, so the main
+## thread keeps a core. Raise it only if the terrain work is the only heavy thing in the frame.
+@export_range(0, 64, 1) var max_worker_threads: int = 0
 ## Main-thread milliseconds per frame for applying finished chunks (0 = no budget).
 @export_range(0, 100, 1) var chunk_apply_budget_ms: int = 8
+## Milliseconds this frame must still have left before the rebuild tail (material refresh + the
+## rebuild report) may run. The tail is one budget unit of its own: if the apply window is spent it
+## waits for the next frame, so it never rides on top of a full frame (DESIGN.md §7.4).
+@export_range(0, 100, 1) var tail_budget_ms: int = 2
+## Print slow-phase warnings with their GDScript backtrace. Formatting a warning in a debug build
+## costs a backtrace walk - measured 51.7 ms for a short message and ~115 ms for the rebuild report
+## on the reference machine - and the rebuild report is produced inside the frame that closes a
+## rebuild. Off in game builds (read `last_rebuild_report` instead), on in the editor.
+@export var debug_diagnostics: bool = false:
+	set(value):
+		debug_diagnostics = value
+		if _diagnostics:
+			_diagnostics.warn_enabled = value or Engine.is_editor_hint()
 @export var debug_logging: bool = false:
 	set(value):
 		debug_logging = value
@@ -221,6 +237,15 @@ const MIN_CELL_SIZE := 0.05
 	set(value):
 		collision_triangle_budget = maxi(value, 0)
 		_applier.collision_refresh_pending = true
+## Physics range in meters from the camera: only chunks inside it keep a collision shape. `0`
+## (default) keeps collision for every chunk, which is what 1.x did. A large terrain that only
+## needs collision around the player can set this to a few hundred meters and stop paying for
+## HeightMapShape3D updates on chunks the player can never reach.
+@export_range(0.0, 65536.0, 1.0, "or_greater", "suffix:m") var collision_range: float = 0.0:
+	set(value):
+		# The applier re-tests every chunk each frame while the range is on, so no extra dirty
+		# flag is needed: shapes appear/disappear on the next frame's step.
+		collision_range = maxf(value, 0.0)
 @export_flags_3d_physics var collision_layer: int = 1:
 	set(value):
 		collision_layer = value
@@ -352,6 +377,7 @@ func _init() -> void:
 func _ready() -> void:
 	_diagnostics = Diagnostics.new()
 	_diagnostics.set_report_enabled(debug_logging)
+	_diagnostics.warn_enabled = debug_diagnostics or Engine.is_editor_hint()
 	_material_builder = MaterialBuilder.new()
 	_rebuild.diagnostics = _diagnostics
 	_applier.diagnostics = _diagnostics
@@ -373,6 +399,11 @@ func _exit_tree() -> void:
 	if tree and tree.node_added.is_connected(_on_tree_node_changed):
 		tree.node_added.disconnect(_on_tree_node_changed)
 		tree.node_removed.disconnect(_on_tree_node_changed)
+	# Teardown order matters (DESIGN.md §14): stop the compose task, then make the applier inert and
+	# wait for its worker groups *before* anything can be freed underneath them. `remove_child()` +
+	# `free()` right after `is_rebuilding()` goes false used to segfault (exit 139, no GDScript
+	# error) because a group task was still writing into its holder and an async navigation bake
+	# could still call back into the host.
 	_rebuild.wait_for_task()
 	if _applier:
 		_applier.pipeline.wait_for_pending()
@@ -512,6 +543,11 @@ func _process(_delta: float) -> void:
 	if not _ready_done:
 		return
 	var now := Time.get_ticks_msec()
+	# A rebuild tail that did not fit in the frame that finished the chunks (material refresh +
+	# report) runs here, as the first unit of a fresh frame (DESIGN.md §7.4), instead of stacking on
+	# top of an exhausted apply window.
+	if _applier.tail_due():
+		_applier.drain_tail()
 	_rebuild.process(now)
 	_applier.process(now)
 	_paint.poll(now)
@@ -530,6 +566,13 @@ func reset_frame_stats() -> void:
 	_frame_work_last_us = 0
 	_frame_work_peak_us = 0
 
+## Worker threads the per-chunk jobs may use: [member max_worker_threads] when set, otherwise
+## OS.get_processor_count() - 1 (at least 1) so the main thread keeps a core.
+func effective_worker_threads() -> int:
+	if max_worker_threads > 0:
+		return max_worker_threads
+	return maxi(OS.get_processor_count() - 1, 1)
+
 func is_rebuilding_meshes() -> bool:
 	return _rebuild.task_id >= 0 or not _rebuild.job.is_empty() or _applier.has_mesh_work()
 
@@ -545,8 +588,12 @@ func rebuild_now() -> void:
 	_rebuild.rebuild_now()
 	_applier.drain()
 	if _applier.collision_refresh_pending:
-		_applier.collision_refresh_pending = false
+		# Unbudgeted: the synchronous path owes the caller a finished terrain, so the queued
+		# collision rebuild is drained in one go instead of a slice per frame.
 		_applier.refresh_all_collision()
+		while _applier.collision_refresh_pending:
+			_applier.step_collision_refresh(false)
+		_applier.apply_collision_results(false)
 		_applier.drain()
 	_applier.process_scatter_queue(true)
 
@@ -644,7 +691,13 @@ func _on_compose_reused(plan) -> void:
 
 ## Commit a finished compose job into the node's composition state, then hand stage 7 the list
 ## of chunks that changed.
+##
+## This is the one main-thread step of a rebuild, so everything expensive that can live in the
+## worker already did: the composed Image comes back ready-made (the worker converted it), and the
+## per-chunk pixel slicing moved into the chunk jobs. What is left is the dirty-chunk detection and
+## the (now reference-only) job preparation; both are recorded as `commit` / `chunk_jobs` phases.
 func apply_composition(job: Dictionary) -> void:
+	var commit_start := Time.get_ticks_usec()
 	var result: Dictionary = job["result"]
 	var timings: Dictionary = result["timings"]
 	for key in timings:
@@ -663,7 +716,11 @@ func apply_composition(job: Dictionary) -> void:
 	_plan = job["plan"]
 	_procedural = result["procedural"]
 	_final = result["final"]
-	_final_image = _final.to_image()
+	# The worker hands over the converted Image; the main thread used to build it from the float
+	# map, which is a multi-megabyte copy at 1024+ cells and part of the commit hitch.
+	_final_image = result.get("final_image")
+	if _final_image == null:
+		_final_image = _final.to_image()
 	_holes = result["holes"]
 	_nav_holes = result["nav_holes"]
 	_unit_weights = result["unit_weights"]
@@ -683,18 +740,23 @@ func apply_composition(job: Dictionary) -> void:
 	var layout_changed: bool = _chunks.update_grid(grid, chunk_size) or _rebuild.layout_dirty
 	_rebuild.layout_dirty = false
 	var dirty: Array = []
+	# Per-chunk hashes computed by the compose worker (DESIGN.md §4.8): `{key: [image, holes, rect]}`.
+	# A hash is only used when the rect it was taken over still matches the chunk, so a layout change
+	# that slipped in between compose and commit falls back to the inline pass instead of adopting a
+	# stale value.
+	var precomputed: Dictionary = result.get("chunk_hashes", {})
 	if layout_changed or old_image == null or old_image.get_size() != _final_image.get_size():
 		# Seed the hashes so the next compose can compare against this result.
 		for chunk in _chunks.chunks.values():
-			_update_chunk_hashes(chunk)
+			_apply_chunk_hash(chunk, precomputed)
 		_chunks.mark_all_dirty()
 		dirty = _chunks.chunks.values()
 		_applier.scatter_dirty_all = true
 	else:
 		for chunk in _chunks.chunks.values():
 			# One region hash per chunk instead of copying two image regions per chunk.
-			var image_hash: int = _chunk_image_hash(chunk)
-			var holes_hash: int = _chunk_holes_hash(chunk)
+			var image_hash: int = _precomputed_hash(precomputed, chunk, 0)
+			var holes_hash: int = _precomputed_hash(precomputed, chunk, 1)
 			if chunk.is_dirty or not chunk.hashes_valid \
 					or image_hash != chunk.image_hash or holes_hash != chunk.holes_hash:
 				_chunks.mark_dirty(chunk)
@@ -705,12 +767,27 @@ func apply_composition(job: Dictionary) -> void:
 	_material_dirty = true
 	_built_once = true
 	_applier.dispatch(dirty, _rebuild.rebuild_id)
+	_diagnostics.record("commit", (Time.get_ticks_usec() - commit_start) / 1000)
 
 func _chunk_image_hash(chunk) -> int:
 	return hash(_final.extract(chunk.sample_rect).data)
 
 func _chunk_holes_hash(chunk) -> int:
 	return hash(_holes.extract(chunk.sample_rect).data) if _holes != null else 0
+
+## One hash out of the compose worker's `{key: [image_hash, holes_hash, rect]}` table, or the inline
+## pass when the entry is missing or was taken over another rect (DESIGN.md §4.8).
+func _precomputed_hash(precomputed: Dictionary, chunk, index: int) -> int:
+	var entry = precomputed.get(chunk.key)
+	if entry is Array and entry.size() == 3 and entry[2] == chunk.sample_rect:
+		return int(entry[index])
+	return _chunk_image_hash(chunk) if index == 0 else _chunk_holes_hash(chunk)
+
+## Seed both hashes of [param chunk] - from the worker table when it is valid for this chunk.
+func _apply_chunk_hash(chunk, precomputed: Dictionary) -> void:
+	chunk.image_hash = _precomputed_hash(precomputed, chunk, 0)
+	chunk.holes_hash = _precomputed_hash(precomputed, chunk, 1)
+	chunk.hashes_valid = true
 
 func _update_chunk_hashes(chunk) -> void:
 	chunk.image_hash = _chunk_image_hash(chunk)
@@ -741,6 +818,20 @@ func _on_region_updated(aabb: AABB) -> void:
 var _min_max_cache: Vector2 = Vector2.ZERO
 var _min_max_revision: int = -1
 
+## Running height bounds accumulated from the per-chunk min/max the mesh worker already computed
+## (D4.7). They only ever widen inside a rebuild, so the AABB stays conservative; the only full-grid
+## scan left is the one in [method _refresh_min_max], reached before the first commit of a session
+## or on the synchronous path.
+func note_chunk_bounds(lo: float, hi: float) -> void:
+	if _final == null:
+		return
+	if _min_max_revision != _rebuild.rebuild_id:
+		# First commit of this rebuild: the previous bounds still describe the previous compose.
+		_min_max_revision = _rebuild.rebuild_id
+		_min_max_cache = Vector2(lo, hi)
+		return
+	_min_max_cache = Vector2(minf(_min_max_cache.x, lo), maxf(_min_max_cache.y, hi))
+
 func final_min() -> float:
 	_refresh_min_max()
 	return _min_max_cache.x
@@ -749,6 +840,9 @@ func final_max() -> float:
 	_refresh_min_max()
 	return _min_max_cache.y
 
+## Fallback scan: only reached when nothing has been committed for the current rebuild yet (first
+## build, tools, synchronous drains). The per-frame commit path never calls this - it uses the
+## bounds that come with each chunk result.
 func _refresh_min_max() -> void:
 	if _min_max_revision == _rebuild.rebuild_id or _final == null:
 		return
@@ -756,8 +850,10 @@ func _refresh_min_max() -> void:
 	_min_max_cache = _final.min_max()
 
 func _on_chunks_applied() -> void:
+	var start := Time.get_ticks_usec()
 	_update_material()
 	if _diagnostics:
+		_diagnostics.record("material", (Time.get_ticks_usec() - start) / 1000)
 		_last_rebuild_report = _diagnostics.end_rebuild()
 
 func current_material() -> Material:

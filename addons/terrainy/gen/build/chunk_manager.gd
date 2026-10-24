@@ -41,6 +41,11 @@ class Chunk:
 	var nav_revision: int = 0
 	var nav_baking: bool = false
 	var _collision_map_data: PackedFloat32Array
+	## CPU-side collision data of this chunk (heights for a heightfield chunk, triangle soup for a
+	## holed one). Kept so the collision shape can be dropped outside the physics range and
+	## restored when the chunk comes back in range, without another worker round trip.
+	var collision_heights: PackedFloat32Array
+	var collision_faces: PackedVector3Array
 	## Streaming residency (design D8.1). The node skeleton and all bookkeeping always stay; only the
 	## resources a state does not need are released, so a chunk that comes back is a rebuild from the
 	## current composition, never a recompose.

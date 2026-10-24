@@ -21,14 +21,17 @@ extends RefCounted
 const MeshGen = preload("res://addons/terrainy/gen/build/mesh_generator.gd")
 const CollisionBuilder = preload("res://addons/terrainy/gen/build/collision_builder.gd")
 const Diagnostics = preload("res://addons/terrainy/gen/build/diagnostics.gd")
+const ChunkJobs = preload("res://addons/terrainy/gen/build/chunk_jobs.gd")
+const NavigationBuilder = preload("res://addons/terrainy/gen/build/navigation_builder.gd")
 
 ## Wall time to wait for worker tasks when the caller cannot accept a blocking wait (teardown).
 const SHUTDOWN_WAIT_MS := 5000
 
 ## Run the jobs on the worker pool; when false everything happens on the calling thread.
 var use_threads: bool = true
-## Upper bound of parallel tasks per group.
-var worker_threads: int = 4
+## Upper bound of parallel tasks per group. `<= 0` means auto: [method effective_worker_threads]
+## derives it from the machine.
+var worker_threads: int = 0
 ## Optional diagnostics sink; receives the worker wall times and the job counts.
 var diagnostics: Diagnostics = null
 
@@ -44,15 +47,25 @@ var _collision_group_id: int = -1
 var _collision_holder: Dictionary = {}
 var _collision_queue: Array = []
 
+# Navigation group task (D4.11): the per-chunk navigation geometry is built on the worker and the
+# main thread only kicks off the (asynchronous) bake.
+var _nav_group_id: int = -1
+var _nav_holder: Dictionary = {}
+var _nav_queue: Array = []
+
 ## Group tasks abandoned by a superseding dispatch. Their holder is dropped, but the group id
 ## still has to be released with wait_for_group_task_completion() once it has finished, or the
 ## worker pool keeps the Group task allocated.
 var _abandoned_groups: Array[int] = []
 
 
-## Hands chunk mesh jobs to the worker pool. Each job is a dictionary with the keys the mesh
-## worker reads (`key`, `heightmap`, `hole_mask`, `has_holes`, `size`, `lod_level`, `collision`,
-## `collision_budget`); see [method run_mesh_job].
+## Hands chunk mesh jobs to the worker pool. A job carries the *unsliced* inputs - the composed
+## heightmap [Image] and the hole mask [Image] plus the chunk's sample [Rect2i] - so the slicing,
+## the LOD downsampling and the normal border extraction happen on the worker instead of in one
+## main-thread burst per rebuild. Keys: `key`, `rect`, `final_image`, `hole_map`, `grid_rect`,
+## `normal_border`, `step`, `size`, `lod_level`, `collision`, `collision_budget`, `revision`;
+## see [method run_mesh_job]. A pre-sliced job (`heightmap` instead of `final_image`/`rect`) is
+## still accepted for callers that already copied the region.
 ## Jobs left over from a previous dispatch are dropped, they describe a superseded heightmap.
 func dispatch_mesh_jobs(jobs: Array, rebuild_id: int) -> void:
 	cancel_mesh_jobs()
@@ -73,6 +86,28 @@ func dispatch_collision_jobs(jobs: Array) -> void:
 	_dispatch(jobs, run_collision_job, "Terrainy chunk collision", "_collision")
 
 
+## Hands navigation geometry jobs to the worker pool. Each job is a dictionary with the keys the
+## navigation worker reads (`key`, `revision`, `chunk`, `grid`, `final_map`, `nav_holes`,
+## `template`, `nav_budget`); see [method run_nav_job].
+##
+## The geometry build (grown extract, decimated face soup, `min_max`) is ~34 ms per chunk at the
+## reference scale, so it must not run on the main thread: a whole terrain's worth of it was one
+## multi-second frame and is the default-on freeze users hit above 512 cells.
+func dispatch_navigation_jobs(jobs: Array) -> void:
+	cancel_navigation_jobs()
+	if jobs.is_empty():
+		return
+	_dispatch(jobs, run_nav_job, "Terrainy chunk navigation", "_nav")
+
+
+## Number of worker threads the jobs may run on: [member worker_threads] when set, otherwise one
+## less than the machine's processor count (so the main thread always keeps a core), at least 1.
+func effective_worker_threads() -> int:
+	if worker_threads > 0:
+		return worker_threads
+	return maxi(OS.get_processor_count() - 1, 1)
+
+
 func _dispatch(jobs: Array, body: Callable, description: String, prefix: String) -> void:
 	var holder := {
 		"jobs": jobs,
@@ -88,7 +123,7 @@ func _dispatch(jobs: Array, body: Callable, description: String, prefix: String)
 		_publish(prefix, holder)
 		return
 
-	var tasks_needed := clampi(worker_threads, 1, jobs.size())
+	var tasks_needed := clampi(effective_worker_threads(), 1, jobs.size())
 	var group_id := WorkerThreadPool.add_group_task(
 		body.bind(holder), jobs.size(), tasks_needed, false, description
 	)
@@ -102,6 +137,9 @@ func _dispatch(jobs: Array, body: Callable, description: String, prefix: String)
 	if prefix == "_mesh":
 		_mesh_holder = holder
 		_mesh_group_id = group_id
+	elif prefix == "_nav":
+		_nav_holder = holder
+		_nav_group_id = group_id
 	else:
 		_collision_holder = holder
 		_collision_group_id = group_id
@@ -115,6 +153,10 @@ func _publish(prefix: String, holder: Dictionary) -> void:
 			diagnostics.record("chunk_workers", Time.get_ticks_msec() - _mesh_dispatch_ms)
 			diagnostics.count("chunks_generated", results.size())
 		_mesh_queue.append_array(results)
+	elif prefix == "_nav":
+		if diagnostics:
+			diagnostics.count("nav_jobs", results.size())
+		_nav_queue.append_array(results)
 	else:
 		_collision_queue.append_array(results)
 
@@ -136,6 +178,13 @@ func poll() -> void:
 		_collision_group_id = -1
 		_collision_holder = {}
 		_publish("_collision", finished)
+
+	if _nav_group_id >= 0 and WorkerThreadPool.is_group_task_completed(_nav_group_id):
+		WorkerThreadPool.wait_for_group_task_completion(_nav_group_id)
+		var finished := _nav_holder
+		_nav_group_id = -1
+		_nav_holder = {}
+		_publish("_nav", finished)
 
 
 ## Releases abandoned group tasks that have finished. Non-blocking; called from poll().
@@ -161,6 +210,30 @@ func pop_mesh_result() -> Dictionary:
 
 func pop_collision_result() -> Dictionary:
 	return _collision_queue.pop_front()
+
+
+func has_navigation_results() -> bool:
+	return not _nav_queue.is_empty()
+
+
+func pop_navigation_result() -> Dictionary:
+	return _nav_queue.pop_front()
+
+
+## True while navigation geometry is being built or its results still wait to be applied.
+func has_nav_work() -> bool:
+	return _nav_group_id >= 0 or not _nav_queue.is_empty()
+
+
+## Abandons an in-flight navigation task and drops its results. The results carry the chunk's
+## `nav_revision`, so a superseded one would be discarded on commit anyway; dropping them here only
+## saves the queue. Non-blocking for the same reason as the mesh jobs.
+func cancel_navigation_jobs() -> void:
+	if _nav_group_id >= 0:
+		_abandoned_groups.append(_nav_group_id)
+	_nav_group_id = -1
+	_nav_holder = {}
+	_nav_queue.clear()
 
 
 ## True while a group task is running or results are still waiting to be applied.
@@ -205,7 +278,7 @@ func cancel_collision_jobs() -> void:
 ## Blocking wait used on teardown. Returns false when the tasks did not finish in time.
 func wait_for_pending(timeout_ms: int = SHUTDOWN_WAIT_MS) -> bool:
 	var deadline := Time.get_ticks_msec() + timeout_ms
-	var groups: Array = [_mesh_group_id, _collision_group_id]
+	var groups: Array = [_mesh_group_id, _collision_group_id, _nav_group_id]
 	groups.append_array(_abandoned_groups)
 	for group_id in groups:
 		if group_id < 0:
@@ -219,6 +292,8 @@ func wait_for_pending(timeout_ms: int = SHUTDOWN_WAIT_MS) -> bool:
 	_mesh_holder = {}
 	_collision_group_id = -1
 	_collision_holder = {}
+	_nav_group_id = -1
+	_nav_holder = {}
 	_abandoned_groups.clear()
 	return true
 
@@ -245,50 +320,48 @@ func _collect(holder: Dictionary) -> Array:
 ## the physics server. Creating the [ArrayMesh] and the [ConcavePolygonShape3D] happens on the
 ## main thread when the result is applied: `ArrayMesh.create_trimesh_shape()` from a worker
 ## deadlocks the process and the renderer's RID table is not thread safe.
+##
+## Everything that copies pixels lives in [ChunkJobs.run] on purpose: slicing the composed
+## heightmap ([method Image.get_region]), the LOD downsampling, the one-sample normal border and the
+## chunk's height bounds all used to run on the main thread for every chunk of a rebuild, which is
+## the burst that made 1024-cell terrains hitch even though the mesh build itself was already
+## off-thread. This function only owns the holder publication.
 static func run_mesh_job(index: int, holder: Dictionary) -> void:
 	var jobs: Array = holder["jobs"]
 	if index < 0 or index >= jobs.size():
 		return
-	var job: Dictionary = jobs[index]
-	var heightmap: Image = job.get("heightmap")
-	if heightmap == null:
+	var result: Dictionary = ChunkJobs.run(jobs[index])
+	if result.is_empty():
 		return
+	var mutex: Mutex = holder["mutex"]
+	mutex.lock()
+	var results: Array = holder["results"]
+	results[index] = result
+	mutex.unlock()
 
-	# Terrainy 2: the render mesh may use an LOD-reduced copy; collision always uses the full
-	# resolution chunk heightmap (collision is maintained independent of render LOD).
-	var mesh_heightmap: Image = job.get("mesh_heightmap", heightmap)
-	var mesh := MeshGen.generate_surface_arrays(
-		mesh_heightmap, job["size"], job.get("mesh_hole_mask", job.get("hole_mask", null)), true,
-		job.get("normal_source"), job.get("normal_stride", 1),
-		job.get("normal_offset", Vector2i.ZERO)
+
+## Builds one chunk's navigation geometry (bake settings + source geometry data) on the worker and
+## publishes it. **Worker safe** for the same reasons as [method run_mesh_job]: it only reads the
+## job dictionary. [NavigationMesh] and [NavigationMeshSourceGeometryData3D] are documented
+## thread-safe; the bake itself is kicked off from the main thread by the applier.
+static func run_nav_job(index: int, holder: Dictionary) -> void:
+	var jobs: Array = holder["jobs"]
+	if index < 0 or index >= jobs.size():
+		return
+	var job: Dictionary = jobs[index]
+	var built: Dictionary = NavigationBuilder.make_job(
+		job["chunk"], job["grid"], job["final_map"], job.get("nav_holes"),
+		job["template"], int(job.get("nav_budget", 0))
 	)
-
-	# Hole chunks need a triangle mesh for collision (a HeightMapShape3D cannot express carved
-	# holes), so build that soup here while the heightmap is hot in cache, off the main thread.
-	var collision_faces := PackedVector3Array()
-	var has_holes: bool = job.get("has_holes", false)
-	if job.get("collision", false) and has_holes:
-		collision_faces = CollisionBuilder.build_faces(
-			heightmap,
-			job["size"],
-			job.get("hole_mask", null),
-			job.get("collision_budget", 0),
-			0,
-			mesh if mesh_heightmap == heightmap else []
-		)
-
 	var mutex: Mutex = holder["mutex"]
 	mutex.lock()
 	var results: Array = holder["results"]
 	results[index] = {
+		"kind": ChunkJobs.JobKind.NAVIGATION,
 		"key": job["key"],
 		"revision": job.get("revision", 0),
-		"arrays": mesh,
-		"collision_faces": collision_faces,
-		"heightmap": heightmap,
-		"hole_mask": job.get("hole_mask", null),
-		"has_holes": has_holes,
-		"lod_level": job["lod_level"]
+		"nav_mesh": built.get("mesh"),
+		"nav_geometry": built.get("geometry"),
 	}
 	mutex.unlock()
 

@@ -176,7 +176,11 @@ func test_budget_accountant_stops_between_units() -> void:
 	gen._applier._drain_queue(true)
 	var units: int = scheduler.units_taken()
 	t.check(units >= 1, "the budget still makes progress (%d units)" % units)
-	t.check(units <= 2, "one tiny-budget frame ran only %d of %d queued units" % [units, queued])
+	# A job assembly shares one snapshot per rebuild (design §4.4), so a unit costs tens of
+	# microseconds rather than milliseconds: more than two can legitimately fit into 0.05 ms. The
+	# invariant is that the drain *stops on the budget*, not that it runs exactly one unit.
+	t.check(units < queued, "one tiny-budget frame ran only %d of %d queued units" % [units, queued])
+	t.check(not scheduler.can_spend(), "the drain stopped because the budget was spent")
 	t.check(scheduler.has_work(), "the rest of the queue survives to the next frame")
 	# And the synchronous path drains it regardless of the budget.
 	gen._applier.drain()

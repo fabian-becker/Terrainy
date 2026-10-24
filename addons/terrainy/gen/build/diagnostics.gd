@@ -29,6 +29,9 @@ var _counters: Dictionary = {}
 var _rebuild_id: int = -1
 var _rebuild_start_ms: int = 0
 var _report_enabled: bool = false
+## Print slow-phase warnings (see [method warn]). The counters and [method end_rebuild]'s report
+## string are produced either way; only the `push_warning` (and its backtrace formatting) is gated.
+var warn_enabled: bool = true
 
 ## True when [param elapsed_ms] reached [param threshold_ms]. A negative threshold never
 ## warns, which is how callers silence a measurement they do not care about.
@@ -64,12 +67,20 @@ func counter(counter: String) -> int:
 
 ## Push `[Terrainy] <message>` when `elapsed_ms` is slow for `category`, and count it either way.
 ## Returns true when the warning was pushed, which is what the tests assert on.
+##
+## [member warn_enabled] gates only the *printing*: the counter and the return value are unaffected,
+## so tools and tests still see the same reports. Formatting a warning is not free - a debug build
+## also walks and formats the GDScript backtrace, measured at 51.7 ms for a short message and ~115 ms
+## for the rebuild report on the reference machine - and `end_rebuild()` runs it inside the frame
+## that closes a rebuild (DESIGN.md §7.4). Game builds therefore keep it off and read the report
+## string instead.
 func warn(category: String, message: String, elapsed_ms: int, threshold_ms: int = -1) -> bool:
 	var limit := threshold_ms if threshold_ms >= 0 else threshold_for(category)
 	if not is_slow(elapsed_ms, limit):
 		return false
 	count("slow_" + category)
-	push_warning("[Terrainy] %s" % message)
+	if warn_enabled:
+		push_warning("[Terrainy] %s" % message)
 	return true
 
 ## Default threshold of a category; unknown categories use the rebuild threshold.

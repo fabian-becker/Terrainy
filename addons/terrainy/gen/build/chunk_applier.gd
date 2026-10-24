@@ -12,12 +12,13 @@ extends RefCounted
 ##
 ##   properties: chunk_resolution, chunk_apply_budget_ms, use_multithreading, max_worker_threads,
 ##               collision_quality, collision_triangle_budget, collision_layer, collision_mask,
-##               navigation_enabled, navigation_mesh_template, navigation_triangle_budget,
-##               navigation_debounce_ms, cast_shadows, enable_lod, lod_distances, lod_auto,
-##               lod_pixel_error, lod_levels
+##               collision_range, navigation_enabled, navigation_mesh_template,
+##               navigation_triangle_budget, navigation_debounce_ms, cast_shadows, enable_lod,
+##               lod_distances, lod_auto, lod_pixel_error, lod_levels
 ##   methods:    get_grid(), get_final_map(), get_final_image(), get_hole_map(),
 ##               get_navigation_hole_map(), get_chunk_manager(), final_min(), final_max(),
-##               current_material(), find_camera(), on_chunks_applied()
+##               current_material(), find_camera(), on_chunks_applied(),
+##               effective_worker_threads()
 ##
 ## It emits:
 ##
@@ -26,6 +27,7 @@ extends RefCounted
 ##   all_applied                     no mesh work is pending; the host refreshes the material
 
 const ChunkPipeline = preload("res://addons/terrainy/gen/build/chunk_pipeline.gd")
+const ChunkJobs = preload("res://addons/terrainy/gen/build/chunk_jobs.gd")
 const CollisionBuilder = preload("res://addons/terrainy/gen/build/collision_builder.gd")
 const MeshGen = preload("res://addons/terrainy/gen/build/mesh_generator.gd")
 const NavigationBuilder = preload("res://addons/terrainy/gen/build/navigation_builder.gd")
@@ -46,6 +48,9 @@ var scheduler = null
 var lod = null
 var diagnostics = null
 var collision_refresh_pending: bool = false
+## Chunk keys still waiting for a collision rebuild after [method refresh_all_collision] queued
+## them; [method step_collision_refresh] drains a budgeted slice per frame (DESIGN.md §6.3).
+var _collision_refresh_queue: Array = []
 var scatter_dirty_all: bool = false
 var nav_due_msec: int = 0
 var nav_in_flight: int = 0
@@ -61,6 +66,31 @@ var _lod_camera: Vector3:
 	set(value):
 		if lod != null:
 			lod._camera_pos = value
+
+## Debug aid: when true, [member process] records the wall time of every step of the frame in
+## [member _step_ms], so a trace tool can say which step broke the budget. Off by default, costs
+## two clock reads per step when off.
+var trace_steps: bool = false
+var _step_ms: Dictionary = {}
+
+## Start of the current budgeted apply window (monotonic usec) and whether it was budgeted at all.
+## [method can_spend_tail] is answered against these, which is what lets the host push the
+## `all_applied` tail (material refresh + rebuild report) to the next frame when this one is spent
+## (DESIGN.md §7.4).
+var _budget_start_usec: int = 0
+var _budgeted_window: bool = false
+## Set by [method shutdown]: the host is being torn down, so nothing may touch it any more.
+var _detached: bool = false
+## Set when the `all_applied` tail could not fit in the applying frame; the host drains it on the
+## next frame (DESIGN.md §7.4).
+var _tail_deferred: bool = false
+## Rolling estimate of what one `all_applied` tail costs in milliseconds (material refresh +
+## rebuild report), used by [method can_spend_tail].
+var _tail_estimate_ms: float = 2.0
+
+## Step timings of the last [method process] call (empty unless [member trace_steps] is on).
+func last_step_ms() -> Dictionary:
+	return _step_ms
 
 func _init(p_host) -> void:
 	host = p_host
@@ -80,25 +110,52 @@ func process(now_msec: int) -> void:
 	var start_us := Time.get_ticks_usec()
 	scheduler.budget_ms = float(host.chunk_apply_budget_ms)
 	scheduler.begin_frame(now_msec)
+	var t0 := start_us
 	pipeline.poll()
+	if trace_steps:
+		_step_ms["poll"] = float(Time.get_ticks_usec() - t0) / 1000.0
+	var t := Time.get_ticks_usec()
 	if pipeline.has_mesh_results():
 		apply_mesh_results(true)
+	if trace_steps:
+		_step_ms["mesh_apply"] = float(Time.get_ticks_usec() - t) / 1000.0
+		t = Time.get_ticks_usec()
 	if pipeline.has_collision_results():
 		apply_collision_results(true)
 	if collision_refresh_pending and not has_mesh_work():
-		collision_refresh_pending = false
-		refresh_all_collision()
+		step_collision_refresh(true)
+	if trace_steps:
+		_step_ms["collision"] = float(Time.get_ticks_usec() - t) / 1000.0
+		t = Time.get_ticks_usec()
+	if host.collision_range > 0.0:
+		update_collision_range()
 	if not scatter_queue.is_empty() or scatter_dirty_all:
 		process_scatter_queue()
+	if trace_steps:
+		_step_ms["scatter"] = float(Time.get_ticks_usec() - t) / 1000.0
+		t = Time.get_ticks_usec()
 	# LOD, residency and the queue drain run last, on whatever budget the apply stages left.
 	if host.get_final_map() != null and (host.enable_lod or host.view_distance > 0.0):
 		lod_step()
+	if trace_steps:
+		_step_ms["lod"] = float(Time.get_ticks_usec() - t) / 1000.0
+		t = Time.get_ticks_usec()
 	# The queue must drain even when there is no camera (headless tools, bakes, the first frames of
 	# a scene before a viewport camera exists): a queued chunk that nobody dispatches keeps the
 	# terrain "rebuilding" forever.
 	_drain_queue(true)
+	if trace_steps:
+		_step_ms["queue"] = float(Time.get_ticks_usec() - t) / 1000.0
+		t = Time.get_ticks_usec()
 	if host.navigation_enabled and nav_due_msec > 0 and now_msec >= nav_due_msec and not host.is_rebuilding_meshes():
 		bake_navigation_step()
+	if trace_steps:
+		_step_ms["nav"] = float(Time.get_ticks_usec() - t) / 1000.0
+		t = Time.get_ticks_usec()
+	if host.navigation_enabled:
+		apply_navigation_results(true)
+	if trace_steps:
+		_step_ms["nav_commit"] = float(Time.get_ticks_usec() - t) / 1000.0
 	if scheduler.budget_ms > 0.0 and scheduler.spent_ms() > scheduler.budget_ms:
 		scheduler.note_overrun(true)
 	host.note_frame_work_us(Time.get_ticks_usec() - start_us)
@@ -114,6 +171,10 @@ func has_mesh_work() -> bool:
 ## True while navigation regions are waiting for (or running) a bake.
 func is_baking_navigation() -> bool:
 	return nav_in_flight > 0 or nav_due_msec > 0
+
+## True while navigation geometry is being built on the workers or waiting to be committed.
+func has_nav_work() -> bool:
+	return nav_in_flight > 0 or pipeline.has_nav_work()
 
 ## Block until every queued chunk mesh / collision result is built and applied, and until the
 ## scheduler queue is empty. This is the synchronous path (bakes, tests, `rebuild_now()`), so it
@@ -137,12 +198,54 @@ func drain() -> void:
 		if pipeline.has_pending_work():
 			OS.delay_usec(200)
 
+## Teardown: make the applier inert and block until the worker groups are done with their data.
+##
+## `remove_child()` + `free()` right after `is_rebuilding()` goes false used to segfault at 512
+## cells (exit 139, no GDScript error): a group task could still be writing into its holder, and an
+## async navigation bake could call back into the freed host. Cancelling first and waiting here is
+## the ordering the generator's `_exit_tree()` relies on (DESIGN.md §14).
+func shutdown(timeout_ms: int = 2000) -> void:
+	_detached = true
+	_tail_deferred = false
+	scatter_queue.clear()
+	scatter_dirty_all = false
+	if pipeline == null:
+		return
+	pipeline.cancel_mesh_jobs()
+	pipeline.cancel_collision_jobs()
+	pipeline.cancel_navigation_jobs()
+	pipeline.wait_for_pending(timeout_ms)
+	nav_in_flight = 0
+	nav_due_msec = 0
+	_detach_refs()
+
+## Drop the applier's references into the scheduler and the LOD controller. [ChunkScheduler] and
+## [LodController] hold the host node and are held by it, so the cycle has to be broken explicitly
+## or every generator leaks at exit.
+func _detach_refs() -> void:
+	if scheduler != null:
+		scheduler.clear()
+		scheduler.chunk_lookup = Callable()
+		scheduler = null
+	if lod != null:
+		lod.host = null
+		lod = null
+
+## True after [method shutdown]: the host is going away, so no callback may touch it.
+func is_detached() -> bool:
+	return _detached
+
 # --- Chunks ---------------------------------------------------------------------------------
 
 ## Queue mesh jobs for [param dirty]. Empty dirty still closes the stage so the host can finish.
 ##
 ## This only *queues*: dispatch itself is the scheduler's job (design D7.3), so a rebuild of 256
 ## chunks spreads over as many frames as the budget needs instead of stalling one.
+##
+## The jobs only carry references to the composed images plus the chunk's sample rect: the pixel
+## copies, the mask scan, the LOD downsampling and the normal border slice all happen on the
+## worker (see [method ChunkPipeline.run_mesh_job]). Preparing one copy per dirty chunk on the
+## main thread was a single-frame burst that grew with the terrain.
 func dispatch(dirty: Array, rebuild_id: int) -> void:
 	if dirty.is_empty():
 		all_applied.emit()
@@ -170,6 +273,10 @@ func _drain_queue(budgeted: bool) -> void:
 		# cancel it. Let it finish, then continue the queue on the next frame.
 		return
 	var jobs: Array = []
+	var snapshot: Dictionary = {}
+	var grid = host.get_grid()
+	var job_rebuild_id: int = _rebuild_id if _rebuild_id >= 0 else host.get_rebuild_id()
+	var start := Time.get_ticks_usec()
 	while scheduler.has_work():
 		if budgeted and not scheduler.can_spend():
 			break
@@ -180,16 +287,24 @@ func _drain_queue(budgeted: bool) -> void:
 			# Streamed out between queueing and dispatch. Dropping it loses nothing: the chunk is
 			# rebuilt from the current composition when it comes back.
 			continue
+		if snapshot.is_empty():
+			# One snapshot per batch, shared by every job in it (DESIGN.md §4.4). The images it
+			# holds stay read-only until the group task is collected (§4.6); workers only slice them.
+			snapshot = ChunkJobs.make_snapshot(host.get_final_image(), host.get_hole_map(),
+				grid.full_rect() if grid != null else Rect2i(), job_rebuild_id, collision_budget())
 		var unit_start := Time.get_ticks_usec()
-		jobs.append(chunk_job(chunk))
-		# The unit is the main-thread job assembly (slice + downsample), which is the expensive part
-		# the budget exists to bound (hazard H3); the worker side is not main-thread time.
+		jobs.append(ChunkJobs.build(snapshot, chunk, mesh_step(chunk)))
+		# The unit is the main-thread job assembly (snapshot slice + downsampling), which is the
+		# expensive part the budget exists to bound (hazard H3); the worker side is not main-thread
+		# time.
 		scheduler.spend(float(Time.get_ticks_usec() - unit_start) / 1000.0)
 	if jobs.is_empty():
 		return
 	pipeline.use_threads = host.use_multithreading
-	pipeline.worker_threads = host.max_worker_threads
-	pipeline.dispatch_mesh_jobs(jobs, _rebuild_id if _rebuild_id >= 0 else host.get_rebuild_id())
+	pipeline.worker_threads = _worker_threads()
+	if diagnostics:
+		diagnostics.record("chunk_jobs", (Time.get_ticks_usec() - start) / 1000)
+	pipeline.dispatch_mesh_jobs(jobs, job_rebuild_id)
 	if not pipeline.use_threads or jobs.size() <= 1:
 		# Inline build: the results are already here, so applying them cannot be deferred.
 		apply_mesh_results(false)
@@ -214,44 +329,21 @@ func lod_step() -> void:
 		chunk.edit_revision += 1
 		scheduler.enqueue(chunk, ChunkScheduler.Priority.NEAR)
 
+## Worker thread count: the host's resolved setting when it exposes one (it derives "auto" from
+## the processor count), else the generator's raw export.
+func _worker_threads() -> int:
+	if host.has_method("effective_worker_threads"):
+		return host.effective_worker_threads()
+	return int(host.max_worker_threads)
+
+## Kept for callers that build a single job by hand; [method dispatch] shares one snapshot across
+## every job of a rebuild instead.
 func chunk_job(chunk) -> Dictionary:
-	var r: Rect2i = chunk.sample_rect
-	var heightmap: Image = host.get_final_image().get_region(r)
-	var hole_image: Image = null
-	var has_holes := false
-	var holes = host.get_hole_map()
-	if holes != null:
-		var sub = holes.extract(r)
-		if sub.data.count(0.0) != sub.data.size():
-			has_holes = true
-			hole_image = sub.to_image()
-	var mesh_heightmap := heightmap
-	var mesh_holes := hole_image
-	var step := mesh_step(chunk)
-	if step > 1:
-		mesh_heightmap = CollisionBuilder.downsample_exact(heightmap, step)
-		if hole_image:
-			mesh_holes = CollisionBuilder.downsample_exact(hole_image, step)
-	# Normals are computed from the chunk grown by one sample, so the central difference at the
-	# chunk border reads the neighbour's samples: neighbouring chunks (and chunks at different LOD
-	# levels) then agree on the normal at their shared samples and the seam no longer shows as a
-	# shading line. Without this the mesh generator has to fall back to one-sided differences at
-	# every chunk edge.
-	var normal_border := 1
-	var normal_offset := Vector2i.ZERO
-	var normal_source: Image = null
 	var grid = host.get_grid()
-	if grid != null:
-		var grown: Rect2i = r.grow(normal_border).intersection(grid.full_rect())
-		normal_source = host.get_final_image().get_region(grown)
-		normal_offset = grown.position - r.position
-	return {
-		"key": chunk.key, "revision": chunk.edit_revision, "heightmap": heightmap,
-		"hole_mask": hole_image, "has_holes": has_holes, "mesh_heightmap": mesh_heightmap,
-		"mesh_hole_mask": mesh_holes, "size": chunk.world_bounds.size, "lod_level": chunk.lod_level,
-		"normal_source": normal_source, "normal_stride": step, "normal_offset": normal_offset,
-		"collision": true, "collision_budget": collision_budget(),
-	}
+	var snapshot := ChunkJobs.make_snapshot(host.get_final_image(), host.get_hole_map(),
+		grid.full_rect() if grid != null else chunk.sample_rect,
+		pipeline.mesh_rebuild_id(), collision_budget())
+	return ChunkJobs.build(snapshot, chunk, mesh_step(chunk))
 
 func mesh_step(chunk, lod_level: int = -1) -> int:
 	var cells: int = chunk.sample_rect.size.x - 1
@@ -273,19 +365,93 @@ func collision_budget() -> int:
 	return CollisionBuilder.budget_for_quality(host.collision_quality)
 
 func apply_mesh_results(budgeted: bool) -> void:
+	var start := Time.get_ticks_usec()
 	var applied := 0
+	var budget_usec: int = int(host.chunk_apply_budget_ms) * 1000
+	var deadline_usec: int = start + budget_usec if (budgeted and budget_usec > 0) else 0
+	_budget_start_usec = start
+	_budgeted_window = budgeted and budget_usec > 0
 	while pipeline.has_mesh_results():
+		# The check sits *before* each commit, not once per batch (DESIGN.md §7.4). N chunks that
+		# finished while the main thread was busy must not commit back to back: at 512 cells that
+		# produced a 208 ms frame (H14). The unit rule still applies - one commit may overrun, since
+		# the cost of a commit is only known after it ran - but never a whole burst.
+		if deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
+			if diagnostics:
+				diagnostics.count("apply_frames")
+			break
 		var t0 := Time.get_ticks_usec()
 		apply_chunk_result(pipeline.pop_mesh_result())
 		applied += 1
 		# The commit unit is charged like every other unit in the frame (design D7.1 rule 2).
 		scheduler.spend(float(Time.get_ticks_usec() - t0) / 1000.0)
-		if budgeted and not scheduler.can_spend():
-			diagnostics.count("apply_frames")
-			break
-	diagnostics.count("chunks_applied", applied)
+	if diagnostics:
+		diagnostics.count("chunks_applied", applied)
+		diagnostics.record("chunk_apply", (Time.get_ticks_usec() - start) / 1000)
 	if not pipeline.has_pending_work():
-		all_applied.emit()
+		# The `all_applied` tail (material refresh + rebuild report) is one budget unit of its own
+		# (DESIGN.md §7.4). If this frame's apply window is spent, it waits for the next frame: the
+		# terrain is visually complete either way, the signal is a notification.
+		if can_spend_tail(applied):
+			_tail_deferred = false
+			_emit_tail()
+		else:
+			_tail_deferred = true
+			if diagnostics:
+				diagnostics.count("tail_deferred")
+
+func _emit_tail() -> void:
+	var tail_start := Time.get_ticks_usec()
+	all_applied.emit()
+	var tail_ms := float(Time.get_ticks_usec() - tail_start) / 1000.0
+	# Self-tuning estimate of what the tail costs (material refresh + report) so [method
+	# can_spend_tail] asks for the real number instead of a fixed guess.
+	_tail_estimate_ms = lerpf(_tail_estimate_ms, tail_ms, 0.5)
+	if trace_steps:
+		_step_ms["tail"] = tail_ms
+
+## True when an `all_applied` tail was deferred and is still waiting to run.
+func tail_due() -> bool:
+	return _tail_deferred and not pipeline.has_pending_work()
+
+## Emit the deferred tail on a fresh frame. The host's frame step calls this; returns true when the
+## tail actually ran.
+func drain_tail() -> bool:
+	if not _tail_deferred or pipeline.has_pending_work():
+		return false
+	_tail_deferred = false
+	# A new frame: the tail is the first unit of it, so it is no longer measured against the
+	# previous apply window.
+	_budgeted_window = false
+	_emit_tail()
+	return true
+
+## True when the frame that just committed still has room for one more budget unit: the
+## `all_applied` tail (DESIGN.md §7.4). The host asks this before refreshing the material and
+## closing the rebuild, so the tail never rides on top of an exhausted apply window; an unbudgeted
+## window or a zero budget always allows it.
+##
+## [param applied] is the number of chunks this frame committed. A frame that committed anything
+## hands the tail to the next frame unconditionally: the tail is a unit of its own (the material
+## refresh costs ~9 ms at 1024 cells, more than an 8 ms budget), so it can never share a frame with
+## commits without breaking the budget by construction.
+func can_spend_tail(applied: int = 0) -> bool:
+	if not _budgeted_window:
+		return true
+	if applied > 0:
+		return false
+	var budget_usec: int = int(host.chunk_apply_budget_ms) * 1000
+	var spent_usec := Time.get_ticks_usec() - _budget_start_usec
+	var tail_ms: int = 2
+	if "tail_budget_ms" in host:
+		tail_ms = int(host.tail_budget_ms)
+	# The tail's own cost is measured, not assumed (it is the material refresh at this scale, a few
+	# milliseconds at 512 cells and ~9 ms at 1024 - DESIGN.md §7.4 calls it 0.2-0.4 ms because it
+	# measured the report only). Asking for room for the measured cost is what keeps the tail from
+	# riding on top of an exhausted apply window.
+	var needed_ms: float = maxf(float(tail_ms), _tail_estimate_ms)
+	var remaining_ms := float(budget_usec - spent_usec) / 1000.0
+	return remaining_ms >= needed_ms
 
 func apply_chunk_result(result: Dictionary) -> void:
 	var chunks = host.get_chunk_manager()
@@ -306,7 +472,8 @@ func apply_chunk_result(result: Dictionary) -> void:
 	chunk.has_holes = result.get("has_holes", false)
 	chunk.collision_revision += 1
 	chunks.mark_clean(chunk, result["revision"])
-	apply_collision(chunk, result.get("collision_faces", PackedVector3Array()))
+	apply_collision(chunk, result.get("collision_faces", PackedVector3Array()),
+		result.get("collision_heights", PackedFloat32Array()))
 	chunk.nav_dirty = true
 	if host.navigation_enabled:
 		nav_due_msec = Time.get_ticks_msec() + host.navigation_debounce_ms
@@ -316,8 +483,15 @@ func apply_chunk_result(result: Dictionary) -> void:
 		chunk.mesh_instance.material_override = material
 	var b: Rect2 = chunk.world_bounds
 	var gy: float = host.global_position.y
-	var aabb := AABB(Vector3(b.position.x, gy + host.final_min(), b.position.y),
-		Vector3(b.size.x, maxf(host.final_max() - host.final_min(), 0.001), b.size.y))
+	# The chunk's height bounds travel with the worker result (DESIGN.md §4.7). This used to call
+	# the generator's `final_min()`/`final_max()`, a full-grid GDScript scan measured at 58-66 ms on
+	# a 1024-cell terrain - paid inside the budgeted commit of the first chunk of every rebuild.
+	var lo: float = result.get("min_y", 0.0)
+	var hi: float = result.get("max_y", lo)
+	if host.has_method("note_chunk_bounds"):
+		host.note_chunk_bounds(lo, hi)
+	var aabb := AABB(Vector3(b.position.x, gy + lo, b.position.y),
+		Vector3(b.size.x, maxf(hi - lo, 0.001), b.size.y))
 	region_updated.emit(aabb)
 
 ## Seal the chunk's LOD boundaries (design D5.4): a wall down from every edge whose neighbour
@@ -343,24 +517,76 @@ func mesh_dims(chunk, step: int) -> Vector2i:
 		(chunk.sample_rect.size.x - 1) / s + 1,
 		(chunk.sample_rect.size.y - 1) / s + 1)
 
-## Release the scheduler's references on teardown: it is a RefCounted that holds the host node (and
-## is held by it), so the cycle has to be broken explicitly or every generator leaks at exit.
-func shutdown() -> void:
-	if scheduler != null:
-		scheduler.clear()
-		scheduler.chunk_lookup = Callable()
-		scheduler = null
-	if lod != null:
-		lod.host = null
-		lod = null
-
 # --- Collision ------------------------------------------------------------------------------
 
-func apply_collision(chunk, faces: PackedVector3Array) -> void:
+## True when [param chunk] is inside the physics range. `collision_range <= 0` keeps collision for
+## every chunk (the 0.7/1.x behaviour), so existing scenes see no change.
+func collision_in_range(chunk) -> bool:
+	var limit: float = host.collision_range
+	if limit <= 0.0:
+		return true
+	var reference: Vector3 = _collision_reference()
+	var b: Rect2 = chunk.world_bounds
+	var here := Vector2(reference.x, reference.z)
+	var nearest := Vector2(clampf(here.x, b.position.x, b.end.x), clampf(here.y, b.position.y, b.end.y))
+	return here.distance_to(nearest) <= limit
+
+## Point the physics range is measured from: the LOD camera (editor viewport or game camera), or
+## the generator itself when there is none (headless, tools, tests).
+func _collision_reference() -> Vector3:
+	var camera: Camera3D = host.find_camera()
+	if camera != null and camera.is_inside_tree():
+		return camera.global_position
+	return host.global_position
+
+## Add/remove collision shapes as chunks cross the physics range. Cheap when nothing changed: one
+## distance test per chunk, and a shape is only (re)built for the chunks that crossed.
+func update_collision_range() -> void:
+	if host.collision_range <= 0.0:
+		return
+	var chunks = host.get_chunk_manager()
+	if chunks == null:
+		return
+	var start := Time.get_ticks_usec()
+	var changed := 0
+	for chunk in chunks.chunks.values():
+		if chunk.heightmap == null:
+			continue
+		var wanted := collision_in_range(chunk)
+		var active: bool = chunk.collision_shape != null \
+			and chunk.collision_shape.shape != null and not chunk.collision_shape.disabled
+		if wanted == active:
+			continue
+		apply_collision(chunk, chunk.collision_faces, chunk.collision_heights)
+		changed += 1
+	if changed > 0 and diagnostics:
+		diagnostics.count("collision_range_flips", changed)
+		diagnostics.record("collision", (Time.get_ticks_usec() - start) / 1000)
+
+## Build the chunk's collision shape. [param heights] / [param faces] come from the worker for a
+## freshly built chunk; without them the CPU-side copy stored on the chunk is used, which is what
+## lets a chunk outside the physics range restore its shape without rebuilding anything.
+func apply_collision(chunk, faces: PackedVector3Array, heights: PackedFloat32Array = PackedFloat32Array()) -> void:
 	if chunk.heightmap == null:
 		return
 	chunk.static_body.collision_layer = host.collision_layer
 	chunk.static_body.collision_mask = host.collision_mask
+	if not heights.is_empty():
+		chunk.collision_heights = heights
+	if not faces.is_empty():
+		chunk.collision_faces = faces
+	if not chunk.has_holes and chunk.collision_heights.is_empty():
+		# Nothing handed over (collision-only refresh of a chunk built before the cache existed).
+		chunk.collision_heights = chunk.heightmap.get_data().to_float32_array()
+	if not collision_in_range(chunk):
+		# Out of the physics range: drop the shape (and the physics-side heightfield with it). The
+		# CPU data stays on the chunk, so re-entering the range is a plain re-assignment.
+		chunk.collision_shape.shape = null
+		chunk.collision_shape.disabled = true
+		chunk.height_shape = null
+		chunk.collision_trimesh = null
+		return
+	chunk.collision_shape.disabled = false
 	if not chunk.has_holes:
 		var shape: HeightMapShape3D = chunk.height_shape if chunk.height_shape else HeightMapShape3D.new()
 		chunk.height_shape = shape
@@ -368,40 +594,79 @@ func apply_collision(chunk, faces: PackedVector3Array) -> void:
 		var d: int = chunk.heightmap.get_height()
 		shape.map_width = w
 		shape.map_depth = d
-		shape.map_data = chunk.heightmap.get_data().to_float32_array()
+		shape.map_data = chunk.collision_heights
 		chunk.collision_shape.shape = shape
 		chunk.collision_shape.scale = Vector3(chunk.world_bounds.size.x / float(w - 1), 1.0, chunk.world_bounds.size.y / float(d - 1))
 		chunk.collision_trimesh = null
 		return
-	if faces.is_empty():
-		faces = CollisionBuilder.build_faces(chunk.heightmap, chunk.world_bounds.size, chunk.hole_mask, collision_budget(), 0)
+	if chunk.collision_faces.is_empty():
+		chunk.collision_faces = CollisionBuilder.build_faces(chunk.heightmap, chunk.world_bounds.size, chunk.hole_mask, collision_budget(), 0)
 	var trimesh: ConcavePolygonShape3D = chunk.collision_trimesh if chunk.collision_trimesh else ConcavePolygonShape3D.new()
 	chunk.collision_trimesh = trimesh
-	trimesh.set_faces(faces)
+	trimesh.set_faces(chunk.collision_faces)
 	chunk.collision_shape.shape = trimesh
 	chunk.collision_shape.scale = Vector3.ONE
 
 func refresh_all_collision() -> void:
+	# Queue every chunk instead of rebuilding them all now (DESIGN.md §6.3 / D7.1). A collision
+	# quality or layer change used to redo every shape in one frame: 114.9 ms at 2048 cells in the
+	# LOD flythrough. `step_collision_refresh()` spreads the same work over frames under the budget.
 	var chunks = host.get_chunk_manager()
 	if chunks == null:
 		return
-	var jobs: Array = []
+	_collision_refresh_queue.clear()
 	for chunk in chunks.chunks.values():
 		# Streamed-out chunks have no heightmap and no shape left: nothing to refresh.
-		if chunk.heightmap == null or not chunk.streamed_in:
+		if chunk.heightmap != null and chunk.streamed_in:
+			_collision_refresh_queue.append(chunk.key)
+	if _collision_refresh_queue.is_empty():
+		collision_refresh_pending = false
+
+## One budgeted slice of [method refresh_all_collision]: rebuilds shapes until the frame budget is
+## spent, then leaves the rest of the queue for the next frame. Hole-free chunks only re-assign
+## their cached heightfield; holed ones get their face soup rebuilt on the worker pool.
+func step_collision_refresh(budgeted: bool = true) -> void:
+	var chunks = host.get_chunk_manager()
+	if chunks == null:
+		_collision_refresh_queue.clear()
+		collision_refresh_pending = false
+		return
+	if _collision_refresh_queue.is_empty():
+		# Nothing queued yet: the pending flag means someone asked for a full refresh, so build the
+		# queue here (`refresh_all_collision` only queues, it does not build shapes).
+		refresh_all_collision()
+		if _collision_refresh_queue.is_empty():
+			return
+	var start := Time.get_ticks_usec()
+	var budget_usec: int = int(host.chunk_apply_budget_ms) * 1000
+	var jobs: Array = []
+	while not _collision_refresh_queue.is_empty():
+		var chunk = chunks.chunks.get(_collision_refresh_queue.pop_front())
+		if chunk == null or chunk.heightmap == null or not chunk.streamed_in:
 			continue
 		if not chunk.has_holes:
-			apply_collision(chunk, PackedVector3Array())
-			continue
-		jobs.append({"key": chunk.key, "heightmap": chunk.heightmap, "hole_mask": chunk.hole_mask,
-			"size": chunk.world_bounds.size, "budget": collision_budget(), "lod_level": 0,
-			"revision": chunk.collision_revision})
-	pipeline.use_threads = host.use_multithreading
-	pipeline.dispatch_collision_jobs(jobs)
+			# Reuses the cached heights; only the shape assignment is physics-side work.
+			apply_collision(chunk, PackedVector3Array(), chunk.collision_heights)
+		else:
+			jobs.append({"key": chunk.key, "heightmap": chunk.heightmap, "hole_mask": chunk.hole_mask,
+				"size": chunk.world_bounds.size, "budget": collision_budget(), "lod_level": 0,
+				"revision": chunk.collision_revision})
+		if budgeted and budget_usec > 0 and Time.get_ticks_usec() - start >= budget_usec:
+			break
+	if not jobs.is_empty():
+		pipeline.use_threads = host.use_multithreading
+		pipeline.dispatch_collision_jobs(jobs)
+	if diagnostics:
+		diagnostics.record("collision", (Time.get_ticks_usec() - start) / 1000)
+		diagnostics.count("collision_refresh_chunks", _collision_refresh_queue.size())
+	if _collision_refresh_queue.is_empty():
+		collision_refresh_pending = false
 
 func apply_collision_results(budgeted: bool) -> void:
 	var chunks = host.get_chunk_manager()
 	var applied := 0
+	var start := Time.get_ticks_usec()
+	var budget_usec: int = int(host.chunk_apply_budget_ms) * 1000
 	while pipeline.has_collision_results():
 		var t0 := Time.get_ticks_usec()
 		var result: Dictionary = pipeline.pop_collision_result()
@@ -411,7 +676,7 @@ func apply_collision_results(budgeted: bool) -> void:
 			apply_collision(chunk, result.get("collision_faces", PackedVector3Array()))
 		applied += 1
 		scheduler.spend(float(Time.get_ticks_usec() - t0) / 1000.0)
-		if budgeted and not scheduler.can_spend():
+		if budgeted and (not scheduler.can_spend() or (budget_usec > 0 and Time.get_ticks_usec() - start >= budget_usec)):
 			break
 
 func apply_collision_layers() -> void:
@@ -450,30 +715,86 @@ func clear_navigation() -> void:
 			chunk.nav_region = null
 	nav_due_msec = 0
 
+## Turn every dirty chunk into a navigation geometry job on the worker pool.
+##
+## The geometry build (grown extract, decimated face soup, `min_max` over the grown rect) is
+## ~34 ms per chunk at the reference scale, so the old inline loop was 2 153 ms in one frame for a
+## 1024-cell terrain - the default-on freeze users report above 512 cells. The main thread now only
+## allocates the job dictionaries; the bake is kicked off in [method apply_navigation_results].
 func bake_navigation_step(synchronous: bool = false) -> void:
 	nav_due_msec = 0
 	var final_map = host.get_final_map()
 	if final_map == null:
 		return
 	var chunks = host.get_chunk_manager()
+	if chunks == null:
+		return
+	var grid = host.get_grid()
+	var template: NavigationMesh = host.navigation_mesh_template
+	var jobs: Array = []
 	for chunk in chunks.chunks.values():
 		if not chunk.nav_dirty or chunk.nav_baking or chunk.heightmap == null:
 			continue
-		var job := NavigationBuilder.make_job(chunk, host.get_grid(), final_map, host.get_navigation_hole_map(),
-			host.navigation_mesh_template, host.navigation_triangle_budget)
+		# The chunk is claimed here so a second call cannot queue it twice; `nav_revision` is what
+		# lets a result that arrives after the chunk was invalidated be discarded (see below).
 		chunk.nav_dirty = false
-		if job.is_empty():
-			continue
 		chunk.nav_revision += 1
-		var mesh: NavigationMesh = job["mesh"]
-		if synchronous or not host.use_multithreading:
-			NavigationServer3D.bake_from_source_geometry_data(mesh, job["geometry"])
-			on_nav_baked(chunk.key, chunk.nav_revision, mesh)
-		else:
-			chunk.nav_baking = true
-			nav_in_flight += 1
-			NavigationServer3D.bake_from_source_geometry_data_async(mesh, job["geometry"],
-				_nav_trampoline.bind(weakref(self), chunk.key, chunk.nav_revision, mesh))
+		chunk.nav_baking = true
+		nav_in_flight += 1
+		jobs.append({
+			"kind": ChunkJobs.JobKind.NAVIGATION,
+			"key": chunk.key,
+			"revision": chunk.nav_revision,
+			"chunk": chunk,
+			"grid": grid,
+			"final_map": final_map,
+			"nav_holes": host.get_navigation_hole_map(),
+			"template": template,
+			"nav_budget": host.navigation_triangle_budget,
+		})
+	if jobs.is_empty():
+		return
+	if synchronous or not host.use_multithreading:
+		for job in jobs:
+			var built := NavigationBuilder.make_job(job["chunk"], grid, final_map, job["nav_holes"],
+				template, int(job["nav_budget"]))
+			_commit_nav_geometry(job["key"], job["revision"], built.get("mesh"), built.get("geometry"), true)
+		return
+	pipeline.use_threads = host.use_multithreading
+	pipeline.worker_threads = _worker_threads()
+	pipeline.dispatch_navigation_jobs(jobs)
+
+## Commit finished navigation geometry, at most one bake per budget window: the bake itself runs on
+## the navigation server's own threads, so the frame cost here is one call.
+func apply_navigation_results(budgeted: bool = true) -> void:
+	if not pipeline.has_navigation_results():
+		return
+	var start := Time.get_ticks_usec()
+	var budget_usec: int = int(host.chunk_apply_budget_ms) * 1000
+	while pipeline.has_navigation_results():
+		var result: Dictionary = pipeline.pop_navigation_result()
+		_commit_nav_geometry(result["key"], result["revision"],
+			result.get("nav_mesh"), result.get("nav_geometry"), false)
+		if budgeted and budget_usec > 0 and Time.get_ticks_usec() - start >= budget_usec:
+			break
+
+## Kick off the bake of one chunk's finished geometry, or drop it when the chunk was invalidated
+## while the job was in flight (its `nav_revision` moved on), which is the cancellation rule for the
+## navigation kind.
+func _commit_nav_geometry(key: Vector2i, revision: int, mesh, geometry, synchronous: bool) -> void:
+	var chunks = host.get_chunk_manager()
+	var chunk = chunks.chunks.get(key) if chunks else null
+	if chunk == null or mesh == null or geometry == null or revision != chunk.nav_revision:
+		if chunk != null:
+			chunk.nav_baking = false
+		nav_in_flight = maxi(nav_in_flight - 1, 0)
+		return
+	if synchronous or not host.use_multithreading:
+		NavigationServer3D.bake_from_source_geometry_data(mesh, geometry)
+		on_nav_baked(key, revision, mesh)
+		return
+	NavigationServer3D.bake_from_source_geometry_data_async(mesh, geometry,
+		_nav_trampoline.bind(weakref(self), key, revision, mesh))
 
 static func _nav_trampoline(ref: WeakRef, key: Vector2i, revision: int, mesh: NavigationMesh) -> void:
 	var applier = ref.get_ref()
@@ -481,10 +802,14 @@ static func _nav_trampoline(ref: WeakRef, key: Vector2i, revision: int, mesh: Na
 		applier.on_nav_baked(key, revision, mesh, true)
 
 func on_nav_baked(key: Vector2i, revision: int, mesh: NavigationMesh, was_async: bool = false) -> void:
-	var chunks = host.get_chunk_manager()
-	var chunk = chunks.chunks.get(key) if chunks else null
 	if was_async:
 		nav_in_flight = maxi(nav_in_flight - 1, 0)
+	# An async bake can land after the generator left the tree; touching the host then is a
+	# use-after-free (DESIGN.md §14).
+	if _detached:
+		return
+	var chunks = host.get_chunk_manager()
+	var chunk = chunks.chunks.get(key) if chunks else null
 	if chunk == null:
 		return
 	chunk.nav_baking = false
