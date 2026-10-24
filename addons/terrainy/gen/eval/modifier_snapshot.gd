@@ -53,6 +53,11 @@ var signature: String = ""
 func uses_target_height() -> bool:
 	return op == Op.FLATTEN
 
+## True when the op reads a sample's neighbours (the blur), so a pass clipped to a sub rectangle
+## would read its own edge instead of the map beyond it.
+func reads_neighbours() -> bool:
+	return op == Op.SMOOTH
+
 ## Apply in place. [param target_offset] / [param target_scale] rebase [member target_height]
 ## when [param dest] is not the terrain composite itself: a group composite and an additive
 ## field's own map hold deltas over the enclosing composite, so the world height the gizmo

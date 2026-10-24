@@ -206,8 +206,14 @@ func _apply_field(unit, target, group, datum, datum_mode: int = -1) -> void:
 			_apply_unit(child, group, group, datum, datum_mode)
 
 func _apply_group(unit, target, datum) -> void:
-	var gmap := HMap.new(grid.full_rect())
-	gmap.set_meta("coverage", HMap.new(grid.full_rect()))
+	# A group only needs the part of the grid its children can reach. Allocating two full-grid maps
+	# per group (composite + coverage, 134 MB at 4096 cells) was what a group whose children occupy
+	# 50 m cost; the composite is identical because everything outside the union stays 0.
+	var rect := _group_rect(unit)
+	if rect.size.x <= 0 or rect.size.y <= 0:
+		rect = grid.full_rect()
+	var gmap := HMap.new(rect)
+	gmap.set_meta("coverage", HMap.new(rect))
 	# Delta groups accumulate deltas over the enclosing absolute map; target-mode groups hold
 	# absolute levels in their own map, which becomes the datum for their children.
 	var delta := TerrainTypes.is_delta_blend(unit.blend_mode)
@@ -221,6 +227,37 @@ func _apply_group(unit, target, datum) -> void:
 	wmap.rect = coverage.rect
 	wmap.data = weights
 	unit_weights[unit.node_id] = wmap
+
+## Pixel rect a group composite needs: the union of its children's own rects, clipped to the grid.
+## Returns an empty rect (= "use the full grid") when any child is unbounded, because such a child
+## writes beyond any union and clipping it would change the composite.
+func _group_rect(unit) -> Rect2i:
+	var union := Rect2i()
+	var first := true
+	for child in unit.children:
+		var r := _unit_rect(child)
+		if r.size.x <= 0 or r.size.y <= 0:
+			return Rect2i()
+		union = r if first else union.merge(r)
+		first = false
+	if first:
+		return Rect2i()
+	return union.intersection(grid.full_rect())
+
+## The rect a unit writes into its group composite, or an empty rect when it has none.
+func _unit_rect(unit) -> Rect2i:
+	match unit.kind:
+		CompositionPlan.UnitKind.FIELD:
+			return unit.snap.pixel_rect(grid)
+		CompositionPlan.UnitKind.MODIFIER:
+			# A blur reads a margin from the whole map; clipped to the group rect it would clamp at
+			# that edge instead of reading the zeros outside it.
+			if not unit.snap.has_bounds or unit.snap.reads_neighbours():
+				return Rect2i()
+			return grid.rect_for_world(unit.snap.bounds, 1)
+		CompositionPlan.UnitKind.GROUP:
+			return _group_rect(unit)
+	return Rect2i()
 
 ## Optional GPU blend hook, injected by the generator. The evaluation layer must not preload the
 ## build layer -- that closes eval -> build -> eval -- so the caller supplies it instead.
