@@ -231,15 +231,31 @@ func _fill_snapshot(snap, context: Dictionary) -> void:
 		_:
 			snap.bounds = Raster.shape_bounds(world_transform(), snap.half)
 	var seed_base: int = context.get("noise_seed", 0)
+	# Flattened relief stack: parallel arrays instead of one Dictionary per layer, so the pixel loop
+	# reads a packed index instead of a String-keyed Dictionary entry (eight per layer per sample).
+	snap.relief_noise.clear()
+	snap.relief_cos.clear()
+	snap.relief_sin.clear()
+	snap.relief_sx.clear()
+	snap.relief_sy.clear()
+	snap.relief_weight.clear()
+	snap.relief_offset.clear()
+	snap.relief_follow.clear()
+	snap.relief_mul.clear()
 	for r in relief_layers:
 		if r == null or not r.enabled or r.noise == null:
 			continue
 		var noise := r.noise.duplicate() as FastNoiseLite
 		noise.seed = r.effective_seed(seed_base)
-		snap.relief.append({
-			"noise": noise, "weight": r.weight, "offset": r.offset, "blend": int(r.blend),
-			"scale": r.scale, "cos": cos(r.rotation), "sin": sin(r.rotation), "follow": r.follow_profile,
-		})
+		snap.relief_noise.append(noise)
+		snap.relief_cos.append(cos(r.rotation))
+		snap.relief_sin.append(sin(r.rotation))
+		snap.relief_sx.append(r.scale.x)
+		snap.relief_sy.append(r.scale.y)
+		snap.relief_weight.append(r.weight)
+		snap.relief_offset.append(r.offset)
+		snap.relief_follow.append(1 if r.follow_profile else 0)
+		snap.relief_mul.append(1 if int(r.blend) == 1 else 0)
 	snap.signature = _own_signature(snap, seed_base)
 
 func _own_signature(snap, seed_base: int) -> String:

@@ -111,7 +111,7 @@ func make_snapshot(context: Dictionary) -> RefCounted:
 		snap.domain_kind = TerrainTypes.DomainKind.GLOBAL
 		snap.bounds = grid.world_rect() if grid else Rect2()
 	snap.is_heightmap = true
-	snap.relief = []
+	snap.relief_noise.clear()
 	snap.profile_lut = CurveLut.bake(null, 1.0)
 	var image := get_source_image()
 	if image != null:

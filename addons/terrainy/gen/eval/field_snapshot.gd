@@ -41,8 +41,24 @@ var node_rel_y: float = 0.0
 var generator_y: float = 0.0
 var strength: float = 1.0
 
-## Relief: Array of Dictionary {noise, weight, offset, blend, scale, cos, sin, follow}
-var relief: Array = []
+## Relief stack, flattened out of the pixel loop by [method TerrainFieldNode.make_snapshot]:
+## parallel arrays, one entry per layer, instead of one Dictionary per layer. The inner loop reads
+## eight values per layer per sample; a Dictionary costs a String-keyed lookup for every one of them
+## (268 M lookups for a full-grid two-layer field), while a packed index is a single load.
+##
+## The doubles stay doubles: [PackedFloat64Array], not [PackedFloat32Array]. Rounding cos/sin/scale
+## to 32 bit here moves every composed height.
+var relief_noise: Array[FastNoiseLite] = []
+var relief_cos: PackedFloat64Array = PackedFloat64Array()
+var relief_sin: PackedFloat64Array = PackedFloat64Array()
+var relief_sx: PackedFloat64Array = PackedFloat64Array()
+var relief_sy: PackedFloat64Array = PackedFloat64Array()
+var relief_weight: PackedFloat64Array = PackedFloat64Array()
+var relief_offset: PackedFloat64Array = PackedFloat64Array()
+## 1 when the layer follows the profile, else 0.
+var relief_follow: PackedByteArray = PackedByteArray()
+## 1 when the layer multiplies, else 0.
+var relief_mul: PackedByteArray = PackedByteArray()
 
 # Heightmap source
 var hm_data: PackedFloat32Array = PackedFloat32Array()
@@ -57,7 +73,7 @@ var signature: String = ""
 
 ## True when the GPU field kernel reproduces this snapshot exactly (no noise, region domain).
 func is_gpu_capable() -> bool:
-	return not is_heightmap and domain_kind == TerrainTypes.DomainKind.REGION and relief.is_empty()
+	return not is_heightmap and domain_kind == TerrainTypes.DomainKind.REGION and relief_noise.is_empty()
 
 func pixel_rect(grid) -> Rect2i:
 	if domain_kind == TerrainTypes.DomainKind.GLOBAL:
@@ -85,9 +101,10 @@ func corridor_raster(grid, rect: Rect2i) -> Dictionary:
 ## Evaluate rows `[y0, y1)` of [param rect] into [param hd] / [param wd], which are laid out like
 ## the whole [param rect]. Bands write disjoint rows, so a caller can run several on the pool.
 ##
-## The per-sample math is written out instead of going through [CurveLut.sample] / [method
-## _apply_relief]: this is the innermost loop of the compose and a GDScript call plus a dictionary
-## read per source costs more than the noise lookup itself.
+## The per-sample math is written out instead of going through [CurveLut.sample]: this is the
+## innermost loop of the compose and a GDScript call per sample costs more than the noise lookup.
+## A region domain computes its normalized coordinate `e` in the same pass and keeps the local
+## point, so the relief stack never repeats the inverse transform.
 func evaluate_band(grid, rect: Rect2i, y0: int, y1: int, hd: PackedFloat32Array,
 		wd: PackedFloat32Array) -> void:
 	var w := rect.size.x
@@ -96,9 +113,13 @@ func evaluate_band(grid, rect: Rect2i, y0: int, y1: int, hd: PackedFloat32Array,
 		return
 	var band := Rect2i(rect.position + Vector2i(0, y0), Vector2i(w, rows))
 	var count := w * rows
+	# A region's `e` comes out of the pixel loop itself (it needs the same local point the relief
+	# does); global and corridor domains still need the buffer -- one constant, one raster.
+	var region_inline := domain_kind == TerrainTypes.DomainKind.REGION
 	var e_buf := PackedFloat32Array()
 	var elev_buf := PackedFloat32Array()
-	e_buf.resize(count)
+	if not region_inline:
+		e_buf.resize(count)
 	match domain_kind:
 		TerrainTypes.DomainKind.GLOBAL:
 			e_buf.fill(1.0)
@@ -111,7 +132,7 @@ func evaluate_band(grid, rect: Rect2i, y0: int, y1: int, hd: PackedFloat32Array,
 				var d := dist[i]
 				e_buf[i] = 1.0 - d * inv_hw if d < half_width else 0.0
 		_:
-			_region_coordinates(grid, band, e_buf)
+			pass
 
 	var base := profile_offset
 	match elevation_origin:
@@ -124,52 +145,58 @@ func evaluate_band(grid, rect: Rect2i, y0: int, y1: int, hd: PackedFloat32Array,
 			if domain_kind != TerrainTypes.DomainKind.CORRIDOR:
 				base += node_rel_y
 	var use_curve_elev := elevation_origin == TerrainTypes.ElevationOrigin.CURVE and domain_kind == TerrainTypes.DomainKind.CORRIDOR
-	var has_relief := not relief.is_empty()
-	# Relief parameters hoisted out of the pixel loop. Typed float Arrays, not PackedFloat32Arrays:
-	# the snapshot holds doubles and rounding them to 32 bit here would move every height.
-	var r_cos: Array[float] = []
-	var r_sin: Array[float] = []
-	var r_sx: Array[float] = []
-	var r_sy: Array[float] = []
-	var r_w: Array[float] = []
-	var r_off: Array[float] = []
-	var r_follow: Array[bool] = []
-	var r_mul: Array[bool] = []
-	var r_noise: Array = []
-	var src_count := relief.size()
-	if has_relief:
+	# Relief parameters come straight from the snapshot's parallel arrays; only the noise objects
+	# need a per-band copy (see below).
+	var src_count := relief_noise.size()
+	var r_cos := relief_cos
+	var r_sin := relief_sin
+	var r_sx := relief_sx
+	var r_sy := relief_sy
+	var r_w := relief_weight
+	var r_off := relief_offset
+	var r_follow := relief_follow
+	var r_mul := relief_mul
+	var r_noise: Array[FastNoiseLite] = []
+	if src_count > 0:
 		for k in src_count:
-			var src: Dictionary = relief[k]
-			var sc: Vector2 = src["scale"]
-			r_cos.append(src["cos"])
-			r_sin.append(src["sin"])
-			r_sx.append(sc.x)
-			r_sy.append(sc.y)
-			r_w.append(src["weight"])
-			r_off.append(src["offset"])
-			r_follow.append(bool(src["follow"]))
-			r_mul.append(int(src["blend"]) == 1)
 			# A private clone per band: FastNoiseLite guards its own state with a mutex, so sharing
 			# one instance across bands serializes every noise lookup and caps the whole pass.
-			r_noise.append(src["noise"].duplicate() if src["noise"] != null else null)
+			r_noise.append(relief_noise[k].duplicate() if relief_noise[k] != null else null)
 	var fo_n := falloff_lut.size()
 	var pr_n := profile_lut.size()
 	var fo_last := fo_n - 1
 	var pr_last := pr_n - 1
-	var oy := xform.origin.y
 	var hd_base := y0 * w
 	var row_gz: float = grid.origin.y + band.position.y * grid.cell
 	var cell: float = grid.cell
 	var ox: float = grid.origin.x
 	var bx: float = band.position.x
 	var xform_y := xform.origin.y
+	# Region-domain hoists. `e32` gives `e` exactly the float32 value the buffer used to hold --
+	# the falloff/profile lerps must see the same rounded number or every height moves.
+	var bmat := inv_xform.basis
+	var ovec := inv_xform.origin
+	var half_v := half
+	var shape_i := shape
+	var e32 := PackedFloat32Array()
+	if region_inline:
+		e32.resize(1)
 	for y in rows:
 		var gz := row_gz
 		var bpos := y * w
 		row_gz += cell
 		for x in w:
 			var bi := bpos + x
-			var e := e_buf[bi]
+			var gx: float = ox + (bx + x) * cell
+			var l := Vector3.ZERO
+			var e := 1.0
+			if region_inline:
+				l = bmat * Vector3(gx, xform_y, gz) + ovec
+				var d := Raster.shape_distance(shape_i, l.x, l.z, half_v)
+				e32[0] = 1.0 - d if d < 1.0 else 0.0
+				e = e32[0]
+			else:
+				e = e_buf[bi]
 			if e <= 0.0:
 				continue
 			# Inlined CurveLut.sample: same math, no per-sample GDScript call.
@@ -184,7 +211,6 @@ func evaluate_band(grid, rect: Rect2i, y0: int, y1: int, hd: PackedFloat32Array,
 			var weight := fw * strength
 			if weight <= 0.0:
 				continue
-			var gx: float = ox + (bx + x) * cell
 			var p := 1.0
 			if pr_n == 1:
 				p = profile_lut[0]
@@ -197,15 +223,16 @@ func evaluate_band(grid, rect: Rect2i, y0: int, y1: int, hd: PackedFloat32Array,
 				s = _heightmap_height(gx, gz)
 			else:
 				s = p * profile_height
-			if has_relief:
-				var l := inv_xform * Vector3(gx, xform_y, gz)
+			if src_count > 0:
+				if not region_inline:
+					l = inv_xform * Vector3(gx, xform_y, gz)
 				for k in src_count:
 					var u := (l.x * r_cos[k] - l.z * r_sin[k]) / r_sx[k]
 					var v := (l.x * r_sin[k] + l.z * r_cos[k]) / r_sy[k]
 					var n: float = r_noise[k].get_noise_2d(u, v) * r_w[k] + r_off[k]
-					if r_follow[k]:
+					if r_follow[k] == 1:
 						n *= p
-					if r_mul[k]:
+					if r_mul[k] == 1:
 						s *= 1.0 + n
 					else:
 						s += n
@@ -214,19 +241,6 @@ func evaluate_band(grid, rect: Rect2i, y0: int, y1: int, hd: PackedFloat32Array,
 				hv += elev_buf[bi]
 			hd[hd_base + bi] = hv
 			wd[hd_base + bi] = weight
-
-func _region_coordinates(grid, rect: Rect2i, e_buf: PackedFloat32Array) -> void:
-	var w := rect.size.x
-	var b := inv_xform.basis
-	var o := inv_xform.origin
-	var y0 := xform.origin.y
-	for y in rect.size.y:
-		var gz: float = grid.origin.y + (rect.position.y + y) * grid.cell
-		for x in w:
-			var gx: float = grid.origin.x + (rect.position.x + x) * grid.cell
-			var l := b * Vector3(gx, y0, gz) + o
-			var d := Raster.shape_distance(shape, l.x, l.z, half)
-			e_buf[y * w + x] = 1.0 - d if d < 1.0 else 0.0
 
 func _heightmap_height(gx: float, gz: float) -> float:
 	if hm_size.x <= 0:
