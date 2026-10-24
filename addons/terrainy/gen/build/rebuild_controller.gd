@@ -178,6 +178,8 @@ func start(synchronous: bool = false) -> void:
 		"generator_y": gen_y, "compose_sig": compose_sig, "paint_sig": paint_sig,
 		"paint_epoch": host.get_paint_epoch(), "rebuild_id": rebuild_id,
 		"injected": {}, "gpu_blend": false, "hash_rects": hash_rects,
+		# Pool budget the compose hands to its own passes (field evaluation, blends, modifiers).
+		"worker_threads": host.effective_worker_threads() if host.use_multithreading else 1,
 	}
 	# GPU field evaluation runs on the main thread (local RenderingDevices are main-thread only)
 	# before the worker starts; its maps are injected into the composer's cache.
@@ -221,6 +223,7 @@ static func run_compose_job(job: Dictionary) -> void:
 		var composer := Composer.new()
 		composer.previous_cache = job["previous_cache"]
 		composer.injected = job["injected"]
+		composer.worker_threads = int(job.get("worker_threads", 1))
 		if job.get("gpu_blend", false):
 			composer.gpu_blend_hook = GpuCompositor.blend
 		procedural = composer.compose(plan, grid, job["base_height"], job["min_height"], job["max_height"])

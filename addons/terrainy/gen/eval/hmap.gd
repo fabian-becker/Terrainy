@@ -6,6 +6,8 @@ extends RefCounted
 ## Field maps only cover the field's own bounds; group composites and the terrain composite
 ## cover the full grid. Coordinates passed to [method index_of] are absolute grid samples.
 
+const BandTask = preload("res://addons/terrainy/gen/eval/band_task.gd")
+
 var rect: Rect2i = Rect2i()
 var data: PackedFloat32Array = PackedFloat32Array()
 
@@ -106,7 +108,10 @@ func sample_bilinear(gx: float, gy: float) -> float:
 ## The blur reads a margin around the region from the whole map, so the result does not depend on
 ## how far the region reaches -- which is what lets paint strokes blur a sub-rect and still match
 ## a full-map smooth.
-func blurred(region: Rect2i, radius: float, cell: float, iterations: int) -> PackedFloat32Array:
+##
+## Both passes are banded when [param threads] > 1: the horizontal pass owns rows of [param buf],
+## the vertical pass owns columns, so neither band reads what another is still writing.
+func blurred(region: Rect2i, radius: float, cell: float, iterations: int, threads: int = 1) -> PackedFloat32Array:
 	var r := maxi(int(round(radius / maxf(cell, 0.0001))), 1)
 	var read := rect.intersection(region.grow(r * iterations))
 	var rw := read.size.x
@@ -123,24 +128,22 @@ func blurred(region: Rect2i, radius: float, cell: float, iterations: int) -> Pac
 	var tmp := PackedFloat32Array()
 	tmp.resize(rw * rh)
 	var inv := 1.0 / float(2 * r + 1)
+	var bands := BandTask.band_count(maxi(rw, rh), threads)
 	for _it in maxi(iterations, 1):
 		# Horizontal
-		for y in rh:
-			var row := y * rw
-			var acc := 0.0
-			for k in range(-r, r + 1):
-				acc += buf[row + clampi(k, 0, rw - 1)]
-			for x in rw:
-				tmp[row + x] = acc * inv
-				acc += buf[row + mini(x + r + 1, rw - 1)] - buf[row + maxi(x - r, 0)]
+		if bands <= 1:
+			_blur_rows(buf, tmp, rw, rh, r, inv, 0, rh)
+		else:
+			BandTask.run(threads, bands, func(i: int) -> void:
+				var rng := BandTask.band_range(rh, bands, i)
+				_blur_rows(buf, tmp, rw, rh, r, inv, rng.x, rng.y))
 		# Vertical
-		for x in rw:
-			var acc := 0.0
-			for k in range(-r, r + 1):
-				acc += tmp[clampi(k, 0, rh - 1) * rw + x]
-			for y in rh:
-				buf[y * rw + x] = acc * inv
-				acc += tmp[mini(y + r + 1, rh - 1) * rw + x] - tmp[maxi(y - r, 0) * rw + x]
+		if bands <= 1:
+			_blur_cols(tmp, buf, rw, rh, r, inv, 0, rw)
+		else:
+			BandTask.run(threads, bands, func(i: int) -> void:
+				var rng := BandTask.band_range(rw, bands, i)
+				_blur_cols(tmp, buf, rw, rh, r, inv, rng.x, rng.y))
 	var out := PackedFloat32Array()
 	out.resize(region.size.x * region.size.y)
 	for y in region.size.y:
@@ -148,6 +151,28 @@ func blurred(region: Rect2i, radius: float, cell: float, iterations: int) -> Pac
 		for x in region.size.x:
 			out[y * region.size.x + x] = buf[src + x]
 	return out
+
+func _blur_rows(buf: PackedFloat32Array, tmp: PackedFloat32Array, rw: int, rh: int, r: int,
+		inv: float, y0: int, y1: int) -> void:
+	for y in range(y0, mini(y1, rh)):
+		var row := y * rw
+		var acc := 0.0
+		for k in range(-r, r + 1):
+			acc += buf[row + clampi(k, 0, rw - 1)]
+		for x in rw:
+			tmp[row + x] = acc * inv
+			acc += buf[row + mini(x + r + 1, rw - 1)] - buf[row + maxi(x - r, 0)]
+
+func _blur_cols(tmp: PackedFloat32Array, buf: PackedFloat32Array, rw: int, rh: int, r: int,
+		inv: float, x0: int, x1: int) -> void:
+	for x in range(x0, mini(x1, rw)):
+		var acc := 0.0
+		for k in range(-r, r + 1):
+			acc += tmp[clampi(k, 0, rh - 1) * rw + x]
+		for y in rh:
+			buf[y * rw + x] = acc * inv
+			acc += tmp[mini(y + r + 1, rh - 1) * rw + x] - tmp[maxi(y - r, 0) * rw + x]
+
 
 func to_image() -> Image:
 	if is_empty():

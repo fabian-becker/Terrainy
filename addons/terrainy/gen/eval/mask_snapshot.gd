@@ -9,6 +9,10 @@ extends RefCounted
 
 const Raster = preload("res://addons/terrainy/gen/eval/raster.gd")
 const CurveLut = preload("res://addons/terrainy/gen/eval/curve_lut.gd")
+const BandTask = preload("res://addons/terrainy/gen/eval/band_task.gd")
+
+## Fewest rows a band may own before splitting the mask pass stops paying for itself.
+const BAND_MIN_ROWS: int = 8
 
 enum Kind { REGION, TEXTURE, PATH, SLOPE, ELEVATION, PAINT }
 
@@ -42,32 +46,50 @@ var paint_grid: int = 1
 
 var signature: String = ""
 
-## Mask weights over [param rect] (row-major, one value per grid sample).
-func weights(grid, rect: Rect2i, dest) -> PackedFloat32Array:
-	var w := rect.size.x
-	var h := rect.size.y
+## Mask weights over [param rect] (row-major, one value per grid sample). Bands write disjoint
+## rows of one buffer, so [param threads] > 1 spreads the pass over the pool.
+func weights(grid, rect: Rect2i, dest, threads: int = 1) -> PackedFloat32Array:
 	var out := PackedFloat32Array()
-	out.resize(w * h)
+	out.resize(rect.size.x * rect.size.y)
+	var count := BandTask.band_count(rect.size.y, threads, BAND_MIN_ROWS)
+	if count <= 1:
+		_weights_rows(grid, rect, dest, out, 0, rect.size.y)
+	else:
+		BandTask.run(threads, count, func(i: int) -> void:
+			var rng := BandTask.band_range(rect.size.y, count, i)
+			_weights_rows(grid, rect, dest, out, rng.x, rng.y))
+	return out
+
+## Fill rows `[y0, y1)` of [param out] (laid out like [param rect], row-major).
+func _weights_rows(grid, rect: Rect2i, dest, out: PackedFloat32Array, y0: int, y1: int) -> void:
+	var rows := y1 - y0
+	if rows <= 0:
+		return
+	var band := Rect2i(rect.position + Vector2i(0, y0), Vector2i(rect.size.x, rows))
+	var base := y0 * rect.size.x
 	match kind:
 		Kind.REGION:
-			_region(grid, rect, out)
+			_region(grid, band, out, base)
 		Kind.TEXTURE:
-			_texture(grid, rect, out)
+			_texture(grid, band, out, base)
 		Kind.PATH:
-			_path(grid, rect, out)
+			_path(grid, band, out, base)
 		Kind.SLOPE:
-			_slope(grid, rect, dest, out)
+			_slope(grid, band, dest, out, base)
 		Kind.ELEVATION:
-			_elevation(rect, dest, out)
+			_elevation(band, dest, out, base)
 		Kind.PAINT:
-			_paint(grid, rect, out)
+			_paint(grid, band, out, base)
 	if invert or strength != 1.0:
-		for i in out.size():
+		var i := base
+		var last := base + rect.size.x * rows
+		while i < last:
 			var v := out[i]
 			if invert:
 				v = 1.0 - v
 			out[i] = clampf(v * strength, 0.0, 1.0)
-	return out
+			i += 1
+
 
 ## Mask value at one world position (queries, scatter). [param height] is the generator-local
 ## terrain height and [param slope_deg] the slope there; only slope/elevation masks use them.
@@ -100,17 +122,19 @@ func _band(value: float) -> float:
 		return 1.0 if value >= range_min and value <= range_max else 0.0
 	return Raster.smoothstep01(range_min - s, range_min, value) * (1.0 - Raster.smoothstep01(range_max, range_max + s, value))
 
-func _region(grid, rect: Rect2i, out: PackedFloat32Array) -> void:
+func _region(grid, rect: Rect2i, out: PackedFloat32Array, base: int) -> void:
 	var w := rect.size.x
+	var has_lut := not falloff_lut.is_empty()
 	for y in rect.size.y:
 		var gz: float = grid.origin.y + (rect.position.y + y) * grid.cell
+		var row := base + y * w
 		for x in w:
 			var gx: float = grid.origin.x + (rect.position.x + x) * grid.cell
 			var l := inv_xform * Vector3(gx, 0.0, gz)
 			var d := Raster.shape_distance(shape, l.x, l.z, half)
 			if d >= 1.0:
 				continue
-			out[y * w + x] = CurveLut.sample(falloff_lut, 1.0 - d) if not falloff_lut.is_empty() else 1.0
+			out[row + x] = CurveLut.sample(falloff_lut, 1.0 - d) if has_lut else 1.0
 
 func _texture_at(lx: float, lz: float) -> float:
 	if texture_size.x <= 0 or absf(lx) > half.x or absf(lz) > half.y:
@@ -119,14 +143,15 @@ func _texture_at(lx: float, lz: float) -> float:
 	var v := (lz / half.y) * 0.5 + 0.5
 	return Raster.sample_buffer(texture_data, texture_size, u * (texture_size.x - 1), v * (texture_size.y - 1))
 
-func _texture(grid, rect: Rect2i, out: PackedFloat32Array) -> void:
+func _texture(grid, rect: Rect2i, out: PackedFloat32Array, base: int) -> void:
 	var w := rect.size.x
 	for y in rect.size.y:
 		var gz: float = grid.origin.y + (rect.position.y + y) * grid.cell
+		var row := base + y * w
 		for x in w:
 			var gx: float = grid.origin.x + (rect.position.x + x) * grid.cell
 			var l := inv_xform * Vector3(gx, 0.0, gz)
-			out[y * w + x] = _texture_at(l.x, l.z)
+			out[row + x] = _texture_at(l.x, l.z)
 
 func _path_weight(d: float) -> float:
 	if d >= half_width:
@@ -134,33 +159,39 @@ func _path_weight(d: float) -> float:
 	var e := 1.0 - d / maxf(half_width, 0.0001)
 	return CurveLut.sample(falloff_lut, e) if not falloff_lut.is_empty() else 1.0
 
-func _path(grid, rect: Rect2i, out: PackedFloat32Array) -> void:
+## Rasterizes its own rows: a polyline segment only visits the samples of its own bounding box,
+## so banding the rect does not change any distance value.
+func _path(grid, rect: Rect2i, out: PackedFloat32Array, base: int) -> void:
 	var raster := Raster.rasterize_polyline(polyline, half_width, grid, rect)
 	var dist: PackedFloat32Array = raster["dist"]
-	for i in out.size():
+	var w := rect.size.x
+	for i in w * rect.size.y:
 		if dist[i] < half_width:
-			out[i] = _path_weight(dist[i])
+			out[base + i] = _path_weight(dist[i])
 
-func _slope(grid, rect: Rect2i, dest, out: PackedFloat32Array) -> void:
+func _slope(grid, rect: Rect2i, dest, out: PackedFloat32Array, base: int) -> void:
 	if dest == null:
 		return
 	var w := rect.size.x
 	var inv: float = 1.0 / (2.0 * grid.cell)
 	for y in rect.size.y:
 		var gy := rect.position.y + y
+		var row := base + y * w
 		for x in w:
 			var gx := rect.position.x + x
 			var dx: float = (dest.get_at(gx + 1, gy, dest.get_at(gx, gy)) - dest.get_at(gx - 1, gy, dest.get_at(gx, gy))) * inv
 			var dz: float = (dest.get_at(gx, gy + 1, dest.get_at(gx, gy)) - dest.get_at(gx, gy - 1, dest.get_at(gx, gy))) * inv
-			out[y * w + x] = _band(rad_to_deg(atan(sqrt(dx * dx + dz * dz))))
+			out[row + x] = _band(rad_to_deg(atan(sqrt(dx * dx + dz * dz))))
 
-func _elevation(rect: Rect2i, dest, out: PackedFloat32Array) -> void:
+func _elevation(rect: Rect2i, dest, out: PackedFloat32Array, base: int) -> void:
 	if dest == null:
 		return
 	var w := rect.size.x
 	for y in rect.size.y:
+		var row := base + y * w
 		for x in w:
-			out[y * w + x] = _band(dest.get_at(rect.position.x + x, rect.position.y + y) + reference_y)
+			out[row + x] = _band(dest.get_at(rect.position.x + x, rect.position.y + y) + reference_y)
+
 
 func _paint_at(wx: float, wz: float) -> float:
 	if texture_size.x <= 0:
@@ -169,9 +200,10 @@ func _paint_at(wx: float, wz: float) -> float:
 	var py := (wz - paint_origin.y) / paint_size * paint_grid - 0.5
 	return Raster.sample_buffer(texture_data, texture_size, px, py)
 
-func _paint(grid, rect: Rect2i, out: PackedFloat32Array) -> void:
+func _paint(grid, rect: Rect2i, out: PackedFloat32Array, base: int) -> void:
 	var w := rect.size.x
 	for y in rect.size.y:
 		var gz: float = grid.origin.y + (rect.position.y + y) * grid.cell
+		var row := base + y * w
 		for x in w:
-			out[y * w + x] = _paint_at(grid.origin.x + (rect.position.x + x) * grid.cell, gz)
+			out[row + x] = _paint_at(grid.origin.x + (rect.position.x + x) * grid.cell, gz)
